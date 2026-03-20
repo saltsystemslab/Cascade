@@ -9,6 +9,7 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 
 # Bundle the core source files into a variable.
 set(PROJECT_SRC
+        Parser.cpp
         SA.cu
 )
 
@@ -50,6 +51,9 @@ target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 
 
 # Link appropriate libraries and targets.
+
+# Link to `zlib`, required to support `gzip` files.
+target_link_libraries(core PRIVATE ZLIB::ZLIB)
 
 # Link the executable to the core library.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
