@@ -60,6 +60,9 @@ public:
     // Returns a pointer to the current sequence in the buffer.
     const char* seq() const;
 
+    // Returns a pointer to the current mutable sequence in the buffer.
+    char* seq();
+
     // Returns the length of the current sequence in the buffer.
     size_t seq_len() const;
 
