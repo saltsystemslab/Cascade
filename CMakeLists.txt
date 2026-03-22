@@ -74,6 +74,10 @@ if(DEBUG_INFO)
     list(APPEND COMPILE_FLAGS ${DEBUG_FLAGS})
 endif()
 
+# list(APPEND COMPILE_FLAGS --extended-lambda)
+list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+
+
 # Add the required preprocessor definitions (`#define`s) to pass on.
 add_compile_definitions(PROJECT_VERSION=${CMAKE_PROJECT_VERSION})
 add_compile_definitions(CMAKE_EXPORT_COMPILE_COMMANDS)  # For better `clangd` scanning.
