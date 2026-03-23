@@ -76,6 +76,7 @@ endif()
 
 # list(APPEND COMPILE_FLAGS --extended-lambda)
 list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--extended-lambda>)
+list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 
 
 # Add the required preprocessor definitions (`#define`s) to pass on.
