@@ -203,5 +203,11 @@ void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
     std::cerr << "Time taken for parallel SA construction: " << duration(t_e - t_s) << " s.\n";
 }
 
+
+void Suffix_Array::build_SA(idx_t* const SA)
+{
+    (void)SA;
+}
+
 }
 
