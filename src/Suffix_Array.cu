@@ -206,7 +206,42 @@ void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
 
 void Suffix_Array::build_SA(idx_t* const SA)
 {
-    (void)SA;
+    constexpr std::size_t chunk_sz = 1024;
+
+    // Copy over text to device
+    const auto bytes = n * sizeof(char);
+    cudaMalloc(reinterpret_cast<void**>(&T_d), bytes);
+    cudaMemcpy(T_d, T_h, bytes, cudaMemcpyHostToDevice);
+
+    // Allocate space for suffix array
+    idx_t* SA_d;
+    cudaMalloc(reinterpret_cast<void**>(&SA_d), n * sizeof(idx_t));
+
+    // Sort the chunks.
+    sort_chunks(SA_d, chunk_sz);
+
+    // Copy back the chunked suffix array to host.
+    cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
+}
+
+
+__host__
+void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
+{
+    const auto chunk_count = (n + chunk_sz - 1) / chunk_sz;
+    for(std::size_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx)
+    {
+        const auto chunk_begin = chunk_idx * chunk_sz;
+        const auto chunk_len   = std::min(chunk_sz, n - chunk_begin);
+        auto* const SA = SA_d + chunk_begin;
+
+        // Populate the initial suffix array for this chunk.
+        thrust::sequence(thrust::device, SA, SA + chunk_len, chunk_begin);
+
+        // Sort each chunk successively.
+        thrust::sort(thrust::device, SA, SA + chunk_len, Suffix_Comparator(T_d, n));
+        cudaDeviceSynchronize();
+    }
 }
 
 }
