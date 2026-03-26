@@ -118,7 +118,6 @@ void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
 
     n++;    // Account for the terminator symbol '\0'.
 
-    constexpr std::size_t blk_sz = 256;
     const std::size_t grid_sz = (n + blk_sz - 1) / blk_sz;
 
     char* T_d;
@@ -204,19 +203,30 @@ void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
 }
 
 
-void Suffix_Array::build_SA(idx_t* const SA)
+__host__
+Suffix_Array::Suffix_Array(const char* const T, const idx_t n_):
+      T_h(T)
+    , n(n_ + 1)  // Account for the terminator symbol
 {
-    constexpr std::size_t chunk_sz = 1024;
-
     // Copy over text to device
     const auto bytes = n * sizeof(char);
     cudaMalloc(reinterpret_cast<void**>(&T_d), bytes);
     cudaMemcpy(T_d, T_h, bytes, cudaMemcpyHostToDevice);
 
     // Allocate space for suffix array
-    idx_t* SA_d;
     cudaMalloc(reinterpret_cast<void**>(&SA_d), n * sizeof(idx_t));
+}
 
+
+__host__
+Suffix_Array::~Suffix_Array()
+{
+    cudaFree(T_d), cudaFree(SA_d);
+}
+
+
+void Suffix_Array::build_SA(idx_t* const SA)
+{
     // Sort the chunks.
     sort_chunks(SA_d, chunk_sz);
 
