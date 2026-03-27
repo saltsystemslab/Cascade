@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <utility>
 #include <iostream>
+#include <cstdlib>
 
 
 namespace caps_sa
@@ -252,6 +253,41 @@ void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
         thrust::sort(thrust::device, SA, SA + chunk_len, Suffix_Comparator(T_d, n));
         cudaDeviceSynchronize();
     }
+}
+
+
+__global__
+void validate_kernel(const char* const T_d, const idx_t* const SA_d, bool* const is_sorted, const idx_t n)
+{
+    const auto idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if(idx < n)
+        if((idx & (chunk_sz - 1)) != 0)
+            is_sorted[idx] = Suffix_Comparator(T_d, n)(SA_d[idx - 1], SA_d[idx]);
+        else
+            is_sorted[idx] = true;
+}
+
+
+__host__
+bool Suffix_Array::validate()
+{
+    bool* is_sorted_d;
+    cudaMalloc(reinterpret_cast<void**>(&is_sorted_d), n * sizeof(bool));
+
+    validate_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(T_d, SA_d, is_sorted_d, n);
+    cudaDeviceSynchronize();
+
+    bool* is_sorted_h = reinterpret_cast<bool*>(std::malloc(n * sizeof(bool)));
+    cudaMemcpy(is_sorted_h, is_sorted_d, n * sizeof(bool), cudaMemcpyDeviceToHost);
+
+    bool r = true;
+    for(idx_t i = 0; i < n; ++i)
+        r = r && is_sorted_h[i];
+
+    cudaFree(is_sorted_d);
+    std::free(is_sorted_h);
+
+    return r;
 }
 
 }

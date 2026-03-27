@@ -44,6 +44,10 @@ struct Suffix_Comparator
 };
 
 
+// Validates the current output present at `SA_d` over the text `T_d` of size
+// `n` and populates the sorted-ness result of each index at `is_sorted`.
+__global__ void validate_kernel(const char* const T_d, const idx_t* const SA_d, bool* const is_sorted, const idx_t n);
+
 // The suffix array constructor class.
 class Suffix_Array
 {
@@ -71,6 +75,9 @@ public:
 
     // Constructs the suffix array of the provided text at `SA`.
     void build_SA(idx_t* SA);
+
+    // Validates the algorithm output.
+    bool validate();
 };
 
 }

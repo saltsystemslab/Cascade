@@ -21,12 +21,15 @@ int main(int argc, char** argv)
 
     std::size_t* const SA = reinterpret_cast<std::size_t*>(std::malloc((n + 1) * sizeof(std::size_t)));
     // caps_sa::build_SA_naive(T, n, SA);
-    caps_sa::build_SA_prefix_doubling(T, n, SA);
+    // caps_sa::build_SA_prefix_doubling(T, n, SA);
+    caps_sa::Suffix_Array Suf_Arr(T, n);
+    Suf_Arr.build_SA(SA);
 
     const std::size_t print_len = 10;
     std::cerr << "Lexicographically smallest suffix is at " << SA[0] << "; is " << std::string(T + SA[0], T + SA[0] + std::min((n + 1) - SA[0], print_len)) << "\n";
     std::cerr << "Lexicographically largest suffix is at  " << SA[n] << "; is " << std::string(T + SA[n], T + SA[n] + std::min((n + 1) - SA[n], print_len)) << "\n";
 
+    std::cerr << "Partial suffix arrays are " << (Suf_Arr.validate() ? "correct" : "wrong") << "\n";
     std::free(SA);
 
     return 0;
