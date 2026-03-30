@@ -6,10 +6,12 @@
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
+#include <curand_kernel.h>
 #include <cstddef>
 #include <utility>
 #include <iostream>
 #include <cstdlib>
+#include <cmath>
 
 
 namespace caps_sa
@@ -208,6 +210,7 @@ __host__
 Suffix_Array::Suffix_Array(const char* const T, const idx_t n_):
       T_h(T)
     , n(n_ + 1)  // Account for the terminator symbol
+    , chunk_count((n + chunk_sz - 1) / chunk_sz)
 {
     // Copy over text to device
     const auto bytes = n * sizeof(char);
@@ -231,6 +234,9 @@ void Suffix_Array::build_SA(idx_t* const SA)
     // Sort the chunks.
     sort_chunks(SA_d, chunk_sz);
 
+    // Get the sample suffix collection.
+    sample_suffixes();
+
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
 }
@@ -239,7 +245,6 @@ void Suffix_Array::build_SA(idx_t* const SA)
 __host__
 void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
 {
-    const auto chunk_count = (n + chunk_sz - 1) / chunk_sz;
     for(std::size_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx)
     {
         const auto chunk_begin = chunk_idx * chunk_sz;
@@ -252,6 +257,39 @@ void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
         // Sort each chunk successively.
         thrust::sort(thrust::device, SA, SA + chunk_len, Suffix_Comparator(T_d, n));
         cudaDeviceSynchronize();
+    }
+}
+
+
+__host__
+void Suffix_Array::sample_suffixes()
+{
+    constexpr auto c = 32;
+    const std::size_t k = ((c * std::log2(n) + 31 ) / 32) * 32;  // Sample per chunk: `c log n`
+
+    cudaMalloc(reinterpret_cast<void**>(&S_d), k * chunk_count * sizeof(idx_t));
+
+    sample_from_chunk_with_replacement<<<chunk_count, blk_sz>>>(SA_d, S_d, chunk_sz, k, 0);
+    cudaDeviceSynchronize();
+}
+
+
+__global__
+void sample_from_chunk_with_replacement(const idx_t* const input, idx_t* const output, const idx_t chunk_sz, const idx_t k, const uint64_t seed)
+{
+    const auto chunk_id =  blockIdx.x;
+    const auto thread_id = threadIdx.x;
+
+    const uint64_t off = blockIdx.x * blockDim.x + threadIdx.x; // Unique sequence-offset per thread for random number generation.
+    curandStatePhilox4_32_10_t rng;
+    curand_init(seed, off, 0, &rng);
+
+    auto* const chunk_ip = input + chunk_id * chunk_sz;
+    auto* const chunk_op = output + chunk_id * k;
+    for(uint32_t i = thread_id; i < k; i += blockDim.x)  // A thread samples the `[t_id, t_id + dim.x, ...]`'th samples. A chunk can have a larger size than the block.
+    {
+        const auto sample_idx = curand(&rng) & (chunk_sz - 1);
+        chunk_op[i] = chunk_ip[sample_idx];
     }
 }
 

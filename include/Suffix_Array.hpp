@@ -48,6 +48,11 @@ struct Suffix_Comparator
 // `n` and populates the sorted-ness result of each index at `is_sorted`.
 __global__ void validate_kernel(const char* const T_d, const idx_t* const SA_d, bool* const is_sorted, const idx_t n);
 
+// Samples `k` suffixes from the chunk of size `chunk_sz` appropriate for this
+// block from `input` and puts them successively into the appropriate position
+// for this block at `output`.
+__global__ void sample_from_chunk_with_replacement(const idx_t* input, idx_t* output, idx_t chunk_sz, idx_t k, uint64_t seed);
+
 // The suffix array constructor class.
 class Suffix_Array
 {
@@ -57,12 +62,19 @@ private:
     char* T_d;  // The input text in device.
     const idx_t n;  // Length of the input text.
 
+    const idx_t chunk_count;    // Number of chunks the suffix array and the text is broken into.
+
     idx_t* SA_d;    // The suffix array on device.
+
+    idx_t* S_d; // The collection of samples.
 
 
     // Sorts chunks of the suffixes of the text where each chunk has size
     // `chunk_sz`, into the flat array `S_d`.
     void sort_chunks(idx_t* SA_d, idx_t chunk_sz) const;
+
+    // Collects the random sample collection of suffixes.
+    void sample_suffixes();
 
 
 public:
