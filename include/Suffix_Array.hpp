@@ -63,10 +63,14 @@ private:
     const idx_t n;  // Length of the input text.
 
     const idx_t chunk_count;    // Number of chunks the suffix array and the text is broken into.
+    static constexpr idx_t c = 32;  // Over-sampling factor per chunk.
+    const idx_t k;  // Sample per chunk: `c log n`.
 
     idx_t* SA_d;    // The suffix array on device.
 
     idx_t* S_d; // The collection of samples.
+
+    idx_t* P_h; // The pivots.
 
 
     // Sorts chunks of the suffixes of the text where each chunk has size
@@ -75,6 +79,9 @@ private:
 
     // Collects the random sample collection of suffixes.
     void sample_suffixes();
+
+    // Selects the pivots that demarcate the final partitions of the suffix array.
+    void select_pivots();
 
 
 public:

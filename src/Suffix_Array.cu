@@ -211,6 +211,7 @@ Suffix_Array::Suffix_Array(const char* const T, const idx_t n_):
       T_h(T)
     , n(n_ + 1)  // Account for the terminator symbol
     , chunk_count((n + chunk_sz - 1) / chunk_sz)
+    , k(((c * std::log2(n) + 31 ) / 32) * 32)   // `c log n`
 {
     // Copy over text to device
     const auto bytes = n * sizeof(char);
@@ -229,6 +230,7 @@ Suffix_Array::~Suffix_Array()
 }
 
 
+__host__
 void Suffix_Array::build_SA(idx_t* const SA)
 {
     // Sort the chunks.
@@ -236,6 +238,9 @@ void Suffix_Array::build_SA(idx_t* const SA)
 
     // Get the sample suffix collection.
     sample_suffixes();
+
+    // Select the final pivots.
+    select_pivots();
 
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
@@ -271,6 +276,37 @@ void Suffix_Array::sample_suffixes()
 
     sample_from_chunk_with_replacement<<<chunk_count, blk_sz>>>(SA_d, S_d, chunk_sz, k, 0);
     cudaDeviceSynchronize();
+}
+
+
+__host__
+void Suffix_Array::select_pivots()
+{
+    // Sort the collected samples.
+    const auto sample_count = k * chunk_count;
+    thrust::sort(thrust::device, S_d, S_d + sample_count, Suffix_Comparator(T_d, n));
+    cudaDeviceSynchronize();
+
+    std::vector<idx_t> S_h(sample_count);
+    cudaMemcpy(S_h.data(), S_d, sample_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
+
+    const auto p = chunk_count; // Number of final partitions.
+    P_h = reinterpret_cast<idx_t*>(std::malloc((p - 1) * sizeof(idx_t)));
+
+    const auto gap = sample_count / p;  // Distance-gap between pivots.
+    const auto quant_err = sample_count % p;    // Numerator of the quantization error per partition.
+    idx_t unaccounted = 0;  // Running total number of samples not properly accounted for due to quantization of partition sizes.
+    std::size_t idx = 0;    // Index of the next pivot to choose from the samples.
+    for(idx_t i = 0; i < p - 1; ++i)
+    {
+        idx += gap;
+        unaccounted += quant_err;
+        if(unaccounted >= p)    // Fix the cumulative error.
+            idx++,
+            unaccounted %= p;
+
+        P_h[i] = S_h[idx - 1];
+    }
 }
 
 
