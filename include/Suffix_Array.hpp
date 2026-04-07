@@ -53,6 +53,11 @@ __global__ void validate_kernel(const char* const T_d, const idx_t* const SA_d, 
 // for this block at `output`.
 __global__ void sample_from_chunk_with_replacement(const idx_t* input, idx_t* output, idx_t chunk_sz, idx_t k, uint64_t seed);
 
+// Samples integers from the appropriate chunk of size `chunk_sz` for this block
+// such that `k` integers are sampled by the block, and puts them successively
+// into the appropriate position for this block at `output`.
+__global__ void sample_with_replacement(idx_t chunk_sz, idx_t k, idx_t* output, uint64_t seed);
+
 // The suffix array constructor class.
 class Suffix_Array
 {

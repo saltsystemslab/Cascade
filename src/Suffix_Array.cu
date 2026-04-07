@@ -233,14 +233,14 @@ Suffix_Array::~Suffix_Array()
 __host__
 void Suffix_Array::build_SA(idx_t* const SA)
 {
-    // Sort the chunks.
-    sort_chunks(SA_d, chunk_sz);
-
     // Get the sample suffix collection.
     sample_suffixes();
 
     // Select the final pivots.
     select_pivots();
+
+    // Sort the chunks.
+    sort_chunks(SA_d, chunk_sz);
 
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
@@ -269,12 +269,11 @@ void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
 __host__
 void Suffix_Array::sample_suffixes()
 {
-    constexpr auto c = 32;
     const std::size_t k = ((c * std::log2(n) + 31 ) / 32) * 32;  // Sample per chunk: `c log n`
 
     cudaMalloc(reinterpret_cast<void**>(&S_d), k * chunk_count * sizeof(idx_t));
 
-    sample_from_chunk_with_replacement<<<chunk_count, blk_sz>>>(SA_d, S_d, chunk_sz, k, 0);
+    sample_with_replacement<<<chunk_count, blk_sz>>>(chunk_sz, k, S_d, 0);
     cudaDeviceSynchronize();
 }
 
@@ -327,6 +326,24 @@ void sample_from_chunk_with_replacement(const idx_t* const input, idx_t* const o
         const auto sample_idx = curand(&rng) & (chunk_sz - 1);
         chunk_op[i] = chunk_ip[sample_idx];
     }
+}
+
+
+__global__
+void sample_with_replacement(const idx_t chunk_sz, const idx_t k, idx_t* const output, const uint64_t seed)
+{
+    const auto chunk_id = blockIdx.x;
+    const auto thread_id = threadIdx.x;
+
+    const uint64_t off = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;  // Unique sequence-offset per thread for random number generation.
+    curandStatePhilox4_32_10_t rng;
+    curand_init(seed, off, 0, &rng);
+
+    assert((chunk_sz & (chunk_sz - 1)) == 0);   // `chunk_sz` must be a power-of-two.
+    auto* const chunk_op = output + chunk_id * k;
+    const auto shift = chunk_id * chunk_sz;
+    for(uint32_t i = thread_id; i < k; i += blockDim.x) // A thread samples the `[t_id, t_id + dim.x, ...]`'th samples, since a chunk may have larger size than the thread-block.
+        chunk_op[i] = (curand(&rng) & (chunk_sz - 1)) + shift;
 }
 
 
