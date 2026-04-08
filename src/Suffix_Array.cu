@@ -29,7 +29,8 @@ Suffix_Array::Suffix_Array(const char* const T, const idx_t n_):
     cudaMemcpy(T_d, T_h, bytes, cudaMemcpyHostToDevice);
 
     // Allocate space for suffix array
-    cudaMalloc(reinterpret_cast<void**>(&SA_d), n * sizeof(idx_t));
+    const auto pivot_slots = chunk_count * (partition_count - 1);   // Number of extra slots in the suffix array for additional placement of pivots.
+    cudaMalloc(reinterpret_cast<void**>(&SA_d), (n + pivot_slots) * sizeof(idx_t));
 }
 
 
