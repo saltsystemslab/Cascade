@@ -20,6 +20,7 @@ Suffix_Array::Suffix_Array(const char* const T, const idx_t n_):
       T_h(T)
     , n(n_ + 1)  // Account for the terminator symbol
     , chunk_count((n + chunk_sz - 1) / chunk_sz)
+    , partition_count(chunk_count)  // TODO: number of final partitions is kept the same as the number of first-phase chunks now.
     , k(((c * std::log2(n) + 31 ) / 32) * 32)   // `c log n`
 {
     // Copy over text to device

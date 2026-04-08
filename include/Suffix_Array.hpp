@@ -67,7 +67,8 @@ private:
     char* T_d;  // The input text in device.
     const idx_t n;  // Length of the input text.
 
-    const idx_t chunk_count;    // Number of chunks the suffix array and the text is broken into.
+    const idx_t chunk_count;    // Number of chunks the suffix array and the text is broken into at the first phase.
+    const idx_t partition_count;    // Number of final disjoint partitions of the suffix array.
     static constexpr idx_t c = 32;  // Over-sampling factor per chunk.
     const idx_t k;  // Sample per chunk: `c log n`.
 
