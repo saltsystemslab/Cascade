@@ -13,6 +13,8 @@ namespace caps_sa
 
 typedef uint64_t idx_t;
 
+constexpr idx_t pivot_flag = uint64_t(1) << (sizeof(idx_t) * 8 - 1);
+
 constexpr std::size_t blk_sz = 256;
 
 constexpr std::size_t chunk_sz = 65536;
@@ -35,6 +37,7 @@ struct Suffix_Comparator
     __host__ __device__
     bool operator()(std::size_t x, std::size_t y)
     {
+        x &= ~pivot_flag, y &= ~pivot_flag; // Clear the pivot-marker, if any.
         for(; x < n && y < n; ++x, ++y)
             if(T_d[x] != T_d[y])
                 return T_d[x] < T_d[y];
@@ -77,6 +80,7 @@ private:
     idx_t* S_d; // The collection of samples.
 
     idx_t* P_h; // The pivots.
+    idx_t* P_d; // The pivots at device.
 
 
     // Sorts chunks of the suffixes of the text where each chunk has size
@@ -97,6 +101,11 @@ public:
     Suffix_Array(const char* const T, const idx_t n);
 
     ~Suffix_Array();
+
+    // Sorts chunks of the suffixes of the text with the final pivot set added
+    // to the chunk. The chunks are of size `chunk_sz` and the sorted chunks are
+    // placed into the flat device array `S_d`.
+    void sort_chunks_with_pivots(idx_t* SA_d, idx_t chunk_sz) const;
 
     // Constructs the suffix array of the provided text at `SA`.
     void build_SA(idx_t* SA);

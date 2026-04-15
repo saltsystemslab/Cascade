@@ -51,7 +51,8 @@ void Suffix_Array::build_SA(idx_t* const SA)
     select_pivots();
 
     // Sort the chunks.
-    sort_chunks(SA_d, chunk_sz);
+    // sort_chunks(SA_d, chunk_sz);
+    sort_chunks_with_pivots(SA_d, chunk_sz);
 
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
@@ -72,6 +73,42 @@ void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
 
         // Sort each chunk successively.
         thrust::sort(thrust::device, SA, SA + chunk_len, Suffix_Comparator(T_d, n));
+        cudaDeviceSynchronize();
+    }
+}
+
+
+__host__
+void Suffix_Array::sort_chunks_with_pivots(idx_t* const SA_d, const idx_t chunk_sz) const
+{
+    const auto pivot_count = partition_count - 1;
+
+    for(std::size_t chunk_id = 0; chunk_id < chunk_count; ++chunk_id)
+    {
+        const auto chunk_begin = chunk_id * chunk_sz;   // At which suffix this chunk starts at.
+        const auto chunk_end   = std::min(chunk_begin + chunk_sz, n);   // At which suffix this chunk ends at, exclusive.
+        auto* const SA_op = SA_d + chunk_id * (chunk_sz + pivot_count); // Output location for this chunk, when sorted.
+        const auto sz = chunk_end - chunk_begin;    // Size of this chunk.
+
+        // Populate the chunk.
+        thrust::tabulate(thrust::device, SA_op, SA_op + sz,
+            [chunk_begin] __device__ (const auto i)
+            {
+                return chunk_begin + i;
+            });
+        cudaDeviceSynchronize();
+
+
+        // Copy the pivots and mark them.
+        thrust::tabulate(thrust::device, SA_op + sz, SA_op + sz + pivot_count,
+            [P_d = this->P_d] __device__ (const idx_t i)
+            {
+                return P_d[i] | pivot_flag;
+            });
+        cudaDeviceSynchronize();
+
+
+        thrust::sort(thrust::device, SA_op, SA_op + sz + pivot_count, Suffix_Comparator(T_d, n));
         cudaDeviceSynchronize();
     }
 }
@@ -100,7 +137,7 @@ void Suffix_Array::select_pivots()
     std::vector<idx_t> S_h(sample_count);
     cudaMemcpy(S_h.data(), S_d, sample_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
 
-    const auto p = chunk_count; // Number of final partitions.
+    const auto p = partition_count; // Number of final partitions.
     P_h = reinterpret_cast<idx_t*>(std::malloc((p - 1) * sizeof(idx_t)));
 
     const auto gap = sample_count / p;  // Distance-gap between pivots.
@@ -117,6 +154,10 @@ void Suffix_Array::select_pivots()
 
         P_h[i] = S_h[idx - 1];
     }
+
+    // Store a copy of the pivots at device.
+    cudaMalloc(reinterpret_cast<void**>(&P_d), (p - 1) * sizeof(idx_t));
+    cudaMemcpy(P_d, P_h, (p - 1) * sizeof(idx_t), cudaMemcpyHostToDevice);
 }
 
 
