@@ -46,13 +46,20 @@ void Suffix_Array::build_SA(idx_t* const SA)
 {
     // Get the sample suffix collection.
     sample_suffixes();
+    std::cerr << "Sampled pivot candidates.\n";
 
     // Select the final pivots.
     select_pivots();
+    std::cerr << "Selected the pivot set.\n";
 
     // Sort the chunks.
     sort_chunks(SA_d, chunk_sz);
     // sort_chunks_with_pivots(SA_d, chunk_sz;
+    std::cerr << "Sorted the chunks.\n";
+
+    // Locate the pivots at the sorted chunks.
+    locate_pivots();
+    std::cerr << "Located the pivots at the chunks.\n";
 
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
@@ -196,6 +203,72 @@ void sample_with_replacement(const idx_t chunk_sz, const idx_t k, idx_t* const o
     const auto shift = chunk_id * chunk_sz;
     for(uint32_t i = thread_id; i < k; i += blockDim.x) // A thread samples the `[t_id, t_id + dim.x, ...]`'th samples, since a chunk may have larger size than the thread-block.
         chunk_op[i] = (curand(&rng) & (chunk_sz - 1)) + shift;
+}
+
+
+__device__ __forceinline__
+int sufcmp(const char* const T_d, const idx_t n, idx_t i, idx_t j)
+{
+    if(i == j)
+        return 0;
+
+    while(i < n && j < n && T_d[i] == T_d[j])
+        i++, j++;
+
+    // NB: Text must be terminated with some special character that is lexicographically the smallest.
+    return T_d[i] < T_d[j] ? -1 : (T_d[i] > T_d[j] ? 1 : 0);
+}
+
+
+__device__ __forceinline__
+idx_t upper_bound(const char* const T_d, const idx_t n, const idx_t* const S, const idx_t m, const idx_t p)
+{
+    idx_t low = 0, high = m;
+    while(low < high)
+    {
+        const auto mid = low + (high - low) / 2;
+        if(sufcmp(T_d, n, S[mid], p) <= 0)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+
+    return low;
+}
+
+
+__global__
+void locate_pivots_kernel(const char* const T_d, const idx_t n, const idx_t* const SA_d, idx_t chunk_sz, const idx_t* const P, const idx_t p_c, idx_t* const R)
+{
+    const auto chunk_count = (n + chunk_sz - 1) / chunk_sz;
+    const auto pivot_id = blockIdx.x * blockDim.x + threadIdx.x;   // Index of the pivot to locate.
+    const auto chunk_idx = blockIdx.y;  // Which sorted chunk to locate the pivot into.
+    if(pivot_id >= (p_c + 2) || chunk_idx >= chunk_count)
+        return;
+
+    const auto chunk = SA_d + chunk_idx * chunk_sz; // The sorted chunk.
+    const auto chunk_begin = chunk_idx * chunk_sz;
+    const auto chunk_end = std::min(n, chunk_begin + chunk_sz);
+    chunk_sz = chunk_end - chunk_begin;
+
+    const auto rank_idx = chunk_idx * (p_c + 2) + pivot_id;   // Output position for the search-result / rank.
+    if(pivot_id == 0)
+        R[rank_idx] = 0;
+    else if(pivot_id == p_c - 1)
+        R[rank_idx] = chunk_sz;
+    else
+        R[rank_idx] = upper_bound(T_d, n, chunk, chunk_sz, P[pivot_id - 1]);
+}
+
+
+void Suffix_Array::locate_pivots()
+{
+    const auto pivot_count = partition_count - 1;
+    const auto boundary_count = chunk_count * (pivot_count + 2);
+    cudaMalloc(reinterpret_cast<void**>(&P_rank), boundary_count * sizeof(idx_t));
+
+    dim3 grid((boundary_count + blk_sz - 1) / blk_sz, chunk_count); // 2D decomposition of the searches of all the pivots at all the chunks.
+    locate_pivots_kernel<<<grid, blk_sz>>>(T_d, n, SA_d, chunk_sz, P_d, partition_count - 1, P_rank);
 }
 
 

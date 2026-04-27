@@ -61,6 +61,25 @@ __global__ void sample_from_chunk_with_replacement(const idx_t* input, idx_t* ou
 // into the appropriate position for this block at `output`.
 __global__ void sample_with_replacement(idx_t chunk_sz, idx_t k, idx_t* output, uint64_t seed);
 
+// Compares the suffixes `i` and `j` of the text `T_d` of length `n` and returns
+// `-1 / 0 / +1` as per the `std::memcmp` return-policy.
+__device__ __forceinline__ int sufcmp(const char* T_d, idx_t n, idx_t i, idx_t j);
+
+// Returns the index `u_b` into the `m` sorted suffixes in `S` for the suffix
+// `p` such that all suffixes in `S` at positions `>= u_b` compare larger to the
+// suffix `p`. The suffixes are over the text `T_d` of length `n`.
+__device__ __forceinline__ idx_t upper_bound(const char* T_d, idx_t n, const idx_t* S, idx_t m, idx_t p);
+
+// Locates the `upper_bound` position of each of the `p_c` pivots from `P` at
+// the the sorted arrays of suffixes each of size `chunk_sz` flattened at `SA_d`
+// (only possible exception being the last chunk, which can be smaller), and
+// places those positions / ranks at `R` in a flattened manner. The suffixes are
+// over the text `T_d` of length `n`. Besides these pivots, two flanking pivots,
+// `0` and `|X_i|`, for each subarray `X_i` are also placed. The all-vs-all
+// search computations are structured as a 2D grid, the X-axis being the pivots
+// and the Y-axis being the sorted chunks.
+__global__ void locate_pivots_kernel(const char* T_d, idx_t n, const idx_t* SA_d, idx_t chunk_sz, const idx_t* P, idx_t p_c, idx_t* R);
+
 // The suffix array constructor class.
 class Suffix_Array
 {
@@ -82,6 +101,8 @@ private:
     idx_t* P_h; // The pivots.
     idx_t* P_d; // The pivots at device.
 
+    idx_t* P_rank;  // The ranks (upper-bound positions) of the pivots at each sorted subarray.
+
 
     // Sorts chunks of the suffixes of the text where each chunk has size
     // `chunk_sz`, into the flat array `S_d`.
@@ -92,6 +113,11 @@ private:
 
     // Selects the pivots that demarcate the final partitions of the suffix array.
     void select_pivots();
+
+    // Locates the upper-bound positions of the pivots in the sorted subarrays
+    // and flattens them in `P_rank`. Besides these pivots, two flanking pivots,
+    // `0` and `|X_i|`, for each subarray `X_i` are also placed.
+    void locate_pivots();
 
 
 public:
