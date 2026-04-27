@@ -51,8 +51,8 @@ void Suffix_Array::build_SA(idx_t* const SA)
     select_pivots();
 
     // Sort the chunks.
-    // sort_chunks(SA_d, chunk_sz);
-    sort_chunks_with_pivots(SA_d, chunk_sz);
+    sort_chunks(SA_d, chunk_sz);
+    // sort_chunks_with_pivots(SA_d, chunk_sz;
 
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
