@@ -273,6 +273,26 @@ void Suffix_Array::locate_pivots()
 
 
 __global__
+void get_subchunk_sizes_kernel(const idx_t* const R, idx_t* const W, idx_t* const last_row, const idx_t p)
+{
+    const idx_t thread_id = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    const auto subchunk_count = static_cast<uint64_t>(p) * p;
+    if(thread_id >= subchunk_count)
+        return;
+
+    const auto i = thread_id / p;   // Chunk index.
+    const auto j = thread_id % p;   // Subchunk index.
+    const auto R_i = R + i * (p + 1);   // Delimiter array for the `i`'th chunk.
+    const auto subchunk_sz = R_i[j + 1] - R_i[j];
+
+    W[j * p + i] = subchunk_sz; // Stored in column-major order.
+
+    if(i == p - 1)  // Save the last row of subchunk sizes.
+        last_row[j] = subchunk_sz;
+}
+
+
+__global__
 void validate_kernel(const char* const T_d, const idx_t* const SA_d, bool* const is_sorted, const idx_t n)
 {
     const auto idx = blockIdx.x * blockDim.x + threadIdx.x;
