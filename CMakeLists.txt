@@ -91,6 +91,9 @@ set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 # dynamic libraries, then without PIC the build may fail.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Add CUDA runtime flag.
+set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -rdc=true -lcudadevrt -lcudart")
+
 
 # Search and load the GPU-related libraries, tools, compilers etc.
 find_package(CUDAToolkit REQUIRED)
