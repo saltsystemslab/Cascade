@@ -3,13 +3,17 @@
 #include "Suffix_Array.hpp"
 #include "utility.hpp"
 
+#include <cstdint>
+#include <vector>
+#include <cstddef>
+#include <cstdlib>
+#include <cmath>
+
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>
 #include <thrust/sort.h>
 #include <curand_kernel.h>
-#include <cstddef>
-#include <cstdlib>
-#include <cmath>
+#include <cub/cub.cuh>
 
 
 namespace caps_sa
@@ -60,6 +64,10 @@ void Suffix_Array::build_SA(idx_t* const SA)
     // Locate the pivots at the sorted chunks.
     locate_pivots();
     std::cerr << "Located the pivots at the chunks.\n";
+
+    // Route the subchunks to their final partitions.
+    partition_sub_chunks();
+    std::cerr << "Placed the subchunks at their final partitions.\n";
 
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
@@ -289,6 +297,38 @@ void get_subchunk_sizes_kernel(const idx_t* const R, idx_t* const W, idx_t* cons
 
     if(i == p - 1)  // Save the last row of subchunk sizes.
         last_row[j] = subchunk_sz;
+}
+
+
+void Suffix_Array::partition_sub_chunks()
+{
+    const auto p = (n + chunk_sz - 1) / chunk_sz;   // Number of partitions.
+    idx_t* W;   // `W[i][j]` will denote where the `i`'th subchunk of the `j`'th partition will be stored at the final flattened array. It is also laid in column-major order.
+    idx_t* last_row;    // Last row of the hypothetical subchunk-sizes matrix.
+
+    // Get the subchunk sizes.
+
+    cudaMalloc(reinterpret_cast<void**>(&W), p * p * sizeof(idx_t));
+    cudaMalloc(reinterpret_cast<void**>(&last_row), p * sizeof(idx_t));
+    get_subchunk_sizes_kernel<<<(p * p + blk_sz - 1) / blk_sz, blk_sz>>>(P_rank, W, last_row, p);
+
+    // Transform individual subchunk sizes to intra-partition subchunk indices.
+
+    idx_t* segments = nullptr;
+    cudaMalloc(reinterpret_cast<void**>(&segments), (p + 1) * sizeof(idx_t));
+
+    std::vector<idx_t> segments_h(p + 1);
+    for(idx_t j = 0; j <= p; ++j)
+        segments_h[j] = j * p;
+
+    cudaMemcpy(segments, segments_h.data(), (p + 1) * sizeof(idx_t), cudaMemcpyHostToDevice);
+
+    std::size_t cub_tmp_bytes = 0;
+    cub::DeviceSegmentedScan::ExclusiveSum( nullptr, cub_tmp_bytes, // CUB internals for its scratch space
+                                            W, W,                   // Input and output iterators
+                                            p * p, p,               // Total items across all segments, and number of segments
+                                            segments, segments + 1  // Start and end indices of segments
+                                        );
 }
 
 

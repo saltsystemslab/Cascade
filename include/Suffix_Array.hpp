@@ -125,6 +125,10 @@ private:
     // `0` and `|X_i|`, for each subarray `X_i` are also placed.
     void locate_pivots();
 
+    // Collates the subchunks delineated by the pivot locations in each sorted
+    // chunk into appropriate partitions.
+    void partition_sub_chunks();
+
 
 public:
 
