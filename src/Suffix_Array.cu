@@ -281,7 +281,7 @@ void Suffix_Array::locate_pivots()
 
 
 __global__
-void get_subchunk_sizes_kernel(const idx_t* const R, idx_t* const W, idx_t* const last_row, const idx_t p)
+void get_subchunk_sizes_kernel(const idx_t* const R, idx_t* const W, const idx_t p)
 {
     const idx_t thread_id = static_cast<uint64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     const auto subchunk_count = static_cast<uint64_t>(p) * p;
@@ -294,9 +294,80 @@ void get_subchunk_sizes_kernel(const idx_t* const R, idx_t* const W, idx_t* cons
     const auto subchunk_sz = R_i[j + 1] - R_i[j];
 
     W[j * p + i] = subchunk_sz; // Stored in column-major order.
+}
 
-    if(i == p - 1)  // Save the last row of subchunk sizes.
-        last_row[j] = subchunk_sz;
+
+__global__
+void get_partition_sizes_and_subchunk_indices_kernel(idx_t* const W, idx_t* const part_sz, const idx_t p)
+{
+    const auto j = blockIdx.x;  // Partition ID that this block will process.
+    const auto thread_count = blockDim.x;
+
+    extern __shared__ idx_t shared_mem[];   // Shared memory layout: local sum-sizes computed by the threads, followed by the column `W[][j]`.
+    idx_t* local_sum = shared_mem;  // Local sum-sizes computed by the threads.
+    idx_t* subchunk_sz = shared_mem + thread_count; // The subchunk sizes, i.e. the column `W[][j]`.
+
+    const auto W_j_col = W + j * p; // The column `W[][j]`.
+
+
+    // Load the `j`'th subchunk sizes column into shared memory.
+    for(idx_t i = threadIdx.x; i < p; i += thread_count)
+        subchunk_sz[i] = W_j_col[i];
+
+    __syncthreads();
+
+
+    // Local scan per thread to transform the subchunk sizes to thread-local exclusive scans.
+
+    const auto stride = (p + thread_count - 1) / thread_count;  // Each thread processes `stride` consecutive sizes.
+    const auto beg = threadIdx.x * stride;  // Starting offset for this thread.
+    const auto end = std::min(beg + stride, p); // Ending (exclusive) offset for this thread.
+
+    idx_t sum_sz = 0;
+    for(idx_t i = beg; i < end; ++i)
+    {
+        const auto sz = subchunk_sz[i];
+        subchunk_sz[i] = sum_sz;
+        sum_sz += sz;
+    }
+
+    local_sum[threadIdx.x] = sum_sz;
+
+    __syncthreads();
+
+
+    // Kogge-Stone scan of local inclusive sum-sizes per thread to get global inclusive prefix-sum of those per-thread sums.
+
+    for(idx_t s = 1; s < thread_count; s *= 2)
+    {
+        idx_t addend = 0;
+        if(threadIdx.x >= s)
+            addend = local_sum[threadIdx.x - s];
+
+        __syncthreads();
+
+        local_sum[threadIdx.x] += addend;
+        __syncthreads();
+    }
+
+    // The size of the `j`'th partition is the last entry in the inclusive scan.
+    if(threadIdx.x == thread_count - 1)
+        part_sz[j] = local_sum[thread_count - 1];
+
+
+    // Transform thread-local subchunk size exclusive scans to column-wide exclusive scan.
+
+    const idx_t addend = (threadIdx.x > 0 ? local_sum[threadIdx.x - 1] : 0);
+    for(idx_t idx = beg; idx < end; ++idx)
+        subchunk_sz[idx] += addend;
+
+    __syncthreads();
+
+    // Copy back the column-wide subchunk size exclusive scan from shared memory to global.
+    for(idx_t idx = threadIdx.x; idx < p; idx += thread_count)
+        W_j_col[idx] = subchunk_sz[idx];
+
+    __syncthreads();
 }
 
 
@@ -304,31 +375,22 @@ void Suffix_Array::partition_sub_chunks()
 {
     const auto p = (n + chunk_sz - 1) / chunk_sz;   // Number of partitions.
     idx_t* W;   // `W[i][j]` will denote where the `i`'th subchunk of the `j`'th partition will be stored at the final flattened array. It is also laid in column-major order.
-    idx_t* last_row;    // Last row of the hypothetical subchunk-sizes matrix.
+    idx_t* part_sz; // Partition-sizes.
 
-    // Get the subchunk sizes.
+    // Get the  individual subchunk sizes.
+    {
+        cudaMalloc(reinterpret_cast<void**>(&W), p * p * sizeof(idx_t));
+        get_subchunk_sizes_kernel<<<(p * p + blk_sz - 1) / blk_sz, blk_sz>>>(P_rank, W, p);
+    }
 
-    cudaMalloc(reinterpret_cast<void**>(&W), p * p * sizeof(idx_t));
-    cudaMalloc(reinterpret_cast<void**>(&last_row), p * sizeof(idx_t));
-    get_subchunk_sizes_kernel<<<(p * p + blk_sz - 1) / blk_sz, blk_sz>>>(P_rank, W, last_row, p);
+    // Compute the partition sizes and transform the individual subchunk sizes to intra-partition subchunk indices.
+    {
+        cudaMalloc(reinterpret_cast<void**>(&part_sz), p * sizeof(idx_t));
 
-    // Transform individual subchunk sizes to intra-partition subchunk indices.
-
-    idx_t* segments = nullptr;
-    cudaMalloc(reinterpret_cast<void**>(&segments), (p + 1) * sizeof(idx_t));
-
-    std::vector<idx_t> segments_h(p + 1);
-    for(idx_t j = 0; j <= p; ++j)
-        segments_h[j] = j * p;
-
-    cudaMemcpy(segments, segments_h.data(), (p + 1) * sizeof(idx_t), cudaMemcpyHostToDevice);
-
-    std::size_t cub_tmp_bytes = 0;
-    cub::DeviceSegmentedScan::ExclusiveSum( nullptr, cub_tmp_bytes, // CUB internals for its scratch space
-                                            W, W,                   // Input and output iterators
-                                            p * p, p,               // Total items across all segments, and number of segments
-                                            segments, segments + 1  // Start and end indices of segments
-                                        );
+        const auto thread_per_blk = std::min(p, idx_t(1024));
+        const auto shared_mem_bytes = (thread_per_blk + p) * sizeof(idx_t);
+        get_partition_sizes_and_subchunk_indices_kernel<<<p, thread_per_blk, shared_mem_bytes>>>(W, part_sz, p);
+    }
 }
 
 

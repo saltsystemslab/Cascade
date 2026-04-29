@@ -80,11 +80,17 @@ __device__ __forceinline__ idx_t upper_bound(const char* T_d, idx_t n, const idx
 // and the Y-axis being the sorted chunks.
 __global__ void locate_pivots_kernel(const char* T_d, idx_t n, const idx_t* SA_d, idx_t chunk_sz, const idx_t* P, idx_t p_c, idx_t* R);
 
-// Computes the size of the `[i, j]`'th subchunk at `W[i, j]`. There are `p`
-// chunks and each is broken into `p` subchunks, delineated with `R`: `R[i][j]`
-// stores where the `j`'th subchunk lives within the `i`'th chunk. Also stores
-// the last row of the subchunk sizes at `last_row`.
-__global__ void get_subchunk_sizes_kernel(const idx_t* R, idx_t* W, idx_t* last_row, idx_t p);
+// Computes the size of the `[i, j]`'th subchunk at `W[i, j]` in column-major
+// order. There are `p` chunks and each is broken into `p` subchunks, delineated
+// with `R`: `R[i][j]` stores where the `j`'th subchunk lives within the `i`'th
+// chunk.
+__global__ void get_subchunk_sizes_kernel(const idx_t* R, idx_t* W, idx_t p);
+
+// Computes the size of each partition from the `p * p` grid `W` of subchunk
+// sizes (which is in the column-major order). Also transforms the `W` matrix
+// from containing subchunk-sizes to column-wide exclusive scans; `W[i]j[j]`
+// denotes the index of the `i`'th subchunk in the `j`'th partition afterwards.
+__global__ void get_partition_sizes_and_subchunk_indices_kernel(idx_t* W, idx_t* part_sz, idx_t p);
 
 // The suffix array constructor class.
 class Suffix_Array
