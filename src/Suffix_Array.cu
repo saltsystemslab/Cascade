@@ -262,7 +262,7 @@ void locate_pivots_kernel(const char* const T_d, const idx_t n, const idx_t* con
     const auto rank_idx = chunk_idx * (p_c + 2) + pivot_id;   // Output position for the search-result / rank.
     if(pivot_id == 0)
         R[rank_idx] = 0;
-    else if(pivot_id == p_c - 1)
+    else if(pivot_id == p_c + 1)
         R[rank_idx] = chunk_sz;
     else
         R[rank_idx] = upper_bound(T_d, n, chunk, chunk_sz, P[pivot_id - 1]);
