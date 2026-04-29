@@ -248,10 +248,9 @@ idx_t upper_bound(const char* const T_d, const idx_t n, const idx_t* const S, co
 __global__
 void locate_pivots_kernel(const char* const T_d, const idx_t n, const idx_t* const SA_d, idx_t chunk_sz, const idx_t* const P, const idx_t p_c, idx_t* const R)
 {
-    const auto chunk_count = (n + chunk_sz - 1) / chunk_sz;
     const auto pivot_id = blockIdx.x * blockDim.x + threadIdx.x;   // Index of the pivot to locate.
     const auto chunk_idx = blockIdx.y;  // Which sorted chunk to locate the pivot into.
-    if(pivot_id >= (p_c + 2) || chunk_idx >= chunk_count)
+    if(pivot_id >= p_c)
         return;
 
     const auto chunk = SA_d + chunk_idx * chunk_sz; // The sorted chunk.
@@ -259,10 +258,10 @@ void locate_pivots_kernel(const char* const T_d, const idx_t n, const idx_t* con
     const auto chunk_end = std::min(n, chunk_begin + chunk_sz);
     chunk_sz = chunk_end - chunk_begin;
 
-    const auto rank_idx = chunk_idx * (p_c + 2) + pivot_id;   // Output position for the search-result / rank.
+    const auto rank_idx = chunk_idx * p_c + pivot_id;   // Output position for the search-result / rank.
     if(pivot_id == 0)
         R[rank_idx] = 0;
-    else if(pivot_id == p_c + 1)
+    else if(pivot_id == p_c - 1)
         R[rank_idx] = chunk_sz;
     else
         R[rank_idx] = upper_bound(T_d, n, chunk, chunk_sz, P[pivot_id - 1]);
@@ -271,12 +270,12 @@ void locate_pivots_kernel(const char* const T_d, const idx_t n, const idx_t* con
 
 void Suffix_Array::locate_pivots()
 {
-    const auto pivot_count = partition_count - 1;
-    const auto boundary_count = chunk_count * (pivot_count + 2);
-    cudaMalloc(reinterpret_cast<void**>(&P_rank), boundary_count * sizeof(idx_t));
+    const auto p_c = (partition_count - 1) + 2; // Number of pivots, including the two flanking sentinel pivots.
+    cudaMalloc(reinterpret_cast<void**>(&P_rank), chunk_count * p_c * sizeof(idx_t));
 
-    dim3 grid((boundary_count + blk_sz - 1) / blk_sz, chunk_count); // 2D decomposition of the searches of all the pivots at all the chunks.
-    locate_pivots_kernel<<<grid, blk_sz>>>(T_d, n, SA_d, chunk_sz, P_d, partition_count - 1, P_rank);
+    dim3 grid((p_c + blk_sz - 1) / blk_sz, chunk_count);    // 2D decomposition of the searches of all the pivots at all the chunks.
+    locate_pivots_kernel<<<grid, blk_sz>>>(T_d, n, SA_d, chunk_sz, P_d, p_c, P_rank);
+    cudaDeviceSynchronize();
 }
 
 

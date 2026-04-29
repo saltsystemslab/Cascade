@@ -74,10 +74,11 @@ __device__ __forceinline__ idx_t upper_bound(const char* T_d, idx_t n, const idx
 // the the sorted arrays of suffixes each of size `chunk_sz` flattened at `SA_d`
 // (only possible exception being the last chunk, which can be smaller), and
 // places those positions / ranks at `R` in a flattened manner. The suffixes are
-// over the text `T_d` of length `n`. Besides these pivots, two flanking pivots,
-// `0` and `|X_i|`, for each subarray `X_i` are also placed. The all-vs-all
-// search computations are structured as a 2D grid, the X-axis being the pivots
-// and the Y-axis being the sorted chunks.
+// over the text `T_d` of length `n`. The first and the last pivots are assumed
+// to be flanking sentinel pivots, i.e. the pivot-placements `0` and `|X_i|`,
+// for each subarray `X_i` are also placed. The all-vs-all search computations
+// are structured as a 2D grid, the X-axis being the pivots and the Y-axis being
+// the sorted chunks.
 __global__ void locate_pivots_kernel(const char* T_d, idx_t n, const idx_t* SA_d, idx_t chunk_sz, const idx_t* P, idx_t p_c, idx_t* R);
 
 // Computes the size of the `[i, j]`'th subchunk at `W[i, j]` in column-major
