@@ -57,7 +57,7 @@ target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 target_link_libraries(core PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
-target_link_libraries(core INTERFACE CUDA::cudart)
+# target_link_libraries(core PRIVATE CUDA::cudart)
 
 # Link the executable to the core library.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
