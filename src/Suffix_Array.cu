@@ -391,6 +391,24 @@ void Suffix_Array::partition_sub_chunks()
         const auto shared_mem_bytes = (thread_per_blk + p) * sizeof(idx_t);
         get_partition_sizes_and_subchunk_indices_kernel<<<p, thread_per_blk, shared_mem_bytes>>>(W, part_sz, p);
     }
+
+    // Transform the partition sizes to exclusive scan, to get the index of each partition in the flattened SA.
+    {
+        std::size_t cub_tmp_bytes = 0;
+        cub::DeviceScan::ExclusiveSum(
+            nullptr, cub_tmp_bytes,
+            part_sz, part_sz,
+            p
+        );
+
+        void* cub_tmp;
+        cudaMalloc(&cub_tmp, cub_tmp_bytes);
+        cub::DeviceScan::ExclusiveSum(
+            cub_tmp, cub_tmp_bytes,
+            part_sz, part_sz,
+            p
+        );
+    }
 }
 
 
