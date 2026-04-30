@@ -69,6 +69,10 @@ void Suffix_Array::build_SA(idx_t* const SA)
     partition_sub_chunks();
     std::cerr << "Placed the subchunks at their final partitions.\n";
 
+    // Sort the final partitions.
+    sort_partitions();
+    std::cerr << "Sorted the final partitions.\n";
+
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
 }
@@ -400,7 +404,6 @@ void Suffix_Array::partition_sub_chunks()
 {
     const auto p = partition_count; // Number of partitions.
     idx_t* W;   // `W[i][j]` will denote where the `i`'th subchunk of the `j`'th partition will be stored at the final flattened array. It is laid in the column-major order.
-    idx_t* part_sz; // Partition-sizes.
 
     // Get the  individual subchunk sizes.
     {
@@ -448,6 +451,23 @@ void Suffix_Array::partition_sub_chunks()
 
         const auto grid_sz = p * p;
         scatter_subchunks_kernel<<<grid_sz, blk_sz>>>(SA_d, SA, P_rank, W, p, chunk_sz);
+    }
+}
+
+
+void Suffix_Array::sort_partitions()
+{
+    std::vector<idx_t> part_sz_h(partition_count);
+    cudaMemcpy(part_sz_h.data(), part_sz, partition_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
+
+    for(std::size_t p_id = 0; p_id < partition_count; ++p_id)
+    {
+        const auto p_begin = part_sz_h[p_id];
+        const auto p_sz   = (p_id < partition_count - 1 ? part_sz_h[p_id + 1] : n) - p_begin;
+        auto* const P = SA + p_begin;
+
+        // Sort the partition.
+        thrust::sort(thrust::device, P, P + p_sz, Suffix_Comparator(T_d, n));
     }
 }
 

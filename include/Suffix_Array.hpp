@@ -129,6 +129,8 @@ private:
 
     idx_t* P_rank;  // The ranks (upper-bound positions) of the pivots at each sorted subarray.
 
+    idx_t* part_sz; // Final partition sizes.
+
 
     // Sorts chunks of the suffixes of the text where each chunk has size
     // `chunk_sz`, into the flat array `S_d`.
@@ -148,6 +150,9 @@ private:
     // Collates the subchunks delineated by the pivot locations in each sorted
     // chunk into appropriate partitions.
     void partition_sub_chunks();
+
+    // Sorts the final partitions of the suffixes.
+    void sort_partitions();
 
 
 public:
