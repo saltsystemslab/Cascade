@@ -476,11 +476,10 @@ __global__
 void validate_kernel(const char* const T_d, const idx_t* const SA_d, bool* const is_sorted, const idx_t n)
 {
     const auto idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if(idx < n)
-        if((idx & (chunk_sz - 1)) != 0)
-            is_sorted[idx] = Suffix_Comparator(T_d, n)(SA_d[idx - 1], SA_d[idx]);
-        else
-            is_sorted[idx] = true;
+    if(idx >= n)
+        return;
+
+    is_sorted[idx] = (idx == 0 ? true : Suffix_Comparator(T_d, n)(SA_d[idx - 1], SA_d[idx]));
 }
 
 
@@ -490,7 +489,7 @@ bool Suffix_Array::validate()
     bool* is_sorted_d;
     cudaMalloc(reinterpret_cast<void**>(&is_sorted_d), n * sizeof(bool));
 
-    validate_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(T_d, SA_d, is_sorted_d, n);
+    validate_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(T_d, SA, is_sorted_d, n);
 
     bool* is_sorted_h = reinterpret_cast<bool*>(std::malloc(n * sizeof(bool)));
     cudaMemcpy(is_sorted_h, is_sorted_d, n * sizeof(bool), cudaMemcpyDeviceToHost);
