@@ -87,11 +87,16 @@ __global__ void locate_pivots_kernel(const char* T_d, idx_t n, const idx_t* SA_d
 // chunk.
 __global__ void get_subchunk_sizes_kernel(const idx_t* R, idx_t* W, idx_t p);
 
-// Computes the size of each partition from the `p * p` grid `W` of subchunk
+// Computes the size of each partition from the `p x p` grid `W` of subchunk
 // sizes (which is in the column-major order). Also transforms the `W` matrix
 // from containing subchunk-sizes to column-wide exclusive scans; `W[i]j[j]`
 // denotes the index of the `i`'th subchunk in the `j`'th partition afterwards.
 __global__ void get_partition_sizes_and_subchunk_indices_kernel(idx_t* W, idx_t* part_sz, idx_t p);
+
+// Transforms the `p x p` matrix `W` of intra-partition subchunk offsets to
+// subchunk-offsets into the flattened array of partitions. The partitions sizes
+// are present at `part_sz`. `W` is in column-major order.
+__global__ void get_absolute_subchunk_indices_kernel(idx_t* W, const idx_t* part_off, idx_t p);
 
 // The suffix array constructor class.
 class Suffix_Array

@@ -363,6 +363,19 @@ void get_partition_sizes_and_subchunk_indices_kernel(idx_t* const W, idx_t* cons
 }
 
 
+__global__
+void get_absolute_subchunk_indices_kernel(idx_t* const W, const idx_t* const part_sz, const idx_t p)
+{
+    const auto thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if(thread_id >= p * p)
+        return;
+
+    const auto j = thread_id / p;   // Partition index.
+    const auto i = thread_id % p;   // Subchunk index.
+    W[j * p + i] += part_sz[j];
+}
+
+
 void Suffix_Array::partition_sub_chunks()
 {
     const auto p = partition_count; // Number of partitions.
@@ -379,12 +392,12 @@ void Suffix_Array::partition_sub_chunks()
     {
         cudaMalloc(reinterpret_cast<void**>(&part_sz), p * sizeof(idx_t));
 
-        const auto thread_per_blk = std::min(p, idx_t(1024));
+        const auto thread_per_blk = std::min(p, idx_t(blk_sz));
         const auto shared_mem_bytes = (thread_per_blk + p) * sizeof(idx_t);
         get_partition_sizes_and_subchunk_indices_kernel<<<p, thread_per_blk, shared_mem_bytes>>>(W, part_sz, p);
     }
 
-    // Transform the partition sizes to exclusive scan, to get the index of each partition in the flattened SA.
+    // Transform the partition sizes to exclusive scan, to get the index of each partition in the SA.
     {
         std::size_t cub_tmp_bytes = 0;
         cub::DeviceScan::ExclusiveSum(
@@ -400,6 +413,13 @@ void Suffix_Array::partition_sub_chunks()
             part_sz, part_sz,
             p
         );
+    }
+
+
+    // Get the absolute offsets of the subchunks in the flattened array of partitions.
+    {
+        const auto grid_sz = p * p;
+        get_absolute_subchunk_indices_kernel<<<(grid_sz + blk_sz - 1) / blk_sz, blk_sz>>>(W, part_sz, p);
     }
 }
 
