@@ -88,7 +88,6 @@ void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
 
         // Sort each chunk successively.
         thrust::sort(thrust::device, SA, SA + chunk_len, Suffix_Comparator(T_d, n));
-        cudaDeviceSynchronize();
     }
 }
 
@@ -111,7 +110,6 @@ void Suffix_Array::sort_chunks_with_pivots(idx_t* const SA_d, const idx_t chunk_
             {
                 return chunk_begin + i;
             });
-        cudaDeviceSynchronize();
 
 
         // Copy the pivots and mark them.
@@ -120,11 +118,9 @@ void Suffix_Array::sort_chunks_with_pivots(idx_t* const SA_d, const idx_t chunk_
             {
                 return P_d[i] | pivot_flag;
             });
-        cudaDeviceSynchronize();
 
 
         thrust::sort(thrust::device, SA_op, SA_op + sz + pivot_count, Suffix_Comparator(T_d, n));
-        cudaDeviceSynchronize();
     }
 }
 
@@ -137,7 +133,6 @@ void Suffix_Array::sample_suffixes()
     cudaMalloc(reinterpret_cast<void**>(&S_d), k * chunk_count * sizeof(idx_t));
 
     sample_with_replacement<<<chunk_count, blk_sz>>>(chunk_sz, k, S_d, 0);
-    cudaDeviceSynchronize();
 }
 
 
@@ -147,7 +142,6 @@ void Suffix_Array::select_pivots()
     // Sort the collected samples.
     const auto sample_count = k * chunk_count;
     thrust::sort(thrust::device, S_d, S_d + sample_count, Suffix_Comparator(T_d, n));
-    cudaDeviceSynchronize();
 
     std::vector<idx_t> S_h(sample_count);
     cudaMemcpy(S_h.data(), S_d, sample_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
@@ -275,7 +269,6 @@ void Suffix_Array::locate_pivots()
 
     dim3 grid((p_c + blk_sz - 1) / blk_sz, chunk_count);    // 2D decomposition of the searches of all the pivots at all the chunks.
     locate_pivots_kernel<<<grid, blk_sz>>>(T_d, n, SA_d, chunk_sz, P_d, p_c, P_rank);
-    cudaDeviceSynchronize();
 }
 
 
@@ -372,8 +365,8 @@ void get_partition_sizes_and_subchunk_indices_kernel(idx_t* const W, idx_t* cons
 
 void Suffix_Array::partition_sub_chunks()
 {
-    const auto p = (n + chunk_sz - 1) / chunk_sz;   // Number of partitions.
-    idx_t* W;   // `W[i][j]` will denote where the `i`'th subchunk of the `j`'th partition will be stored at the final flattened array. It is also laid in column-major order.
+    const auto p = partition_count; // Number of partitions.
+    idx_t* W;   // `W[i][j]` will denote where the `i`'th subchunk of the `j`'th partition will be stored at the final flattened array. It is laid in the column-major order.
     idx_t* part_sz; // Partition-sizes.
 
     // Get the  individual subchunk sizes.
@@ -430,7 +423,6 @@ bool Suffix_Array::validate()
     cudaMalloc(reinterpret_cast<void**>(&is_sorted_d), n * sizeof(bool));
 
     validate_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(T_d, SA_d, is_sorted_d, n);
-    cudaDeviceSynchronize();
 
     bool* is_sorted_h = reinterpret_cast<bool*>(std::malloc(n * sizeof(bool)));
     cudaMemcpy(is_sorted_h, is_sorted_d, n * sizeof(bool), cudaMemcpyDeviceToHost);
