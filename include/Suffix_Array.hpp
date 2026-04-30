@@ -98,6 +98,13 @@ __global__ void get_partition_sizes_and_subchunk_indices_kernel(idx_t* W, idx_t*
 // are present at `part_sz`. `W` is in column-major order.
 __global__ void get_absolute_subchunk_indices_kernel(idx_t* W, const idx_t* part_off, idx_t p);
 
+// Scatters the `p` subchunks of the `p` chunks at `X` into `Y` appropriately.
+// The chunks have size `chunk_sz` (except possibly the last one). `R[i][j]`
+// stores the `j`'th subchunk's offset within the `i`'th chunk. `W[i][j]` stores
+// the absolute index of the `i`'th subchunk from the `j`'th partition into the
+// scatter output `Y`, in column-major order.
+__global__ void scatter_subchunks_kernel(const idx_t* X, idx_t* Y, const idx_t* R, const idx_t* W, idx_t p, idx_t chunk_sz);
+
 // The suffix array constructor class.
 class Suffix_Array
 {
@@ -113,6 +120,7 @@ private:
     const idx_t k;  // Sample per chunk: `c log n`.
 
     idx_t* SA_d;    // The suffix array on device.
+    idx_t* SA;  // The final SA.
 
     idx_t* S_d; // The collection of samples.
 

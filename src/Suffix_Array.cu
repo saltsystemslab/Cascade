@@ -376,6 +376,26 @@ void get_absolute_subchunk_indices_kernel(idx_t* const W, const idx_t* const par
 }
 
 
+__global__
+void scatter_subchunks_kernel(const idx_t* const X, idx_t* const Y, const idx_t* const R, const idx_t* const W, const idx_t p, const idx_t chunk_sz)
+{
+    // NB: using 1D grid for the blocks because cases with `p >= 65536` will not fit the y-axis of a 2D grid.
+    const auto blk_id = blockIdx.x;
+    const auto i = blk_id / p;  // Chunk ID.
+    const auto j = blk_id % p;  // Subchunk ID (= partition ID).
+
+    const auto* const R_i = R + i * (p + 1);    // Delimiter array of the subchunks for chunk `i`.
+    const auto beg = R_i[j];    // Beginning offset of subchunk `j`.
+    const auto end = R_i[j + 1];    // Ending offset of subchunk `j`.
+    const auto sz = end - beg;
+
+    const auto x = X + i * chunk_sz + beg;  // Beginning location of the subchunk.
+    const auto y = Y + W[j * p + i];    // Output location of the subchunk.
+    for(idx_t k = threadIdx.x; k < sz; k += blockDim.x)
+        y[k] = x[k];
+}
+
+
 void Suffix_Array::partition_sub_chunks()
 {
     const auto p = partition_count; // Number of partitions.
@@ -420,6 +440,14 @@ void Suffix_Array::partition_sub_chunks()
     {
         const auto grid_sz = p * p;
         get_absolute_subchunk_indices_kernel<<<(grid_sz + blk_sz - 1) / blk_sz, blk_sz>>>(W, part_sz, p);
+    }
+
+
+    {
+        cudaMalloc(reinterpret_cast<void**>(&SA), n * sizeof(idx_t));
+
+        const auto grid_sz = p * p;
+        scatter_subchunks_kernel<<<grid_sz, blk_sz>>>(SA_d, SA, P_rank, W, p, chunk_sz);
     }
 }
 
