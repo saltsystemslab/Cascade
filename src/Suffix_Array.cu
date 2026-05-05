@@ -151,7 +151,8 @@ void Suffix_Array::sample_suffixes()
 
     cudaMalloc(reinterpret_cast<void**>(&S_d), k * chunk_count * sizeof(idx_t));
 
-    sample_with_replacement<<<chunk_count, blk_sz>>>(chunk_sz, k, S_d, 0);
+    // TODO: consider using `sample_from_chunk_with_replacement`.
+    sample_with_replacement<<<chunk_count, blk_sz>>>(chunk_sz, k, S_d, 0, n);
 }
 
 
@@ -213,7 +214,7 @@ void sample_from_chunk_with_replacement(const idx_t* const input, idx_t* const o
 
 
 __global__
-void sample_with_replacement(const idx_t chunk_sz, const idx_t k, idx_t* const output, const uint64_t seed)
+void sample_with_replacement(const idx_t chunk_sz, const idx_t k, idx_t* const output, const uint64_t seed, const idx_t n)
 {
     const auto chunk_id = blockIdx.x;
     const auto thread_id = threadIdx.x;
@@ -223,10 +224,17 @@ void sample_with_replacement(const idx_t chunk_sz, const idx_t k, idx_t* const o
     curand_init(seed, off, 0, &rng);
 
     assert((chunk_sz & (chunk_sz - 1)) == 0);   // `chunk_sz` must be a power-of-two.
+
     auto* const chunk_op = output + chunk_id * k;
-    const auto shift = chunk_id * chunk_sz;
+    const idx_t shift = chunk_id * chunk_sz;
+    const auto chunk_sz_fixed = std::min(chunk_sz, n - shift);  // Required fix for the last chunk.
+
     for(uint32_t i = thread_id; i < k; i += blockDim.x) // A thread samples the `[t_id, t_id + dim.x, ...]`'th samples, since a chunk may have larger size than the thread-block.
-        chunk_op[i] = (curand(&rng) & (chunk_sz - 1)) + shift;
+    {
+        const auto rand = curand(&rng);
+        const auto idx = (chunk_sz_fixed == chunk_sz ? (rand & (chunk_sz - 1)) : rand % chunk_sz_fixed);
+        chunk_op[i] = shift + idx;
+    }
 }
 
 

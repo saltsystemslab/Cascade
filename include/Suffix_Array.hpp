@@ -58,8 +58,9 @@ __global__ void sample_from_chunk_with_replacement(const idx_t* input, idx_t* ou
 
 // Samples integers from the appropriate chunk of size `chunk_sz` for this block
 // such that `k` integers are sampled by the block, and puts them successively
-// into the appropriate position for this block at `output`.
-__global__ void sample_with_replacement(idx_t chunk_sz, idx_t k, idx_t* output, uint64_t seed);
+// into the appropriate position for this block at `output`. The chunks have a
+// total size of `n`.
+__global__ void sample_with_replacement(idx_t chunk_sz, idx_t k, idx_t* output, uint64_t seed, const idx_t n);
 
 // Compares the suffixes `i` and `j` of the text `T_d` of length `n` and returns
 // `-1 / 0 / +1` as per the `std::memcmp` return-policy.
