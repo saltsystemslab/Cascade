@@ -52,6 +52,7 @@ void Suffix_Array::build_SA(idx_t* const SA)
     {
         const auto t_0 = now();
         sort_chunks(SA_d, chunk_sz);
+        cudaDeviceSynchronize();
         const auto t_1 = now();
         std::cerr << "Sorted the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
     }
@@ -60,6 +61,7 @@ void Suffix_Array::build_SA(idx_t* const SA)
     {
         const auto t_0 = now();
         select_pivots();
+        cudaDeviceSynchronize();
         const auto t_1 = now();
         std::cerr << "Selected the pivot set. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
     }
@@ -68,6 +70,7 @@ void Suffix_Array::build_SA(idx_t* const SA)
     {
         const auto t_0 = now();
         locate_pivots();
+        cudaDeviceSynchronize();
         const auto t_1 = now();
         std::cerr << "Located the pivots at the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
     }
@@ -76,6 +79,7 @@ void Suffix_Array::build_SA(idx_t* const SA)
     {
         const auto t_0 = now();
         partition_sub_chunks();
+        cudaDeviceSynchronize();
         const auto t_1 = now();
         std::cerr << "Placed the subchunks at their final partitions. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
     }
@@ -84,6 +88,7 @@ void Suffix_Array::build_SA(idx_t* const SA)
     {
         const auto t_0 = now();
         sort_partitions();
+        cudaDeviceSynchronize();
         const auto t_1 = now();
         std::cerr << "Sorted the final partitions. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
     }
