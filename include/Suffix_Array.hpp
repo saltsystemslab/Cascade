@@ -125,7 +125,6 @@ private:
 
     idx_t* S_d; // The collection of samples.
 
-    idx_t* P_h; // The pivots.
     idx_t* P_d; // The pivots at device.
 
     idx_t* P_rank;  // The ranks (upper-bound positions) of the pivots at each sorted subarray.

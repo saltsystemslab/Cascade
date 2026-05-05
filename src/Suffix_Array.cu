@@ -41,7 +41,7 @@ Suffix_Array::Suffix_Array(const char* const T, const idx_t n_):
 __host__
 Suffix_Array::~Suffix_Array()
 {
-    cudaFree(T_d), cudaFree(SA_d);
+    cudaFree(T_d), cudaFree(SA_final_d);
 }
 
 
@@ -166,9 +166,10 @@ void Suffix_Array::select_pivots()
 
     std::vector<idx_t> S_h(sample_count);
     cudaMemcpy(S_h.data(), S_d, sample_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
+    cudaFree(S_d);
 
     const auto p = partition_count; // Number of final partitions.
-    P_h = reinterpret_cast<idx_t*>(std::malloc((p - 1) * sizeof(idx_t)));
+    auto const P_h = reinterpret_cast<idx_t*>(std::malloc((p - 1) * sizeof(idx_t)));    // The pivots.
 
     const auto gap = sample_count / p;  // Distance-gap between pivots.
     const auto quant_err = sample_count % p;    // Numerator of the quantization error per partition.
@@ -188,6 +189,7 @@ void Suffix_Array::select_pivots()
     // Store a copy of the pivots at device.
     cudaMalloc(reinterpret_cast<void**>(&P_d), (p - 1) * sizeof(idx_t));
     cudaMemcpy(P_d, P_h, (p - 1) * sizeof(idx_t), cudaMemcpyHostToDevice);
+    std::free(P_h);
 }
 
 
@@ -297,6 +299,7 @@ void Suffix_Array::locate_pivots()
 
     dim3 grid((p_c + blk_sz - 1) / blk_sz, chunk_count);    // 2D decomposition of the searches of all the pivots at all the chunks.
     locate_pivots_kernel<<<grid, blk_sz>>>(T_d, n, SA_d, chunk_sz, P_d, p_c, P_rank);
+    cudaFree(P_d);
 }
 
 
@@ -475,6 +478,7 @@ void Suffix_Array::partition_sub_chunks()
 
         const auto grid_sz = p * p;
         scatter_subchunks_kernel<<<grid_sz, blk_sz>>>(SA_d, SA_final_d, P_rank, W, p, chunk_sz);
+        cudaFree(SA_d), cudaFree(P_rank), cudaFree(W);
     }
 }
 
@@ -483,6 +487,7 @@ void Suffix_Array::sort_partitions()
 {
     std::vector<idx_t> part_sz_h(partition_count);
     cudaMemcpy(part_sz_h.data(), part_sz, partition_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
+    cudaFree(part_sz);
 
     for(std::size_t p_id = 0; p_id < partition_count; ++p_id)
     {
