@@ -29,19 +29,19 @@ Suffix_Array::Suffix_Array(const char* const T, const idx_t n_):
 {
     // Copy over text to device
     const auto bytes = n * sizeof(char);
-    cudaMalloc(reinterpret_cast<void**>(&T_d), bytes);
-    cudaMemcpy(T_d, T_h, bytes, cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&T_d), bytes));
+    CUDA_CHECK(cudaMemcpy(T_d, T_h, bytes, cudaMemcpyHostToDevice));
 
     // Allocate space for suffix array
     const auto pivot_slots = chunk_count * (partition_count - 1);   // Number of extra slots in the suffix array for additional placement of pivots.
-    cudaMalloc(reinterpret_cast<void**>(&SA_d), (n + pivot_slots) * sizeof(idx_t));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&SA_d), (n + pivot_slots) * sizeof(idx_t)));
 }
 
 
 __host__
 Suffix_Array::~Suffix_Array()
 {
-    cudaFree(T_d), cudaFree(SA_final_d);
+    CUDA_CHECK(cudaFree(T_d)); CUDA_CHECK(cudaFree(SA_final_d));
 }
 
 
@@ -94,7 +94,7 @@ void Suffix_Array::build_SA(idx_t* const SA)
     }
 
     // Copy back the chunked suffix array to host.
-    cudaMemcpy(SA, SA_final_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(SA, SA_final_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost));
 }
 
 
@@ -152,10 +152,11 @@ void Suffix_Array::sort_chunks_with_pivots(idx_t* const SA_d, const idx_t chunk_
 __host__
 void Suffix_Array::sample_suffixes()
 {
-    cudaMalloc(reinterpret_cast<void**>(&S_d), k * chunk_count * sizeof(idx_t));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&S_d), k * chunk_count * sizeof(idx_t)));
 
     // TODO: consider using `sample_from_chunk_with_replacement`.
     sample_with_replacement<<<chunk_count, blk_sz>>>(chunk_sz, k, S_d, 0, n);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 
@@ -170,8 +171,8 @@ void Suffix_Array::select_pivots()
     thrust::sort(thrust::device, S_d, S_d + sample_count, Suffix_Comparator(T_d, n));
 
     std::vector<idx_t> S_h(sample_count);
-    cudaMemcpy(S_h.data(), S_d, sample_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
-    cudaFree(S_d);
+    CUDA_CHECK(cudaMemcpy(S_h.data(), S_d, sample_count * sizeof(idx_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(S_d));
 
     const auto p = partition_count; // Number of final partitions.
     auto const P_h = reinterpret_cast<idx_t*>(std::malloc((p - 1) * sizeof(idx_t)));    // The pivots.
@@ -192,8 +193,8 @@ void Suffix_Array::select_pivots()
     }
 
     // Store a copy of the pivots at device.
-    cudaMalloc(reinterpret_cast<void**>(&P_d), (p - 1) * sizeof(idx_t));
-    cudaMemcpy(P_d, P_h, (p - 1) * sizeof(idx_t), cudaMemcpyHostToDevice);
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&P_d), (p - 1) * sizeof(idx_t)));
+    CUDA_CHECK(cudaMemcpy(P_d, P_h, (p - 1) * sizeof(idx_t), cudaMemcpyHostToDevice));
     std::free(P_h);
 }
 
@@ -300,11 +301,12 @@ void locate_pivots_kernel(const char* const T_d, const idx_t n, const idx_t* con
 void Suffix_Array::locate_pivots()
 {
     const auto p_c = (partition_count - 1) + 2; // Number of pivots, including the two flanking sentinel pivots.
-    cudaMalloc(reinterpret_cast<void**>(&P_rank), chunk_count * p_c * sizeof(idx_t));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&P_rank), chunk_count * p_c * sizeof(idx_t)));
 
     dim3 grid((p_c + blk_sz - 1) / blk_sz, chunk_count);    // 2D decomposition of the searches of all the pivots at all the chunks.
     locate_pivots_kernel<<<grid, blk_sz>>>(T_d, n, SA_d, chunk_sz, P_d, p_c, P_rank);
-    cudaFree(P_d);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaFree(P_d));
 }
 
 
@@ -439,17 +441,19 @@ void Suffix_Array::partition_sub_chunks()
 
     // Get the  individual subchunk sizes.
     {
-        cudaMalloc(reinterpret_cast<void**>(&W), p * p * sizeof(idx_t));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&W), p * p * sizeof(idx_t)));
         get_subchunk_sizes_kernel<<<(p * p + blk_sz - 1) / blk_sz, blk_sz>>>(P_rank, W, p);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // Compute the partition sizes and transform the individual subchunk sizes to intra-partition subchunk indices.
     {
-        cudaMalloc(reinterpret_cast<void**>(&part_sz), p * sizeof(idx_t));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&part_sz), p * sizeof(idx_t)));
 
         const auto thread_per_blk = std::min(p, idx_t(blk_sz));
         const auto shared_mem_bytes = (thread_per_blk + p) * sizeof(idx_t);
         get_partition_sizes_and_subchunk_indices_kernel<<<p, thread_per_blk, shared_mem_bytes>>>(W, part_sz, p);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // Transform the partition sizes to exclusive scan, to get the index of each partition in the SA.
@@ -462,7 +466,7 @@ void Suffix_Array::partition_sub_chunks()
         );
 
         void* cub_tmp;
-        cudaMalloc(&cub_tmp, cub_tmp_bytes);
+        CUDA_CHECK(cudaMalloc(&cub_tmp, cub_tmp_bytes));
         cub::DeviceScan::ExclusiveSum(
             cub_tmp, cub_tmp_bytes,
             part_sz, part_sz,
@@ -475,15 +479,17 @@ void Suffix_Array::partition_sub_chunks()
     {
         const auto grid_sz = p * p;
         get_absolute_subchunk_indices_kernel<<<(grid_sz + blk_sz - 1) / blk_sz, blk_sz>>>(W, part_sz, p);
+        CUDA_CHECK(cudaGetLastError());
     }
 
 
     {
-        cudaMalloc(reinterpret_cast<void**>(&SA_final_d), n * sizeof(idx_t));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&SA_final_d), n * sizeof(idx_t)));
 
         const auto grid_sz = p * p;
         scatter_subchunks_kernel<<<grid_sz, blk_sz>>>(SA_d, SA_final_d, P_rank, W, p, chunk_sz);
-        cudaFree(SA_d), cudaFree(P_rank), cudaFree(W);
+        CUDA_CHECK(cudaGetLastError());
+        CUDA_CHECK(cudaFree(SA_d)); CUDA_CHECK(cudaFree(P_rank)); CUDA_CHECK(cudaFree(W));
     }
 }
 
@@ -491,8 +497,8 @@ void Suffix_Array::partition_sub_chunks()
 void Suffix_Array::sort_partitions()
 {
     std::vector<idx_t> part_sz_h(partition_count);
-    cudaMemcpy(part_sz_h.data(), part_sz, partition_count * sizeof(idx_t), cudaMemcpyDeviceToHost);
-    cudaFree(part_sz);
+    CUDA_CHECK(cudaMemcpy(part_sz_h.data(), part_sz, partition_count * sizeof(idx_t), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaFree(part_sz));
 
     for(std::size_t p_id = 0; p_id < partition_count; ++p_id)
     {
@@ -521,18 +527,19 @@ __host__
 bool Suffix_Array::validate()
 {
     bool* is_sorted_d;
-    cudaMalloc(reinterpret_cast<void**>(&is_sorted_d), n * sizeof(bool));
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&is_sorted_d), n * sizeof(bool)));
 
     validate_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(T_d, SA_final_d, is_sorted_d, n);
+    CUDA_CHECK(cudaGetLastError());
 
     bool* is_sorted_h = reinterpret_cast<bool*>(std::malloc(n * sizeof(bool)));
-    cudaMemcpy(is_sorted_h, is_sorted_d, n * sizeof(bool), cudaMemcpyDeviceToHost);
+    CUDA_CHECK(cudaMemcpy(is_sorted_h, is_sorted_d, n * sizeof(bool), cudaMemcpyDeviceToHost));
 
     bool r = true;
     for(idx_t i = 0; i < n; ++i)
         r = r && is_sorted_h[i];
 
-    cudaFree(is_sorted_d);
+    CUDA_CHECK(cudaFree(is_sorted_d));
     std::free(is_sorted_h);
 
     return r;
