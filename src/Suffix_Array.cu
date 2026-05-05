@@ -147,8 +147,6 @@ void Suffix_Array::sort_chunks_with_pivots(idx_t* const SA_d, const idx_t chunk_
 __host__
 void Suffix_Array::sample_suffixes()
 {
-    const std::size_t k = ((c * std::log2(n) + 31 ) / 32) * 32;  // Sample per chunk: `c log n`
-
     cudaMalloc(reinterpret_cast<void**>(&S_d), k * chunk_count * sizeof(idx_t));
 
     // TODO: consider using `sample_from_chunk_with_replacement`.
