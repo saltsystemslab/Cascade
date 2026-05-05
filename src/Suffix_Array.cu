@@ -48,12 +48,12 @@ Suffix_Array::~Suffix_Array()
 __host__
 void Suffix_Array::build_SA(idx_t* const SA)
 {
-    // Get the sample suffix collection.
+    // Sort the chunks.
     {
         const auto t_0 = now();
-        sample_suffixes();
+        sort_chunks(SA_d, chunk_sz);
         const auto t_1 = now();
-        std::cerr << "Sampled pivot candidates. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+        std::cerr << "Sorted the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
     }
 
     // Select the final pivots.
@@ -62,14 +62,6 @@ void Suffix_Array::build_SA(idx_t* const SA)
         select_pivots();
         const auto t_1 = now();
         std::cerr << "Selected the pivot set. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
-    }
-
-    // Sort the chunks.
-    {
-        const auto t_0 = now();
-        sort_chunks(SA_d, chunk_sz);
-        const auto t_1 = now();
-        std::cerr << "Sorted the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
     }
 
     // Locate the pivots at the sorted chunks.
@@ -166,6 +158,9 @@ void Suffix_Array::sample_suffixes()
 __host__
 void Suffix_Array::select_pivots()
 {
+    // Collect samples.
+    sample_suffixes();
+
     // Sort the collected samples.
     const auto sample_count = k * chunk_count;
     thrust::sort(thrust::device, S_d, S_d + sample_count, Suffix_Comparator(T_d, n));
