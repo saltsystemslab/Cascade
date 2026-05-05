@@ -89,7 +89,7 @@ void Suffix_Array::build_SA(idx_t* const SA)
     }
 
     // Copy back the chunked suffix array to host.
-    cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
+    cudaMemcpy(SA, SA_final_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
 }
 
 
@@ -473,10 +473,10 @@ void Suffix_Array::partition_sub_chunks()
 
 
     {
-        cudaMalloc(reinterpret_cast<void**>(&SA), n * sizeof(idx_t));
+        cudaMalloc(reinterpret_cast<void**>(&SA_final_d), n * sizeof(idx_t));
 
         const auto grid_sz = p * p;
-        scatter_subchunks_kernel<<<grid_sz, blk_sz>>>(SA_d, SA, P_rank, W, p, chunk_sz);
+        scatter_subchunks_kernel<<<grid_sz, blk_sz>>>(SA_d, SA_final_d, P_rank, W, p, chunk_sz);
     }
 }
 
@@ -490,7 +490,7 @@ void Suffix_Array::sort_partitions()
     {
         const auto p_begin = part_sz_h[p_id];
         const auto p_sz   = (p_id < partition_count - 1 ? part_sz_h[p_id + 1] : n) - p_begin;
-        auto* const P = SA + p_begin;
+        auto* const P = SA_final_d + p_begin;
 
         // Sort the partition.
         thrust::sort(thrust::device, P, P + p_sz, Suffix_Comparator(T_d, n));
@@ -515,7 +515,7 @@ bool Suffix_Array::validate()
     bool* is_sorted_d;
     cudaMalloc(reinterpret_cast<void**>(&is_sorted_d), n * sizeof(bool));
 
-    validate_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(T_d, SA, is_sorted_d, n);
+    validate_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(T_d, SA_final_d, is_sorted_d, n);
 
     bool* is_sorted_h = reinterpret_cast<bool*>(std::malloc(n * sizeof(bool)));
     cudaMemcpy(is_sorted_h, is_sorted_d, n * sizeof(bool), cudaMemcpyDeviceToHost);

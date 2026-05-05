@@ -121,7 +121,7 @@ private:
     const idx_t k;  // Sample per chunk: `c log n`.
 
     idx_t* SA_d;    // The suffix array on device.
-    idx_t* SA;  // The final SA.
+    idx_t* SA_final_d;  // The final SA.
 
     idx_t* S_d; // The collection of samples.
 
