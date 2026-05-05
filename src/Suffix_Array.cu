@@ -49,29 +49,52 @@ __host__
 void Suffix_Array::build_SA(idx_t* const SA)
 {
     // Get the sample suffix collection.
-    sample_suffixes();
-    std::cerr << "Sampled pivot candidates.\n";
+    {
+        const auto t_0 = now();
+        sample_suffixes();
+        const auto t_1 = now();
+        std::cerr << "Sampled pivot candidates. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+    }
 
     // Select the final pivots.
-    select_pivots();
-    std::cerr << "Selected the pivot set.\n";
+    {
+        const auto t_0 = now();
+        select_pivots();
+        const auto t_1 = now();
+        std::cerr << "Selected the pivot set. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+    }
 
     // Sort the chunks.
-    sort_chunks(SA_d, chunk_sz);
-    // sort_chunks_with_pivots(SA_d, chunk_sz;
-    std::cerr << "Sorted the chunks.\n";
+    {
+        const auto t_0 = now();
+        sort_chunks(SA_d, chunk_sz);
+        const auto t_1 = now();
+        std::cerr << "Sorted the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+    }
 
     // Locate the pivots at the sorted chunks.
-    locate_pivots();
-    std::cerr << "Located the pivots at the chunks.\n";
+    {
+        const auto t_0 = now();
+        locate_pivots();
+        const auto t_1 = now();
+        std::cerr << "Located the pivots at the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+    }
 
     // Route the subchunks to their final partitions.
-    partition_sub_chunks();
-    std::cerr << "Placed the subchunks at their final partitions.\n";
+    {
+        const auto t_0 = now();
+        partition_sub_chunks();
+        const auto t_1 = now();
+        std::cerr << "Placed the subchunks at their final partitions. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+    }
 
     // Sort the final partitions.
-    sort_partitions();
-    std::cerr << "Sorted the final partitions.\n";
+    {
+        const auto t_0 = now();
+        sort_partitions();
+        const auto t_1 = now();
+        std::cerr << "Sorted the final partitions. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+    }
 
     // Copy back the chunked suffix array to host.
     cudaMemcpy(SA, SA_d, n * sizeof(idx_t), cudaMemcpyDeviceToHost);
