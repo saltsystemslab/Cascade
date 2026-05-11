@@ -64,6 +64,7 @@ target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 
 # Link to `zlib`, required to support `gzip` files.
 target_link_libraries(core PRIVATE ZLIB::ZLIB)
+target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
 # target_link_libraries(core PRIVATE CUDA::cudart)
