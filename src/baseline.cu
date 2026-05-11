@@ -1,6 +1,5 @@
 
 
-#include "Suffix_Array.hpp"
 #include "utility.hpp"
 
 #include <thrust/device_vector.h>
@@ -120,6 +119,7 @@ void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
 
     n++;    // Account for the terminator symbol '\0'.
 
+    constexpr std::size_t blk_sz = 256;
     const std::size_t grid_sz = (n + blk_sz - 1) / blk_sz;
 
     char* T_d;

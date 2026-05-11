@@ -33,7 +33,7 @@ int main(int argc, char** argv)
 
         std::cerr << "Built the SA using `cu-caps-sa`. Time taken: " << caps_sa::duration(t_1 - t_0) << " seconds.\n";
 
-        // std::cerr << "Partial suffix arrays are " << (Suf_Arr.validate() ? "correct" : "wrong") << "\n";
+        std::cerr << "Suffix array is " << (Suf_Arr.validate() ? "correct" : "wrong") << "\n";
     }
 
 
