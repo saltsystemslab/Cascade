@@ -9,7 +9,6 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 
 # Bundle the core source files into a variable.
 set(PROJECT_SRC
-        Parser.cpp
         baseline.cu
         Suffix_Array.cu
 )
