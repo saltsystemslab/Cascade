@@ -1,13 +1,17 @@
 
+#include "Parser.hpp"
+#include "utility.hpp"
+
 #include "libcubwt/libcubwt.cuh"
 
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <cstdint>
-#include <algorithm>
-#include <string>
+#include <cstddef>
 #include <vector>
+#include <cstring>
+#include <algorithm>
+#include <cstdlib>
+#include <cstdio>
+#include <iostream>
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -75,11 +79,9 @@ static std::vector<uint32_t> sa_to_isa(const std::vector<uint32_t> &sa)
     return isa;
 }
 
-// ---------------------------------------------------------------------------
-// main
-// ---------------------------------------------------------------------------
 
-int main()
+// Example usage
+int example()
 {
     // -----------------------------------------------------------------------
     // Input — must be >= 16 bytes (library hard minimum)
@@ -204,4 +206,72 @@ int main()
         printf("  %-6lld  %-6u  '%c'\n", (long long)i, ISA[(size_t)i], (char)T[i]);
 
     return (sa_ok && isa_ok) ? 0 : 1;
+}
+
+
+int bench_libcubwt(const char* const T, const std::size_t n, uint32_t* const SA)
+{
+    // Allocate GPU storage
+    void* device_storage = nullptr;
+    auto err = libcubwt_allocate_device_storage(&device_storage, n);
+    if(err != LIBCUBWT_NO_ERROR)
+    {
+        fprintf(stderr, "libcubwt_allocate_device_storage failed: %s\n", libcubwt_strerror(err));
+        return 1;
+    }
+
+
+    // Build suffix array
+    err = libcubwt_sa(device_storage, reinterpret_cast<const uint8_t*>(T), SA, n);
+    if(err != LIBCUBWT_NO_ERROR)
+    {
+        fprintf(stderr, "libcubwt_sa failed: %s\n", libcubwt_strerror(err));
+        libcubwt_free_device_storage(device_storage);
+        return 1;
+    }
+
+
+    // Free GPU storage
+    err = libcubwt_free_device_storage(device_storage);
+    if(err != LIBCUBWT_NO_ERROR)
+    {
+        fprintf(stderr, "libcubwt_free_device_storage failed: %s\n", libcubwt_strerror(err));
+        return 1;
+    }
+
+
+    return 0;
+}
+
+
+// ---------------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------------
+
+int main(int argc, char** argv)
+{
+    // example();
+
+    (void)argc, (void)argv;
+    caps_sa::Parser input(argv[1]);
+    input.read_next_seq();
+
+    auto const T = input.seq();
+    auto const n = input.seq_len();
+
+    std::cerr << "Sequence length: " << n << "\n";
+
+    {
+        std::vector<uint32_t> SA(n);
+
+        const auto t_0 = caps_sa::now();
+        bench_libcubwt(T, n, SA.data());
+        const auto t_1 = caps_sa::now();
+
+        std::cerr << "Built the SA using `libcubwt`. Time taken: " << caps_sa::duration(t_1 - t_0) << " seconds.\n";
+
+        // std::cerr << "SA matches reference: " << (SA == reference_sa(T, n) ? "YES" : "NO") << "\n";
+    }
+
+    return 0;
 }

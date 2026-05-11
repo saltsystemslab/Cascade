@@ -1,6 +1,7 @@
 
-#include "Parser.hpp"
 #include "Suffix_Array.hpp"
+#include "Parser.hpp"
+#include "utility.hpp"
 
 #include <cstddef>
 #include <string>
@@ -19,18 +20,22 @@ int main(int argc, char** argv)
 
     std::cerr << "Sequence length: " << n << "\n";
 
-    std::size_t* const SA = reinterpret_cast<std::size_t*>(std::malloc((n + 1) * sizeof(std::size_t)));
-    // caps_sa::build_SA_naive(T, n, SA);
-    // caps_sa::build_SA_prefix_doubling(T, n, SA);
-    caps_sa::Suffix_Array Suf_Arr(T, n);
-    Suf_Arr.build_SA(SA);
+    {
+        std::vector<std::size_t> SA(n + 1);
+        // caps_sa::build_SA_naive(T, n, SA);
+        // caps_sa::build_SA_prefix_doubling(T, n, SA);
 
-    const std::size_t print_len = 10;
-    std::cerr << "Lexicographically smallest suffix is at " << SA[0] << "; is " << std::string(T + SA[0], T + SA[0] + std::min((n + 1) - SA[0], print_len)) << "\n";
-    std::cerr << "Lexicographically largest suffix is at  " << SA[n] << "; is " << std::string(T + SA[n], T + SA[n] + std::min((n + 1) - SA[n], print_len)) << "\n";
+        caps_sa::Suffix_Array Suf_Arr(T, n);
 
-    std::cerr << "Partial suffix arrays are " << (Suf_Arr.validate() ? "correct" : "wrong") << "\n";
-    std::free(SA);
+        const auto t_0 = caps_sa::now();
+        Suf_Arr.build_SA(SA.data());
+        const auto t_1 = caps_sa::now();
+
+        std::cerr << "Built the SA using `cu-caps-sa`. Time taken: " << caps_sa::duration(t_1 - t_0) << " seconds.\n";
+
+        // std::cerr << "Partial suffix arrays are " << (Suf_Arr.validate() ? "correct" : "wrong") << "\n";
+    }
+
 
     return 0;
 }
