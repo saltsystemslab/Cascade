@@ -106,9 +106,5 @@ int main(int argc, char** argv)
 {
     (void)argc, (void)argv;
 
-    const std::string path(argv[1]);
-    constexpr std::size_t trials = 8;
-    transform_exp(path, trials);
-
     return 0;
 }
