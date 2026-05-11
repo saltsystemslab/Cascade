@@ -101,6 +101,12 @@ void Suffix_Array::build_SA(idx_t* const SA)
 __host__
 void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
 {
+    // One monolithic sort.
+    thrust::sequence(thrust::device, SA_d, SA_d + n, 0);
+    thrust::sort(thrust::device, SA_d, SA_d + n, Chunked_Suffix_Comparator{T_d, n, chunk_sz});
+
+/*
+    // Sort the chunks one-by-one.
     for(std::size_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx)
     {
         const auto chunk_begin = chunk_idx * chunk_sz;

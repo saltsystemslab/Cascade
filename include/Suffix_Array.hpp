@@ -27,7 +27,7 @@ void build_SA_prefix_doubling(const char* T, std::size_t n, std::size_t* SA);
 // Functor class to compare two suffixes.
 struct Suffix_Comparator
 {
-    const char* T_d;
+    const char* const T_d;
     const std::size_t n;
 
     __host__ __device__
@@ -38,6 +38,33 @@ struct Suffix_Comparator
     bool operator()(std::size_t x, std::size_t y)
     {
         x &= ~pivot_flag, y &= ~pivot_flag; // Clear the pivot-marker, if any.
+        for(; x < n && y < n; ++x, ++y)
+            if(T_d[x] != T_d[y])
+                return T_d[x] < T_d[y];
+
+        return x > y;   // Shorter suffix precedes.
+    }
+};
+
+
+// Functor class to compare two suffixes from different chunks.
+struct Chunked_Suffix_Comparator
+{
+    const char* const T_d;
+    const idx_t n;
+    const idx_t chunk_sz;
+
+    __host__ __device__
+    Chunked_Suffix_Comparator(const char* T_d, const idx_t n, const idx_t chunk_sz): T_d(T_d), n(n), chunk_sz(chunk_sz)
+    {}
+
+    __host__ __device__
+    bool operator()(idx_t x, idx_t y) const
+    {
+        if(x / chunk_sz != y / chunk_sz)
+            return x < y;   // Different chunks; sort by chunk-ID.
+
+        // Same chunk; sort lexicographically.
         for(; x < n && y < n; ++x, ++y)
             if(T_d[x] != T_d[y])
                 return T_d[x] < T_d[y];
