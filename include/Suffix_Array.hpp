@@ -11,7 +11,7 @@
 namespace caps_sa
 {
 
-typedef uint64_t idx_t;
+typedef uint64_t idx_t; // NB: This needs to be `u64` now regardless of the text size, because of the partition ID encoding mechanism in the monolithic sort of the partitions.
 
 constexpr idx_t pivot_flag = uint64_t(1) << (sizeof(idx_t) * 8 - 1);
 
@@ -29,10 +29,6 @@ struct Suffix_Comparator
 {
     const char* const T_d;
     const std::size_t n;
-
-    __host__ __device__
-    Suffix_Comparator(const char* T_d, const std::size_t n): T_d(T_d), n(n)
-    {}
 
     __host__ __device__
     bool operator()(std::size_t x, std::size_t y)
@@ -55,10 +51,6 @@ struct Chunked_Suffix_Comparator
     const idx_t chunk_sz;
 
     __host__ __device__
-    Chunked_Suffix_Comparator(const char* T_d, const idx_t n, const idx_t chunk_sz): T_d(T_d), n(n), chunk_sz(chunk_sz)
-    {}
-
-    __host__ __device__
     bool operator()(idx_t x, idx_t y) const
     {
         if(x / chunk_sz != y / chunk_sz)
@@ -70,6 +62,29 @@ struct Chunked_Suffix_Comparator
                 return T_d[x] < T_d[y];
 
         return x > y;   // Shorter suffix precedes.
+    }
+};
+
+
+// Functor class to compare two suffixes from different partitions.
+struct Partitioned_Suffix_Comparator
+{
+    const char* const T_d;
+    const idx_t n;
+    const idx_t id_bits;
+
+    __host__ __device__
+    bool operator()(idx_t x, idx_t y) const
+    {
+        const auto p_id_pos = sizeof(idx_t) * 8 - id_bits;
+        const auto p_id_x = x >> p_id_pos;
+        const auto p_id_y = y >> p_id_pos;
+        if(p_id_x != p_id_y)
+            return p_id_x < p_id_y;
+
+        x &= ((idx_t(1) << p_id_pos) - 1);
+        y &= ((idx_t(1) << p_id_pos) - 1);
+        return Suffix_Comparator{T_d, n}(x, y);
     }
 };
 
@@ -132,6 +147,14 @@ __global__ void get_absolute_subchunk_indices_kernel(idx_t* W, const idx_t* part
 // the absolute index of the `i`'th subchunk from the `j`'th partition into the
 // scatter output `Y`, in column-major order.
 __global__ void scatter_subchunks_kernel(const idx_t* X, idx_t* Y, const idx_t* R, const idx_t* W, idx_t p, idx_t chunk_sz);
+
+// Encodes the partition IDs at the top `id_bits` of the suffixes in `SA`, that
+// contains suffixes in their partition order, with partition boundaries stored
+// `part_sz`.
+__global__ void encode_partition_ids_kernel(idx_t* SA, const idx_t* part_sz, idx_t id_bits);
+
+// Removes the partition IDs from the top `id_bits` of the `n` suffixes in `SA`.
+__global__ void strip_partition_ids_kernel(idx_t* SA, idx_t n, idx_t id_bits);
 
 // The suffix array constructor class.
 class Suffix_Array

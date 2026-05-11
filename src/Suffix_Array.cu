@@ -119,6 +119,7 @@ void Suffix_Array::sort_chunks(idx_t* const SA_d, const idx_t chunk_sz) const
         // Sort each chunk successively.
         thrust::sort(thrust::device, SA, SA + chunk_len, Suffix_Comparator(T_d, n));
     }
+*/
 }
 
 
@@ -150,7 +151,7 @@ void Suffix_Array::sort_chunks_with_pivots(idx_t* const SA_d, const idx_t chunk_
             });
 
 
-        thrust::sort(thrust::device, SA_op, SA_op + sz + pivot_count, Suffix_Comparator(T_d, n));
+        thrust::sort(thrust::device, SA_op, SA_op + sz + pivot_count, Suffix_Comparator{T_d, n});
     }
 }
 
@@ -174,7 +175,7 @@ void Suffix_Array::select_pivots()
 
     // Sort the collected samples.
     const auto sample_count = k * chunk_count;
-    thrust::sort(thrust::device, S_d, S_d + sample_count, Suffix_Comparator(T_d, n));
+    thrust::sort(thrust::device, S_d, S_d + sample_count, Suffix_Comparator{T_d, n});
 
     std::vector<idx_t> S_h(sample_count);
     CUDA_CHECK(cudaMemcpy(S_h.data(), S_d, sample_count * sizeof(idx_t), cudaMemcpyDeviceToHost));
@@ -454,7 +455,7 @@ void Suffix_Array::partition_sub_chunks()
 
     // Compute the partition sizes and transform the individual subchunk sizes to intra-partition subchunk indices.
     {
-        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&part_sz), p * sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&part_sz), (p + 1) * sizeof(idx_t)));
 
         const auto thread_per_blk = std::min(p, idx_t(blk_sz));
         const auto shared_mem_bytes = (thread_per_blk + p) * sizeof(idx_t);
@@ -478,6 +479,9 @@ void Suffix_Array::partition_sub_chunks()
             part_sz, part_sz,
             p
         );
+
+        const idx_t total_sum = n;
+        cudaMemcpy(part_sz + p, &total_sum, sizeof(idx_t), cudaMemcpyHostToDevice);
     }
 
 
@@ -500,21 +504,58 @@ void Suffix_Array::partition_sub_chunks()
 }
 
 
+__global__
+void encode_partition_ids_kernel(idx_t* const SA, const idx_t* const part_sz, const idx_t id_bits)
+{
+    const auto p_id = blockIdx.x;
+    const auto beg = part_sz[p_id];
+    const auto end = part_sz[p_id + 1];
+
+    const auto t_id = threadIdx.x;
+    const auto stride = blockDim.x;
+    for(idx_t i = beg + t_id; i < end; i += stride)
+        SA[i] |= (p_id << (sizeof(idx_t) * 8 - id_bits));
+}
+
+
+__global__
+void strip_partition_ids_kernel(idx_t* const SA, const idx_t n, const idx_t id_bits)
+{
+    const auto t_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if(t_id >= n)
+        return;
+
+    SA[t_id] &= ((idx_t(1) << (sizeof(idx_t) * 8 - id_bits)) - 1);
+}
+
+
 void Suffix_Array::sort_partitions()
 {
-    std::vector<idx_t> part_sz_h(partition_count);
-    CUDA_CHECK(cudaMemcpy(part_sz_h.data(), part_sz, partition_count * sizeof(idx_t), cudaMemcpyDeviceToHost));
+    const idx_t id_bits = __builtin_ctzll(partition_count - 1);  // ceil(log2(partition_count))
+    encode_partition_ids_kernel<<<partition_count, blk_sz>>>(SA_final_d, part_sz, id_bits);
+    CUDA_CHECK(cudaGetLastError());
+
+    thrust::sort(thrust::device, SA_final_d, SA_final_d + n, Partitioned_Suffix_Comparator{T_d, n, id_bits});
+
+    strip_partition_ids_kernel<<<(n + blk_sz - 1) / blk_sz, blk_sz>>>(SA_final_d, n, id_bits);
+    CUDA_CHECK(cudaGetLastError());
+
+/*
+    // Sort partitions one-by-one.
+
+    std::vector<idx_t> part_sz_h(partition_count + 1);
+    CUDA_CHECK(cudaMemcpy(part_sz_h.data(), part_sz, (partition_count + 1) * sizeof(idx_t), cudaMemcpyDeviceToHost));
     CUDA_CHECK(cudaFree(part_sz));
 
     for(std::size_t p_id = 0; p_id < partition_count; ++p_id)
     {
         const auto p_begin = part_sz_h[p_id];
-        const auto p_sz   = (p_id < partition_count - 1 ? part_sz_h[p_id + 1] : n) - p_begin;
+        const auto p_sz    = part_sz_h[p_id + 1] - p_begin;
         auto* const P = SA_final_d + p_begin;
 
-        // Sort the partition.
-        thrust::sort(thrust::device, P, P + p_sz, Suffix_Comparator(T_d, n));
+        thrust::sort(thrust::device, P, P + p_sz, Suffix_Comparator{T_d, n});
     }
+*/
 }
 
 
@@ -525,7 +566,7 @@ void validate_kernel(const char* const T_d, const idx_t* const SA_d, bool* const
     if(idx >= n)
         return;
 
-    is_sorted[idx] = (idx == 0 ? true : Suffix_Comparator(T_d, n)(SA_d[idx - 1], SA_d[idx]));
+    is_sorted[idx] = (idx == 0 ? true : Suffix_Comparator{T_d, n}(SA_d[idx - 1], SA_d[idx]));
 }
 
 
