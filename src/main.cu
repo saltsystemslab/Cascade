@@ -1,5 +1,6 @@
 
 #include "Suffix_Array.hpp"
+#include "GPU_SACA.cuh"
 #include "Parser.hpp"
 #include "utility.hpp"
 
@@ -21,6 +22,11 @@ int main(int argc, char** argv)
     std::cerr << "Sequence length: " << n << "\n";
 
     {
+        gpu_saca::GPU_SACA saca(T, n);
+    }
+
+/*
+    {
         std::vector<std::size_t> SA(n + 1);
         // caps_sa::build_SA_naive(T, n, SA);
         // caps_sa::build_SA_prefix_doubling(T, n, SA);
@@ -35,6 +41,7 @@ int main(int argc, char** argv)
 
         std::cerr << "Suffix array is " << (Suf_Arr.validate() ? "correct" : "wrong") << "\n";
     }
+*/
 
 
     return 0;
