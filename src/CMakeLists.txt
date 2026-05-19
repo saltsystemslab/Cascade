@@ -11,6 +11,7 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 set(PROJECT_SRC
         baseline.cu
         Suffix_Array.cu
+        GPU_SACA.cu
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.
