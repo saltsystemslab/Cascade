@@ -2,7 +2,7 @@
 #include "Suffix_Array.hpp"
 #include "GPU_SACA.cuh"
 #include "Parser.hpp"
-#include "utility.hpp"
+#include "utility.cuh"
 
 #include <cstddef>
 #include <string>

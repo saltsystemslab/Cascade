@@ -1,6 +1,6 @@
 
 #include "Parser.hpp"
-#include "utility.hpp"
+#include "utility.cuh"
 
 #include "libcubwt/libcubwt.cuh"
 

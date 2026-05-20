@@ -1,6 +1,6 @@
 
 #include "GPU_SACA.cuh"
-#include "utility.hpp"
+#include "utility.cuh"
 
 #include <cstdint>
 #include <cstddef>
