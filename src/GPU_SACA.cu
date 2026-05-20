@@ -14,13 +14,14 @@ template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T_h, const std::size_t n):
       T_d_(nullptr)
     , n_(n + 1) // Account for the terminator symbol with `+1`
+    , T_h_(T)
     , p_(128)   // TODO: tune this.
 {
     // Copy over text from host to device
 
     const auto bytes = n * sizeof(T_sym_);
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&T_d_), bytes));
-    CUDA_CHECK(cudaMemcpy(T_d_, T_h, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(T_d_, T, bytes, cudaMemcpyHostToDevice));
 }
 
 

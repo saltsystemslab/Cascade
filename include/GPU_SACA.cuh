@@ -26,6 +26,7 @@ private:
 
     T_sym_* T_d_;   // The text in device.
     const std::size_t n_;   // Size of the text.
+    const T_sym_* const T_h_;   // Keep the host-side text for testing purposes.
 
     const std::size_t p_;   // Number of partitions for the SA.
 
@@ -38,8 +39,8 @@ private:
 
 public:
 
-    // Constructs a GPU-SACA object for the input text `T_h` of size `n`.
-    GPU_SACA(const T_sym_* T_h, std::size_t n);
+    // Constructs a GPU-SACA object for the input text `T` of size `n`.
+    GPU_SACA(const T_sym_* T, std::size_t n);
 
     ~GPU_SACA();
 
