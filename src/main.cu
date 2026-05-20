@@ -22,7 +22,7 @@ int main(int argc, char** argv)
     std::cerr << "Sequence length: " << n << "\n";
 
     {
-        gpu_saca::GPU_SACA saca(T, n);
+        gpu_saca::GPU_SACA<char> saca(T, n);
     }
 
 /*
