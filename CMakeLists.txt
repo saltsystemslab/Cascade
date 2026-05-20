@@ -127,8 +127,9 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 
-# Add subdirectory `src` to the build.
+# Add required subdirectories to the build.
 add_subdirectory(src)
+add_subdirectory(test)
 
 
 # Set some CUDA-specific properties.
@@ -168,8 +169,11 @@ target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
 # Link to CUDA runtime.
 # target_link_libraries(core PRIVATE CUDA::cudart)
 
-# Link to OpenMP.
-target_link_libraries(core PUBLIC OpenMP::OpenMP_CXX)
+# Link tester to OpenMP.
+target_link_libraries(tests PRIVATE OpenMP::OpenMP_CXX)
+
+# Link to the tester.
+target_link_libraries(core PRIVATE tests)
 
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
