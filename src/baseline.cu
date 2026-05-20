@@ -1,6 +1,6 @@
 
 
-#include "utility.hpp"
+#include "utility.cuh"
 
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>

@@ -1,7 +1,7 @@
 
 
 #include "Suffix_Array.hpp"
-#include "utility.hpp"
+#include "utility.cuh"
 
 #include <cstdint>
 #include <vector>
