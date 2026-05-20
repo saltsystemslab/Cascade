@@ -3,6 +3,8 @@
 #define GPU_SACA_HPP
 
 
+#include "utility.cuh"
+
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -27,6 +29,12 @@ private:
 
     const std::size_t p_;   // Number of partitions for the SA.
 
+    static constexpr uint16_t K = 12;   // k-gram size for frequency counting of prefixes.
+
+
+    // Selects the set of pivots for the partitioning of the suffixes.
+    void select_pivots();
+
 
 public:
 
@@ -48,6 +56,70 @@ uint8_t binarize(const T_sym_ x)
     // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
     constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
     return x <= mid ? 0 : 1;
+}
+
+
+// Builds the histogram of the binarized `K`-grams of the text `T`, of type
+// `T_sym_` and size `n`, into `H`.
+// Grid organization: the blocks tile the text such that each thread processes
+// one `K`-gram.
+template <typename T_sym_, uint16_t K, std::size_t BLOCK_SZ>
+__global__
+void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_t n, uint64_t* const __restrict__ H)
+{
+    constexpr auto HIST_SZ = 1llu << K; // Number of entries in the histogram.
+    constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
+
+    // Shared memory pattern: binarized text-tile of size `TILE_SZ`, followed by block-local histogram of size `HIST_SZ`, followed by some padding for atomic-add workaround of `u8`s.
+    extern __shared__ uint8_t s_mem[];
+    uint8_t* tile       = s_mem;    // Binarized text-tile.
+    uint8_t* local_hist = s_mem + TILE_SZ;  // The local histogram.
+    static_assert(BLOCK_SZ < 256);  // So that block-local `u8` counters in the histogram do not overflow in the worst case.
+
+    const auto t_id = threadIdx.x;
+    const auto block_off = blockIdx.x * BLOCK_SZ;   // Offset of this block into the text.
+
+    // Clear the block-local histogram cooperatively.
+    {
+        for(uint16_t j = t_id; j < HIST_SZ; j += BLOCK_SZ)
+            local_hist[j] = 0;
+    }
+
+    // Load the corresponding text-tile cooperatively, binarizing it on the fly.
+    {
+        auto off = block_off + t_id;    // Offset into the text to load.
+        tile[t_id] = (off < n ? binarize(T[off]) : 0u);
+        if(BLOCK_SZ + t_id < TILE_SZ)   // Process the tile-segment of size `K - 1` overhanging from the block.
+        {
+            off = block_off + BLOCK_SZ + t_id;
+            tile[BLOCK_SZ + t_id] = (off < n ? binarize(T[off]) : 0u);
+        }
+    }
+
+    __syncthreads();
+
+    // Pack each k-gram and increment its frequency.
+    {
+        const auto off = block_off + t_id;  // Offset into the text being processed.
+        if(off < n - K + 1)
+        {
+            uint32_t bin_kgram = 0; // Binarized k-gram at text-offset `off`.
+
+            #pragma unroll
+            for(uint16_t i = 0; i < K; ++i)
+                bin_kgram |= (static_cast<uint32_t>(tile[t_id + i]) << (K - 1 - i));    // Note the endianness of the binarization.
+
+            // Atomic-add is not natively supported for `u8`s. Emulate via atomic-CAS on the enclosing 32-bit word.
+           atomic_add_u8(local_hist + bin_kgram, 1u);
+        }
+    }
+
+    __syncthreads();
+
+    // Flush block-local histogram to global histogram cooperatively.
+    for(uint16_t j = t_id; j < HIST_SZ; j += BLOCK_SZ)
+        if(local_hist[j])
+            atomicAdd(reinterpret_cast<unsigned long long*>(H + j), local_hist[j]);
 }
 
 
