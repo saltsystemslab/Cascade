@@ -43,6 +43,10 @@ public:
 
     ~GPU_SACA();
 
+    // Returns `1` if `x` is in the upper half of `T_sym_`'s range, `0` otherwise.
+    __device__ __host__
+    static uint8_t binarize(T_sym_ x);
+
     // Constructs the suffix array at `SA`.
     void build_SA(std::size_t* SA_h);
 };
@@ -50,8 +54,8 @@ public:
 
 // Returns `1` if `x` is in the upper half of `T_sym_`'s range, `0` otherwise.
 template <typename T_sym_>
-__device__ __forceinline__
-uint8_t binarize(const T_sym_ x)
+__device__ __host__
+__forceinline__ uint8_t GPU_SACA<T_sym_>::binarize(const T_sym_ x)
 {
     // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
     constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
@@ -88,11 +92,11 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
     // Load the corresponding text-tile cooperatively, binarizing it on the fly.
     {
         auto off = block_off + t_id;    // Offset into the text to load.
-        tile[t_id] = (off < n ? binarize(T[off]) : 0u);
+        tile[t_id] = (off < n ? GPU_SACA<T_sym_>::binarize(T[off]) : 0u);
         if(BLOCK_SZ + t_id < TILE_SZ)   // Process the tile-segment of size `K - 1` overhanging from the block.
         {
             off = block_off + BLOCK_SZ + t_id;
-            tile[BLOCK_SZ + t_id] = (off < n ? binarize(T[off]) : 0u);
+            tile[BLOCK_SZ + t_id] = (off < n ? GPU_SACA<T_sym_>::binarize(T[off]) : 0u);
         }
     }
 
