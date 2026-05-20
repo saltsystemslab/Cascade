@@ -57,7 +57,7 @@ set(DEBUG_FLAGS -ggdb)
 # Bundle the extra optimization flags (not associated with the `-O` levels)
 # that we want to pass on to the compiler.
 # Reference: https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
-set(OPTIMIZE_FLAGS -funroll-loops -march=native -mavx)
+set(OPTIMIZE_FLAGS -march=native -mavx)
 
 # Bundle miscellaneous required flags.
 set(MISC_FLAGS "")
@@ -97,6 +97,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 # Search and load the GPU-related libraries, tools, compilers etc.
 find_package(CUDAToolkit REQUIRED)
+
+# Search and load the `OpenMP` runtime libraries; required for testing purposes.
+find_package(OpenMP REQUIRED)
 
 # Search and load setting for the `zlib` library. The library is required to seamlessly adapt
 # the `kseq` library to gzip-compressed files.

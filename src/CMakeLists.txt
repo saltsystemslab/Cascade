@@ -3,6 +3,7 @@
 
 # This controls the `-I` (include paths) switch of the compiler invocation.
 set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
+set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 
 
 # Define the targets.
@@ -44,7 +45,7 @@ set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 # Set the include directories for the targets.
 
-target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})
+target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR})
 target_include_directories(libcubwt_driver PRIVATE ${INCLUDE_DIR})
@@ -69,6 +70,9 @@ target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
 # target_link_libraries(core PRIVATE CUDA::cudart)
+
+# Link to OpenMP.
+target_link_libraries(core PUBLIC OpenMP::OpenMP_CXX)
 
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
