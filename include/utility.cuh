@@ -43,8 +43,9 @@ namespace gpu_saca
     __device__ __forceinline__
     uint8_t atomic_add_u8(uint8_t* addr, const uint8_t val)
     {
-        uint32_t* const word_addr = reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(addr) & ~0b11u);    // Address of the enclosing `u32` word.
-        const uint32_t bit_off    = (reinterpret_cast<uintptr_t>(addr) & 0b11u) * 8u;   // Bit-offset of the byte of interest within the enclosing `u32` word.
+        constexpr uintptr_t byte_off_mask = 0b11llu;    // Mask to extract the byte of interest's offset within the enclosing `u32` word.
+        uint32_t* const word_addr = reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(addr) & ~byte_off_mask);    // Address of the enclosing `u32` word.
+        const uint32_t bit_off    = (reinterpret_cast<uintptr_t>(addr) & byte_off_mask) * 8u;   // Bit-offset of the byte of interest within the enclosing `u32` word.
         const uint32_t clear_mask = ~(0xFFu << bit_off);    // Mask to clear the byte of interest.
 
         uint32_t old = *word_addr, expected;
@@ -54,7 +55,7 @@ namespace gpu_saca
             const uint8_t byte = (expected >> bit_off) & 0xFFu;
             const uint8_t new_byte = byte + val;    // Overflows handled implicitly.
 
-            const uint32_t updated = (expected & clear_mask) | (new_byte << bit_off);
+            const uint32_t updated = (expected & clear_mask) | (static_cast<uint32_t>(new_byte) << bit_off);
             old = atomicCAS(word_addr, expected, updated);
         }
         while(old != expected);
