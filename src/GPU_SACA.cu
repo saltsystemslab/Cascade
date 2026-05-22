@@ -13,7 +13,7 @@ namespace gpu_saca
 
 
 template <typename T_sym_>
-GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T_h, const std::size_t n):
+GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const std::size_t n):
       T_d_(nullptr)
     , n_(n + 1) // Account for the terminator symbol with `+1`
     , T_h_(T)
@@ -69,6 +69,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 #endif
     }
 }
+
 
 
 // Template instantiations for the required instances.

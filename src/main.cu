@@ -2,27 +2,40 @@
 #include "Suffix_Array.hpp"
 #include "GPU_SACA.cuh"
 #include "Parser.hpp"
+#include "utility.hpp"
 #include "utility.cuh"
 
 #include <cstddef>
 #include <string>
 #include <cstdlib>
+#include <vector>
 #include <iostream>
 
 
 int main(int argc, char** argv)
 {
     (void)argc, (void)argv;
+/*
     caps_sa::Parser input(argv[1]);
     input.read_next_seq();
 
     auto const T = input.seq();
     auto const n = input.seq_len();
 
+*/
+    const std::size_t n = std::atoll(argv[1]);
     std::cerr << "Sequence length: " << n << "\n";
 
+
+    using T_sym_ = uint8_t;
+    std::vector<T_sym_> T;
+    gpu_saca::generate_random_text(T, n);
+
     {
-        gpu_saca::GPU_SACA<char> saca(T, n);
+        gpu_saca::GPU_SACA<T_sym_> saca(T.data(), n);
+
+        std::vector<uint64_t> H(n + 1);
+        saca.build_SA(H.data());
     }
 
 /*
