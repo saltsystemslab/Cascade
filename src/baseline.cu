@@ -1,6 +1,6 @@
 
 
-#include "utility.cuh"
+#include "utility.hpp"
 
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>
@@ -20,7 +20,7 @@ typedef std::size_t idx_t;
 __host__
 void build_SA_naive(const char* const T_h, idx_t n, idx_t* const SA_h)
 {
-    const auto t_0 = now();
+    const auto t_0 = timer::now();
 
     n++;    // Account for the terminator symbol '\0'.
 
@@ -32,7 +32,7 @@ void build_SA_naive(const char* const T_h, idx_t n, idx_t* const SA_h)
     cudaMemcpy(T_d, T_h, bytes, cudaMemcpyHostToDevice);
 
 
-    const auto t_s = now();
+    const auto t_s = timer::now();
 
     // Initialize SA with `[0, n)`
     thrust::device_vector<idx_t> SA_d(n);
@@ -57,15 +57,15 @@ void build_SA_naive(const char* const T_h, idx_t n, idx_t* const SA_h)
         std::exit(EXIT_FAILURE);
     }
 
-    const auto t_e = now();
+    const auto t_e = timer::now();
 
 
     cudaFree(T_d);
     cudaMemcpy(SA_h, thrust::raw_pointer_cast(SA_d.data()), n * sizeof(idx_t), cudaMemcpyDeviceToHost);
 
-    const auto t_1 = now();
-    std::cerr << "Time taken for parallel SA construction and data movement: " << duration(t_1 - t_0) << " s.\n";
-    std::cerr << "Time taken for parallel SA construction kernel: " << duration(t_e - t_s) << " s.\n";
+    const auto t_1 = timer::now();
+    std::cerr << "Time taken for parallel SA construction and data movement: " << timer::duration(t_1 - t_0) << " s.\n";
+    std::cerr << "Time taken for parallel SA construction kernel: " << timer::duration(t_e - t_s) << " s.\n";
 }
 
 
@@ -115,7 +115,7 @@ void rank_from_scan_kernel(const idx_t* const SA, const idx_t* const S, idx_t* c
 __host__
 void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
 {
-    const auto t_0 = now();
+    const auto t_0 = timer::now();
 
     n++;    // Account for the terminator symbol '\0'.
 
@@ -130,7 +130,7 @@ void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
     cudaMemcpy(T_d, T_h, bytes, cudaMemcpyHostToDevice);
 
 
-    const auto t_s = now();
+    const auto t_s = timer::now();
 
     thrust::device_vector<std::size_t> SA_vec_d(n); // The suffix array.
     thrust::device_vector<std::size_t> R_vec_d(n);  // The rank array.
@@ -192,16 +192,16 @@ void build_SA_prefix_doubling(const char* T_h, std::size_t n, std::size_t* SA_h)
         }
     }
 
-    const auto t_e = now();
+    const auto t_e = timer::now();
 
 
     cudaFree(T_d);
     cudaMemcpy(SA_h, SA_d, n * sizeof(std::size_t), cudaMemcpyDeviceToHost);
 
 
-    const auto t_1 = now();
-    std::cerr << "Time taken for parallel SA construction and data movement: " << duration(t_1 - t_0) << " s.\n";
-    std::cerr << "Time taken for parallel SA construction: " << duration(t_e - t_s) << " s.\n";
+    const auto t_1 = timer::now();
+    std::cerr << "Time taken for parallel SA construction and data movement: " << timer::duration(t_1 - t_0) << " s.\n";
+    std::cerr << "Time taken for parallel SA construction: " << timer::duration(t_e - t_s) << " s.\n";
 }
 
 }

@@ -1,6 +1,6 @@
 
 #include "Parser.hpp"
-#include "utility.cuh"
+#include "utility.hpp"
 
 #include "libcubwt/libcubwt.cuh"
 
@@ -264,11 +264,11 @@ int main(int argc, char** argv)
     {
         std::vector<uint32_t> SA(n);
 
-        const auto t_0 = caps_sa::now();
+        const auto t_0 = caps_sa::timer::now();
         bench_libcubwt(T, n, SA.data());
-        const auto t_1 = caps_sa::now();
+        const auto t_1 = caps_sa::timer::now();
 
-        std::cerr << "Built the SA using `libcubwt`. Time taken: " << caps_sa::duration(t_1 - t_0) << " seconds.\n";
+        std::cerr << "Built the SA using `libcubwt`. Time taken: " << caps_sa::timer::duration(t_1 - t_0) << " seconds.\n";
 
         // std::cerr << "SA matches reference: " << (SA == reference_sa(T, n) ? "YES" : "NO") << "\n";
     }

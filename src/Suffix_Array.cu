@@ -1,6 +1,7 @@
 
 
 #include "Suffix_Array.hpp"
+#include "utility.hpp"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -50,47 +51,47 @@ void Suffix_Array::build_SA(idx_t* const SA)
 {
     // Sort the chunks.
     {
-        const auto t_0 = now();
+        const auto t_0 = timer::now();
         sort_chunks(SA_d, chunk_sz);
         cudaDeviceSynchronize();
-        const auto t_1 = now();
-        std::cerr << "Sorted the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+        const auto t_1 = timer::now();
+        std::cerr << "Sorted the chunks. Time taken: " << timer::duration(t_1 - t_0) << " seconds.\n";
     }
 
     // Select the final pivots.
     {
-        const auto t_0 = now();
+        const auto t_0 = timer::now();
         select_pivots();
         cudaDeviceSynchronize();
-        const auto t_1 = now();
-        std::cerr << "Selected the pivot set. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+        const auto t_1 = timer::now();
+        std::cerr << "Selected the pivot set. Time taken: " << timer::duration(t_1 - t_0) << " seconds.\n";
     }
 
     // Locate the pivots at the sorted chunks.
     {
-        const auto t_0 = now();
+        const auto t_0 = timer::now();
         locate_pivots();
         cudaDeviceSynchronize();
-        const auto t_1 = now();
-        std::cerr << "Located the pivots at the chunks. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+        const auto t_1 = timer::now();
+        std::cerr << "Located the pivots at the chunks. Time taken: " << timer::duration(t_1 - t_0) << " seconds.\n";
     }
 
     // Route the subchunks to their final partitions.
     {
-        const auto t_0 = now();
+        const auto t_0 = timer::now();
         partition_sub_chunks();
         cudaDeviceSynchronize();
-        const auto t_1 = now();
-        std::cerr << "Placed the subchunks at their final partitions. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+        const auto t_1 = timer::now();
+        std::cerr << "Placed the subchunks at their final partitions. Time taken: " << timer::duration(t_1 - t_0) << " seconds.\n";
     }
 
     // Sort the final partitions.
     {
-        const auto t_0 = now();
+        const auto t_0 = timer::now();
         sort_partitions();
         cudaDeviceSynchronize();
-        const auto t_1 = now();
-        std::cerr << "Sorted the final partitions. Time taken: " << duration(t_1 - t_0) << " seconds.\n";
+        const auto t_1 = timer::now();
+        std::cerr << "Sorted the final partitions. Time taken: " << timer::duration(t_1 - t_0) << " seconds.\n";
     }
 
     // Copy back the chunked suffix array to host.
