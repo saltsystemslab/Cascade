@@ -82,6 +82,9 @@ list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 # Add the required preprocessor definitions (`#define`s) to pass on.
 add_compile_definitions(PROJECT_VERSION=${CMAKE_PROJECT_VERSION})
 add_compile_definitions(CMAKE_EXPORT_COMPILE_COMMANDS)  # For better `clangd` scanning.
+if(TESTS)
+    add_compile_definitions(TESTS)
+endif()
 
 
 # Set path for modules required to search for existing packages in the system.
@@ -134,6 +137,7 @@ add_subdirectory(test)
 
 # Set some CUDA-specific properties.
 set_property(TARGET core            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET libcubwt        PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET libcubwt_driver PROPERTY CUDA_SEPARABLE_COMPILATION ON)
@@ -141,8 +145,9 @@ set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
 set(CUDA_ARCH "70-real")
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET libcubwt PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET libcubwt        PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET libcubwt_driver PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 

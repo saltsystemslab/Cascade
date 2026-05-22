@@ -1,9 +1,11 @@
 
 #include "GPU_SACA.cuh"
 #include "utility.cuh"
+#include "tests.hpp"
 
 #include <cstdint>
 #include <cstddef>
+#include <iostream>
 
 
 namespace gpu_saca
@@ -61,6 +63,10 @@ void GPU_SACA<T_sym_>::select_pivots()
 
         kgram_histogram_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz >>> (T_d_, n_, H_d);
         CUDA_CHECK(cudaGetLastError());
+
+#ifdef TESTS
+            std::cerr << "Histogram verification: " << (test::validate_kgram_histogram(T_h_, n_, K, H_d) ? "Passes" : "Fails") << "\n";
+#endif
     }
 }
 

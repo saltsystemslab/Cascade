@@ -115,7 +115,7 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
                 bin_kgram |= (static_cast<uint32_t>(tile[t_id + i]) << (K - 1 - i));    // Note the endianness of the binarization.
 
             // Atomic-add is not natively supported for `u8`s. Emulate via atomic-CAS on the enclosing 32-bit word.
-           atomic_add_u8(local_hist + bin_kgram, 1u);
+            atomic_add_u8(local_hist + bin_kgram, 1u);
         }
     }
 
