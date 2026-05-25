@@ -68,6 +68,33 @@ void GPU_SACA<T_sym_>::select_pivots()
             std::cerr << "Histogram verification: " << (test::validate_kgram_histogram(T_h_, n_, K, H_d) ? "Passes" : "Fails") << "\n";
 #endif
     }
+
+    // Select `p - 1` uniformly spread out (in terms of histogram mass) pivots.
+    {
+        std::vector<uint64_t> H_h(hist_sz); // Histogram at the device.
+        CUDA_CHECK(cudaMemcpy(H_h.data(), H_d, hist_sz * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+
+        pivots.resize(p_ - 1);
+        uint64_t cum_sum = 0;
+        std::size_t j = 0;  // Collected pivots.
+        for(std::size_t i = 0; i < hist_sz && j < p_ - 1; ++i)
+        {
+            cum_sum += H_h[i];
+            if(j < p_ - 1 && cum_sum >= (j + 1) * n_ / p_)
+            {
+                const auto target = (j + 1) * n_ / p_;
+                const auto before = cum_sum - H_h[i];
+                const auto after  = cum_sum;
+
+                // Place the split point before or after bin `i`, where ever the mass sum is closer to the target sum.
+                auto split = (target - before <= after - target ? i - 1 : i);
+                if(j > 0 && split <= pivots[j - 1]) // Nudge the pivot forward if the bin is really heavy.
+                    split = pivots[j - 1] + 1;
+
+                pivots[j++] = split;
+            }
+        }
+    }
 }
 
 
