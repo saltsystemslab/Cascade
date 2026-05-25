@@ -46,7 +46,7 @@ public:
 
     // Returns `1` if `x` is in the upper half of `T_sym_`'s range, `0` otherwise.
     __device__ __host__
-    static uint8_t binarize(T_sym_ x);
+    static uint8_t quantize(T_sym_ x);
 
     // Constructs the suffix array at `SA`.
     void build_SA(std::size_t* SA_h);
@@ -56,7 +56,7 @@ public:
 // Returns `1` if `x` is in the upper half of `T_sym_`'s range, `0` otherwise.
 template <typename T_sym_>
 __device__ __host__
-__forceinline__ uint8_t GPU_SACA<T_sym_>::binarize(const T_sym_ x)
+__forceinline__ uint8_t GPU_SACA<T_sym_>::quantize(const T_sym_ x)
 {
     // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
     constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
@@ -64,7 +64,7 @@ __forceinline__ uint8_t GPU_SACA<T_sym_>::binarize(const T_sym_ x)
 }
 
 
-// Builds the histogram of the binarized `K`-grams of the text `T`, of type
+// Builds the histogram of the quantized `K`-grams of the text `T`, of type
 // `T_sym_` and size `n`, into `H`.
 // Grid organization: the blocks tile the text such that each thread processes
 // one `K`-gram.
@@ -75,9 +75,9 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
     constexpr auto HIST_SZ = 1llu << K; // Number of entries in the histogram.
     constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
 
-    // Shared memory pattern: binarized text-tile of size `TILE_SZ`, followed by block-local histogram of size `HIST_SZ`, followed by some padding for atomic-add workaround of `u8`s.
+    // Shared memory pattern: quantized text-tile of size `TILE_SZ`, followed by block-local histogram of size `HIST_SZ`, followed by some padding for atomic-add workaround of `u8`s.
     extern __shared__ uint8_t s_mem[];
-    uint8_t* tile       = s_mem;    // Binarized text-tile.
+    uint8_t* tile       = s_mem;    // Quantized text-tile.
     uint8_t* local_hist = s_mem + TILE_SZ;  // The local histogram.
     static_assert(BLOCK_SZ < 256);  // So that block-local `u8` counters in the histogram do not overflow in the worst case.
 
@@ -90,14 +90,14 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
             local_hist[j] = 0;
     }
 
-    // Load the corresponding text-tile cooperatively, binarizing it on the fly.
+    // Load the corresponding text-tile cooperatively, quantizing it on the fly.
     {
         auto off = block_off + t_id;    // Offset into the text to load.
-        tile[t_id] = (off < n ? GPU_SACA<T_sym_>::binarize(T[off]) : 0u);
+        tile[t_id] = (off < n ? GPU_SACA<T_sym_>::quantize(T[off]) : 0u);
         if(BLOCK_SZ + t_id < TILE_SZ)   // Process the tile-segment of size `K - 1` overhanging from the block.
         {
             off = block_off + BLOCK_SZ + t_id;
-            tile[BLOCK_SZ + t_id] = (off < n ? GPU_SACA<T_sym_>::binarize(T[off]) : 0u);
+            tile[BLOCK_SZ + t_id] = (off < n ? GPU_SACA<T_sym_>::quantize(T[off]) : 0u);
         }
     }
 
@@ -108,14 +108,14 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
         const auto off = block_off + t_id;  // Offset into the text being processed.
         if(off < n - K + 1)
         {
-            uint32_t bin_kgram = 0; // Binarized k-gram at text-offset `off`.
+            uint32_t quant_kgram = 0; // Quantized k-gram at text-offset `off`.
 
             #pragma unroll
             for(uint16_t i = 0; i < K; ++i)
-                bin_kgram |= (static_cast<uint32_t>(tile[t_id + i]) << (K - 1 - i));    // Note the endianness of the binarization.
+                quant_kgram |= (static_cast<uint32_t>(tile[t_id + i]) << (K - 1 - i));    // Note the endianness of the quantization.
 
             // Atomic-add is not natively supported for `u8`s. Emulate via atomic-CAS on the enclosing 32-bit word.
-            atomic_add_u8(local_hist + bin_kgram, 1u);
+            atomic_add_u8(local_hist + quant_kgram, 1u);
         }
     }
 

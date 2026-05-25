@@ -17,7 +17,7 @@ template <typename T_sym_>
 void kgram_histogram(const T_sym_* const T, const std::size_t n, uint64_t* const H, const std::size_t k)
 {
     // TODO: repeated code; have better policy for this.
-    const auto binarize = [](const T_sym_ x)
+    const auto quantize = [](const T_sym_ x)
     {
         // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
         constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
@@ -36,12 +36,12 @@ void kgram_histogram(const T_sym_* const T, const std::size_t n, uint64_t* const
         #pragma omp for schedule(static)
         for(std::size_t i = 0; i < kgram_count; ++i)    // Thread-local counting.
         {
-            uint32_t bin_kgram = 0; // Binarized k-gram.
+            uint32_t quant_kgram = 0;   // Quantized k-gram.
             for(std::size_t j = 0; j < k; ++j)
-                bin_kgram |= binarize(T[i + j]) << (k - 1 - j);
+                quant_kgram |= quantize(T[i + j]) << (k - 1 - j);
 
-            assert(bin_kgram < hist_sz);
-            local_hist[bin_kgram]++;
+            assert(quant_kgram < hist_sz);
+            local_hist[quant_kgram]++;
         }
 
         #pragma omp for schedule(static)    // Global reduction of the local counts.
