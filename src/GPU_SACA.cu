@@ -76,7 +76,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 
         pivots.resize(p_ - 1);
         uint64_t cum_sum = 0;
-        std::size_t j = 0;  // Collected pivots.
+        std::size_t j = 0;  // Number of collected pivots.
         for(std::size_t i = 0; i < hist_sz && j < p_ - 1; ++i)
         {
             cum_sum += H_h[i];
