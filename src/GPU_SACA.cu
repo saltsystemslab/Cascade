@@ -1,5 +1,6 @@
 
 #include "GPU_SACA.cuh"
+#include "utility.hpp"
 #include "utility.cuh"
 #include "tests.hpp"
 
@@ -94,6 +95,12 @@ void GPU_SACA<T_sym_>::select_pivots()
                 pivots[j++] = split;
             }
         }
+
+#ifdef TESTS
+        const auto part_sz = test::get_partition_sizes(H_h, pivots);
+        const auto stats = Collection_Stats::get_collection_stat(part_sz);
+        stats.print();
+#endif
     }
 }
 
