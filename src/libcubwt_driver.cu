@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <vector>
 #include <cstring>
+#include <string_view>
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
@@ -254,23 +255,24 @@ int main(int argc, char** argv)
 
     (void)argc, (void)argv;
     caps_sa::Parser input(argv[1]);
-    input.read_next_seq();
 
-    auto const T = input.seq();
-    auto const n = input.seq_len();
+    std::string T;
+    while(input.read_next_seq())
+        T += std::string_view(input.seq(), input.seq_len());
 
+    const auto n = T.length();
     std::cerr << "Sequence length: " << n << "\n";
 
     {
         std::vector<uint32_t> SA(n);
 
         const auto t_0 = caps_sa::timer::now();
-        bench_libcubwt(T, n, SA.data());
+        bench_libcubwt(T.c_str(), n, SA.data());
         const auto t_1 = caps_sa::timer::now();
 
         std::cerr << "Built the SA using `libcubwt`. Time taken: " << caps_sa::timer::duration(t_1 - t_0) << " seconds.\n";
 
-        // std::cerr << "SA matches reference: " << (SA == reference_sa(T, n) ? "YES" : "NO") << "\n";
+        // std::cerr << "SA matches reference: " << (SA == reference_sa(reinterpret_cast<const uint8_t*>(T), n) ? "YES" : "NO") << "\n";
     }
 
     return 0;
