@@ -22,7 +22,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const std::size_t n):
 {
     // Copy over text from host to device
 
-    const auto bytes = n * sizeof(T_sym_);
+    const auto bytes = n_ * sizeof(T_sym_);
     CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&T_d_), bytes));
     CUDA_CHECK(cudaMemcpy(T_d_, T, bytes, cudaMemcpyHostToDevice));
 }
