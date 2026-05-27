@@ -9,8 +9,13 @@
 #include <limits>
 #include <random>
 #include <vector>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <typeinfo>
 #include <cstdio>
 #include <cmath>
+#include <cstdlib>
 #include <chrono>
 
 
@@ -38,6 +43,26 @@ void generate_random_text(std::vector<T_sym_>& T, const std::size_t n)
     T.resize(n);
     for(std::size_t i = 0; i < n; ++i)
         T[i] = static_cast<T_sym_>(dist(rng));
+}
+
+
+// Reads an entire file of elements of type `T_` from `file_path` into `v` and
+// returns the count of elements read.
+template <typename T_>
+std::size_t read_file(const std::string& file_path, std::vector<T_>& v)
+{
+    const auto file_bytes = std::filesystem::file_size(file_path);
+    if(file_bytes % sizeof(T_) != 0)
+    {
+        std::cerr << "The file at path " << file_path << " has " << file_bytes << " many bytes, not matching alignment for type " << typeid(T_).name() << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    v.resize(file_bytes / sizeof(T_));
+    std::ifstream is(file_path, std::ios::binary);
+    is.read(reinterpret_cast<char*>(v.data()), file_bytes);
+
+    return v.size();
 }
 
 

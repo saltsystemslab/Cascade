@@ -23,13 +23,11 @@ int main(int argc, char** argv)
     auto const n = input.seq_len();
 
 */
-    const std::size_t n = std::atoll(argv[1]);
-    std::cerr << "Sequence length: " << n << "\n";
-
-
     using T_sym_ = uint8_t;
     std::vector<T_sym_> T;
-    gpu_saca::generate_random_text(T, n);
+    const std::size_t n = gpu_saca::read_file(argv[1], T);
+
+    std::cerr << "Sequence length: " << n << "\n";
 
     {
         gpu_saca::GPU_SACA<T_sym_> saca(T.data(), n);
