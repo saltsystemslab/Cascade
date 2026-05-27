@@ -43,6 +43,7 @@ void generate_random_text(std::vector<T_sym_>& T, const std::size_t n)
 
 struct Collection_Stats
 {
+    uint64_t n;
     uint64_t total;
     uint64_t min;
     uint64_t max;
@@ -55,6 +56,7 @@ struct Collection_Stats
     void print() const
     {
         const int w = 20;   // Label column width
+        std::printf("%-*s %llu\n",    w, "Size:",           (unsigned long long)n);
         std::printf("%-*s %llu\n",    w, "Total mass:",     (unsigned long long)total);
         std::printf("%-*s %llu\n",    w, "Minimum:",        (unsigned long long)min);
         std::printf("%-*s %llu\n",    w, "Maximum:",        (unsigned long long)max);
@@ -97,7 +99,7 @@ struct Collection_Stats
 
         const double imbalance = (mean > 0 ? static_cast<double>(max - min) / mean : 0);
 
-        return Collection_Stats{total, min, max, mean, median, std_dev, imbalance};
+        return Collection_Stats{n, total, min, max, mean, median, std_dev, imbalance};
     }
 };
 
