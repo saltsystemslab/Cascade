@@ -27,7 +27,7 @@ int main(int argc, char** argv)
 */
     using T_sym_ = uint8_t;
     std::vector<T_sym_> T;
-    const std::size_t n = gpu_saca::read_file_terminated(argv[1], T);
+    const std::size_t n = gpu_saca::util::read_file_terminated(argv[1], T);
     assert(T.back() == std::numeric_limits<T_sym_>::min());
 
     std::cerr << "Sequence length: " << n << "\n";

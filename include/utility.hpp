@@ -29,7 +29,7 @@ namespace caps_sa::timer
 }
 
 
-namespace gpu_saca
+namespace gpu_saca::util
 {
 
 // Generates a random text of symbols of type `T_sym_` and of length `n` at `T`.

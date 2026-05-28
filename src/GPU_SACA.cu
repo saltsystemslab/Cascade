@@ -101,7 +101,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 
 #ifdef TESTS
         const auto part_sz = test::get_partition_sizes(H_h, pivots);
-        const auto stats = Collection_Stats::get_collection_stat(part_sz);
+        const auto stats = util::Collection_Stats::get_collection_stat(part_sz);
         stats.print();
 #endif
     }
