@@ -24,7 +24,7 @@ void kgram_histogram(const T_sym_* const T, const std::size_t n, uint64_t* const
         return x <= mid ? 0 : 1;
     };
 
-    const auto kgram_count = n - k + 1;
+    const auto kgram_count = n;
     const auto hist_sz = 1llu << k;
 
     std::memset(H, 0, hist_sz * sizeof(uint64_t));  // Clear out the histogram.
@@ -38,7 +38,9 @@ void kgram_histogram(const T_sym_* const T, const std::size_t n, uint64_t* const
         {
             uint32_t quant_kgram = 0;   // Quantized k-gram.
             for(std::size_t j = 0; j < k; ++j)
-                quant_kgram |= quantize(T[i + j]) << (k - 1 - j);
+                quant_kgram |= (i + j < n ?
+                                    static_cast<uint32_t>(quantize(T[i + j])) << (k - 1 - j) :
+                                    0);
 
             assert(quant_kgram < hist_sz);
             local_hist[quant_kgram]++;

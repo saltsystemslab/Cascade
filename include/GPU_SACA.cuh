@@ -108,7 +108,7 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
     // Pack each k-gram and increment its frequency.
     {
         const auto off = block_off + t_id;  // Offset into the text being processed.
-        if(off < n - K + 1)
+        if(off < n)
         {
             uint32_t quant_kgram = 0; // Quantized k-gram at text-offset `off`.
 

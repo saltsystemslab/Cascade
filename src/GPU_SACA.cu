@@ -56,7 +56,7 @@ void GPU_SACA<T_sym_>::select_pivots()
     // Count the quantized k-gram frequencies into the histogram.
     {
         constexpr std::size_t BLOCK_SZ = 128;
-        const auto kgram_count = n_ - K + 1;
+        const auto kgram_count = n_;
         const auto block_count = (kgram_count + BLOCK_SZ - 1) / BLOCK_SZ;
 
         const auto s_mem_sz = (BLOCK_SZ + K - 1) + (1llu << K) + 4; // Shared memory size:  quantized text-tile, followed by block-local histogram with `u8` counters,
