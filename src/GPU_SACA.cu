@@ -123,6 +123,10 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz >>> (T_d_, n_, P_id_d, p_);
     CUDA_CHECK(cudaGetLastError());
+
+#ifdef TESTS
+    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id_d) ? "Passes" : "Fails") << "\n";
+#endif
 }
 
 

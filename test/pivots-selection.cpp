@@ -73,11 +73,53 @@ std::vector<uint64_t> get_partition_sizes(const std::vector<uint64_t>& H, const 
 }
 
 
+template <typename  T_sym_>
+void compute_partition_IDs(const T_sym_* T, std::size_t n, uint32_t* P_id, std::size_t k, const std::vector<uint32_t>& X)
+{
+    // TODO: repeated code; have better policy for this.
+    const auto quantize = [](const T_sym_ x)
+    {
+        // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
+        constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
+        return x <= mid ? 0 : 1;
+    };
+
+    const auto part_count = X.size() + 1;
+    #pragma omp parallel for schedule(static)
+    for(std::size_t i = 0; i < n; ++i)
+    {
+        uint32_t quant_kgram = 0;   // Quantized k-gram.
+        for(std::size_t j = 0; j < k; ++j)
+            quant_kgram |= (i + j < n ?
+                                static_cast<uint32_t>(quantize(T[i + j])) << (k - 1 - j) :
+                                0);
+
+        // Binary search for `quant_kgram` into the pivots for the smallest `p_id` such that `quant_kgram <= pivots[p_id]`.
+        std::size_t low = 0, high = part_count - 1; // The solution lies in the range `[low, high]`.
+        while(low < high)
+        {
+            const auto mid = low + (high - low) / 2;
+            if(quant_kgram <= X[mid])   // The solution lies in the range `[low, mid]`.
+                high = mid;
+            else    // It lies in the range `[mid + 1, high]`.
+                low = mid + 1;
+        }
+
+        P_id[i] = low;
+    }
+}
+
+
 
 // Template instantiations for the required instances.
-template void kgram_histogram<char>(const char*, std::size_t, uint64_t*, std::size_t);
-template void kgram_histogram<uint8_t>(const uint8_t*, std::size_t, uint64_t*, std::size_t);
-template void kgram_histogram<uint16_t>(const uint16_t*, std::size_t, uint64_t*, std::size_t);
-template void kgram_histogram<uint32_t>(const uint32_t*, std::size_t, uint64_t*, std::size_t);
+template void kgram_histogram(const char*, std::size_t, uint64_t*, std::size_t);
+template void kgram_histogram(const uint8_t*, std::size_t, uint64_t*, std::size_t);
+template void kgram_histogram(const uint16_t*, std::size_t, uint64_t*, std::size_t);
+template void kgram_histogram(const uint32_t*, std::size_t, uint64_t*, std::size_t);
+
+template void compute_partition_IDs(const char*, std::size_t, uint32_t*, std::size_t, const std::vector<uint32_t>&);
+template void compute_partition_IDs(const uint8_t*, std::size_t, uint32_t*, std::size_t, const std::vector<uint32_t>&);
+template void compute_partition_IDs(const uint16_t*, std::size_t, uint32_t*, std::size_t, const std::vector<uint32_t>&);
+template void compute_partition_IDs(const uint32_t*, std::size_t, uint32_t*, std::size_t, const std::vector<uint32_t>&);
 
 }

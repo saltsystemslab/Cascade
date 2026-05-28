@@ -181,7 +181,7 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const std:
                 quant_kgram |= (static_cast<uint32_t>(tile[t_id + i]) << (K - 1 - i));    // Note the endianness of the quantization.
 
             // Binary search for `quant_kgram` into the pivots for the smallest `p_id` such that `quant_kgram <= pivots[p_id]`.
-            std::size_t low = 0, high = part_count - 1; // The solution lies in the range `[low, high)`.
+            std::size_t low = 0, high = part_count - 1; // The solution lies in the range `[low, high]`.
             while(low < high)
             {
                 const auto mid = low + (high - low) / 2;
