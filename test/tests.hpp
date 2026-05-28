@@ -24,7 +24,7 @@ bool validate_kgram_histogram(const T_sym_* T, std::size_t n, std::size_t k, con
 
 // Returns the partition sizes defined by the frequency histogram `H` and the
 // pivot set `X`.
-std::vector<uint64_t> get_partition_sizes(const std::vector<uint64_t>& H, const std::vector<uint64_t>& X);
+std::vector<uint64_t> get_partition_sizes(const std::vector<uint64_t>& H, const std::vector<uint32_t>& X);
 
 }
 

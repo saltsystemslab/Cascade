@@ -32,7 +32,7 @@ private:
 
     static constexpr uint16_t K = 12;   // k-gram size for frequency counting of prefixes.
 
-    std::vector<uint64_t> pivots;   // The pivots to break the SA into partitions.
+    std::vector<uint32_t> pivots;   // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
 
     // Selects the set of pivots for the partitioning of the suffixes.
