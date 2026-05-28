@@ -12,6 +12,8 @@
 namespace gpu_saca
 {
 
+__constant__ uint32_t pivots_d[MAX_PART_COUNT];
+
 
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const std::size_t n):
@@ -40,6 +42,8 @@ void GPU_SACA<T_sym_>::build_SA(std::size_t* const SA)
 {
     select_pivots();
 
+    compute_partition_IDs();
+
     (void)SA;
 }
 
@@ -58,7 +62,6 @@ void GPU_SACA<T_sym_>::select_pivots()
         constexpr std::size_t BLOCK_SZ = 128;
         const auto kgram_count = n_;
         const auto block_count = (kgram_count + BLOCK_SZ - 1) / BLOCK_SZ;
-
         const auto s_mem_sz = (BLOCK_SZ + K - 1) + (1llu << K) + 4; // Shared memory size:  quantized text-tile, followed by block-local histogram with `u8` counters,
                                                                     //                      followed by some padding for atomic-add workaround of `u8`s.
 
@@ -102,6 +105,24 @@ void GPU_SACA<T_sym_>::select_pivots()
         stats.print();
 #endif
     }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::compute_partition_IDs()
+{
+    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(uint32_t)));
+
+    constexpr std::size_t BLOCK_SZ = 256;
+    const auto suf_count = n_;
+    const auto block_count = (suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
+    const auto s_mem_sz = BLOCK_SZ + K - 1; // Shared memory size: quantized text-tile.
+
+    uint32_t* P_id_d;
+    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&P_id_d), n_ * sizeof(uint32_t)));
+
+    compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz >>> (T_d_, n_, P_id_d, p_);
+    CUDA_CHECK(cudaGetLastError());
 }
 
 
