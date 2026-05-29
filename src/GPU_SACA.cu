@@ -77,6 +77,7 @@ void GPU_SACA<T_sym_>::select_pivots()
     {
         std::vector<uint64_t> H_h(hist_sz); // Histogram at the device.
         CUDA_CHECK(cudaMemcpy(H_h.data(), H_d, hist_sz * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(H_d));
 
         pivots.resize(p_ - 1);
         uint64_t cum_sum = 0;
@@ -132,6 +133,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 #ifdef TESTS
     std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id_d) ? "Passes" : "Fails") << "\n";
 #endif
+
+    CUDA_CHECK(cudaFree(P_id_d));
 }
 
 
