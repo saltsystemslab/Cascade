@@ -26,6 +26,8 @@ extern __constant__ uint32_t pivots_d[];
 template <typename T_sym_>
 class GPU_SACA
 {
+    // TODO: typedef important types for consistencies all throughout.
+
 private:
 
     T_sym_* T_d_;   // The text in device.

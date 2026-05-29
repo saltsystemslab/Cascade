@@ -10,8 +10,6 @@ set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 
 # Bundle the core source files into a variable.
 set(PROJECT_SRC
-        baseline.cu
-        Suffix_Array.cu
         GPU_SACA.cu
 )
 
