@@ -35,8 +35,8 @@ int main(int argc, char** argv)
     {
         gpu_saca::GPU_SACA<T_sym_> saca(T.data(), n);
 
-        std::vector<uint64_t> H(n + 1);
-        saca.build_SA(H.data());
+        std::vector<std::size_t> SA(n);
+        saca.build_SA(SA.data());
     }
 
 /*

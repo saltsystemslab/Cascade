@@ -40,7 +40,7 @@ private:
 
     std::vector<uint32_t> pivots;   // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
-    std::vector<uint16_t> P_id; // Partition-IDs of the suffixes.
+    std::vector<uint32_t> P_id; // Partition-IDs of the suffixes.
 
 
     // Selects the set of pivots for the partitioning of the suffixes.
@@ -62,7 +62,7 @@ public:
     static uint8_t quantize(T_sym_ x);
 
     // Constructs the suffix array at `SA`.
-    void build_SA(std::size_t* SA_h);
+    void build_SA(std::size_t* SA);
 };
 
 

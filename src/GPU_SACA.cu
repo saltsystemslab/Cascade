@@ -18,7 +18,7 @@ __constant__ uint32_t pivots_d[MAX_PART_COUNT];
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const std::size_t n):
       T_d_(nullptr)
-    , n_(n + 1) // Account for the terminator symbol with `+1`
+    , n_(n)
     , T_h_(T)
     , p_(128)   // TODO: tune this.
 {
@@ -91,7 +91,9 @@ void GPU_SACA<T_sym_>::select_pivots()
                 const auto after  = cum_sum;
 
                 // Place the split point before or after bin `i`, where ever the mass sum is closer to the target sum.
-                auto split = (target - before <= after - target ? i - 1 : i);
+                auto split = (target - before <= after - target ?
+                                (i > 0 ? i - 1 : 0) :
+                                i);
                 if(j > 0 && split <= pivots[j - 1]) // Nudge the pivot forward if the bin is really heavy.
                     split = pivots[j - 1] + 1;
 
@@ -123,6 +125,9 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz >>> (T_d_, n_, P_id_d, p_);
     CUDA_CHECK(cudaGetLastError());
+
+    P_id.resize(n_);
+    CUDA_CHECK(cudaMemcpy(P_id.data(), P_id_d, n_ * sizeof(uint32_t), cudaMemcpyDeviceToHost));
 
 #ifdef TESTS
     std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id_d) ? "Passes" : "Fails") << "\n";

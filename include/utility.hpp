@@ -48,7 +48,7 @@ void generate_random_text(std::vector<T_sym_>& T, const std::size_t n)
 
 // Reads an entire file of elements of type `T_` from `file_path` into `v` and
 // returns the count of elements read. Terminates `v` by appending the least
-// symbol of type `T_`.
+// symbol of type `T_`. It is included in the element count.
 template <typename T_>
 std::size_t read_file_terminated(const std::string& file_path, std::vector<T_>& v)
 {
