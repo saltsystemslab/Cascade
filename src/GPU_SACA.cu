@@ -102,6 +102,15 @@ void GPU_SACA<T_sym_>::select_pivots()
             }
         }
 
+        // Fill any remaining pivots with consecutive bin indices following the last pivot.
+        // These will correspond to empty partition but keeps the pivot-set fully populated and non-decreasing.
+        // Special case when partition-count is larger than count of unique quantized `k`-grams.
+        const uint32_t last_pivot = (j > 0 ? pivots[j - 1] : 0);
+        const uint32_t max_bin = (1llu << K) - 1;
+        for(uint32_t rem_slot = 0; j + rem_slot < p_ - 1; ++rem_slot)
+            pivots[j + rem_slot] = std::min(last_pivot + rem_slot + 1, max_bin);
+
+
 #ifdef TESTS
         const auto part_sz = test::get_partition_sizes(H_h, pivots);
         const auto stats = util::Collection_Stats::get_collection_stat(part_sz);
