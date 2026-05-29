@@ -3,6 +3,7 @@
 #define GPU_SACA_HPP
 
 
+#include "types.hpp"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -15,17 +16,8 @@ namespace gpu_saca
 {
 
 
-using p_id_t = uint16_t;        // Partition-ID type; restricts partition-count to be <= 2^16.
-using pivot_t = uint16_t;       // Pivot type; restricts `K` to be <= 16.
-using kgram_t = pivot_t;        // Quantized k-gram type; same as pivots.
-using freq_cnt_t = uint64_t;    // Global histogram counter type.
-using idx_t = uint64_t;         // Text-indexing type.
-
-
-
-// Maximum number of allowed partitions.    // TODO: better fix / tune it.
-constexpr std::size_t MAX_PART_COUNT = 1024;
-extern __constant__ uint32_t pivots_d[];
+constexpr p_id_t MAX_PART_COUNT = 1024; // Maximum number of allowed partitions. TODO: better fix / tune it.
+extern __constant__ pivot_t pivots_d[];
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
@@ -35,21 +27,19 @@ extern __constant__ uint32_t pivots_d[];
 template <typename T_sym_>
 class GPU_SACA
 {
-    // TODO: typedef important types for consistencies all throughout.
-
 private:
 
     T_sym_* T_d_;   // The text in device.
-    const std::size_t n_;   // Size of the text.
+    const idx_t n_; // Size of the text.
     const T_sym_* const T_h_;   // Keep the host-side text for testing purposes.
 
-    const std::size_t p_;   // Number of partitions for the SA.
+    const p_id_t p_;    // Number of partitions for the SA.
 
-    static constexpr uint16_t K = 12;   // k-gram size for frequency counting of prefixes.
+    static constexpr std::size_t K = 12;    // k-gram size for frequency counting of prefixes.
 
-    std::vector<uint32_t> pivots;   // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
+    std::vector<pivot_t> pivots;    // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
-    std::vector<uint32_t> P_id; // Partition-IDs of the suffixes.
+    std::vector<p_id_t> P_id;   // Partition-IDs of the suffixes.
 
 
     // Selects the set of pivots for the partitioning of the suffixes.
@@ -62,7 +52,7 @@ private:
 public:
 
     // Constructs a GPU-SACA object for the input text `T` of size `n`.
-    GPU_SACA(const T_sym_* T, std::size_t n);
+    GPU_SACA(const T_sym_* T, idx_t n);
 
     ~GPU_SACA();
 
@@ -71,7 +61,7 @@ public:
     static uint8_t quantize(T_sym_ x);
 
     // Constructs the suffix array at `SA`.
-    void build_SA(std::size_t* SA);
+    void build_SA(idx_t* SA);
 };
 
 
@@ -90,9 +80,9 @@ __forceinline__ uint8_t GPU_SACA<T_sym_>::quantize(const T_sym_ x)
 // `T_sym_` and size `n`, into `H`.
 // Grid organization: the blocks tile the text such that each thread processes
 // one `K`-gram.
-template <typename T_sym_, uint16_t K, std::size_t BLOCK_SZ>
+template <typename T_sym_, std::size_t K, std::size_t BLOCK_SZ>
 __global__
-void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_t n, uint64_t* const __restrict__ H)
+void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const idx_t n, freq_cnt_t* const __restrict__ H)
 {
     constexpr auto HIST_SZ = 1llu << K; // Number of entries in the histogram.
     constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
@@ -104,11 +94,11 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
     static_assert(BLOCK_SZ < 256);  // So that block-local `u8` counters in the histogram do not overflow in the worst case.
 
     const auto t_id = threadIdx.x;
-    const auto block_off = blockIdx.x * BLOCK_SZ;   // Offset of this block into the text.
+    const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text.
 
     // Clear the block-local histogram cooperatively.
     {
-        for(uint16_t j = t_id; j < HIST_SZ; j += BLOCK_SZ)
+        for(std::size_t j = t_id; j < HIST_SZ; j += BLOCK_SZ)
             local_hist[j] = 0;
     }
 
@@ -130,11 +120,11 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
         const auto off = block_off + t_id;  // Offset into the text being processed.
         if(off < n)
         {
-            uint32_t quant_kgram = 0; // Quantized k-gram at text-offset `off`.
+            kgram_t quant_kgram = 0;    // Quantized k-gram at text-offset `off`.
 
             #pragma unroll
-            for(uint16_t i = 0; i < K; ++i)
-                quant_kgram |= (static_cast<uint32_t>(tile[t_id + i]) << (K - 1 - i));    // Note the endianness of the quantization.
+            for(std::size_t i = 0; i < K; ++i)
+                quant_kgram |= (static_cast<kgram_t>(tile[t_id + i]) << (K - 1 - i));   // Note the endianness of the quantization.
 
             // Atomic-add is not natively supported for `u8`s. Emulate via atomic-CAS on the enclosing 32-bit word.
             atomic_add_u8(local_hist + quant_kgram, 1u);
@@ -144,7 +134,7 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
     __syncthreads();
 
     // Flush block-local histogram to global histogram cooperatively.
-    for(uint16_t j = t_id; j < HIST_SZ; j += BLOCK_SZ)
+    for(std::size_t j = t_id; j < HIST_SZ; j += BLOCK_SZ)
         if(local_hist[j])
             atomicAdd(reinterpret_cast<unsigned long long*>(H + j), local_hist[j]);
 }
@@ -154,9 +144,9 @@ void kgram_histogram_kernel(const T_sym_* const __restrict__ T, const std::size_
 // text `T`, of type `T_sym_` and size `n`, into `P_id`.
 // Grid organization: the blocks tile the text such that each thread processes
 // one `K`-gram.
-template <typename T_sym_, uint16_t K, std::size_t BLOCK_SZ>
+template <typename T_sym_, std::size_t K, std::size_t BLOCK_SZ>
 __global__
-void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const std::size_t n, uint32_t* const __restrict__ P_id, const uint32_t part_count)
+void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const idx_t n, p_id_t* const __restrict__ P_id, const p_id_t part_count)
 {
     constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
 
@@ -165,7 +155,7 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const std:
     uint8_t* tile = s_mem;  // Quantized text-tile.
 
     const auto t_id = threadIdx.x;
-    const auto block_off = blockIdx.x * BLOCK_SZ;   // Offset of this block into the text.
+    const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text.
 
     // Load the corresponding text-tile cooperatively, quantizing it on the fly.
     {
@@ -185,14 +175,14 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const std:
         const auto off = block_off + t_id;  // Offset into the text being processed.
         if(off < n)
         {
-            uint32_t quant_kgram = 0; // Quantized k-gram at text-offset `off`.
+            kgram_t quant_kgram = 0;    // Quantized k-gram at text-offset `off`.
 
             #pragma unroll
             for(uint16_t i = 0; i < K; ++i)
-                quant_kgram |= (static_cast<uint32_t>(tile[t_id + i]) << (K - 1 - i));    // Note the endianness of the quantization.
+                quant_kgram |= (static_cast<kgram_t>(tile[t_id + i]) << (K - 1 - i));   // Note the endianness of the quantization.
 
             // Binary search for `quant_kgram` into the pivots for the smallest `p_id` such that `quant_kgram <= pivots[p_id]`.
-            std::size_t low = 0, high = part_count - 1; // The solution lies in the range `[low, high]`.
+            p_id_t low = 0, high = part_count - 1;  // The solution lies in the range `[low, high]`.
             while(low < high)
             {
                 const auto mid = low + (high - low) / 2;
