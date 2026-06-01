@@ -117,7 +117,9 @@ void compute_kgram_histogram_kernel(const T_sym_* const __restrict__ T_chunk, co
         if(BLOCK_SZ + t_id < TILE_SZ)   // Process the tile-segment of size `K - 1` overhanging from the block. The overhang has been ensured to exist.
         {
             off = block_off + BLOCK_SZ + t_id;
-            tile[BLOCK_SZ + t_id] = GPU_SACA<T_sym_>::quantize(T_chunk[off]);
+            tile[BLOCK_SZ + t_id] = off < chunk_sz + K - 1 ?
+                                        GPU_SACA<T_sym_>::quantize(T_chunk[off]) :
+                                        0u;
         }
     }
 
