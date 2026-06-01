@@ -105,10 +105,15 @@ void GPU_SACA<T_sym_>::select_pivots()
             const auto buf_id = c % 2;  // Which buffer (and stream) to use for this chunk.
             const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
             const auto chunk_kgram_count = std::min(CHUNK_SZ, n_ - chunk_off);  // Count of `K`-grams in this chunk.
-            const auto transfer_sz = std::min(chunk_kgram_count + K - 1, n_ - chunk_off);   // Number of symbols to transfer from host to device for this chunk.
+            const auto chunk_symbol_req = chunk_kgram_count + K - 1;    // Number of symbols this chunk is required to have.
+            const auto chunk_symbol_count = std::min(chunk_symbol_req, n_ - chunk_off);    // Number of symbols to transfer from host to device for this chunk.
 
             //  Asynchronously transfer this chunk to the device while the other stream's kernel is being executed (from the last iteration).
-            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, transfer_sz * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, chunk_symbol_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
+
+            // Pad the tail of the chunk with null / terminator symbols if required.
+            if(chunk_symbol_count < chunk_symbol_req)   // Can happen at the last and at the previous-to-last chunks.
+                CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id] + chunk_symbol_count, null_d, (chunk_symbol_req - chunk_symbol_count) * sizeof(T_sym_), cudaMemcpyDeviceToDevice, stream[buf_id]));
 
             const auto block_count = (chunk_kgram_count + BLOCK_SZ - 1) / BLOCK_SZ;
             // TODO: launch kernel.
