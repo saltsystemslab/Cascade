@@ -29,9 +29,11 @@ class GPU_SACA
 {
 private:
 
+    static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
+
     T_sym_* T_d_;   // The text in device.
     const idx_t n_; // Size of the text.
-    const T_sym_* const T_h_;   // Keep the host-side text for testing purposes.
+    const T_sym_* const T_h_;   // Text at the host-side; required for async transfers and testing.
 
     const p_id_t p_;    // Number of partitions for the SA.
 
@@ -40,6 +42,8 @@ private:
     std::vector<pivot_t> pivots;    // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
     std::vector<p_id_t> P_id;   // Partition-IDs of the suffixes.
+
+    cudaStream_t stream[2]; // CUDA streams for double-buffered overlap of PCIe transfers and kernel executions.
 
 
     // Selects the set of pivots for the partitioning of the suffixes.
@@ -60,12 +64,11 @@ public:
     __device__ __host__
     static uint8_t quantize(T_sym_ x);
 
-    // Constructs the suffix array at `SA`.
+    // Builds the suffix array into `SA`.
     void build_SA(idx_t* SA);
 };
 
 
-// Returns `1` if `x` is in the upper half of `T_sym_`'s range, `0` otherwise.
 template <typename T_sym_>
 __device__ __host__
 __forceinline__ uint8_t GPU_SACA<T_sym_>::quantize(const T_sym_ x)

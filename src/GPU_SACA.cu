@@ -22,27 +22,31 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , T_h_(T)
     , p_(128)   // TODO: tune this.
 {
-    // Copy over text from host to device
-
-    const auto bytes = n_ * sizeof(T_sym_);
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&T_d_), bytes));
-    CUDA_CHECK(cudaMemcpy(T_d_, T, bytes, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaStreamCreate(stream + 0));
+    CUDA_CHECK(cudaStreamCreate(stream + 1));
 }
 
 
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
-    CUDA_CHECK(cudaFree(T_d_));
+    CUDA_CHECK(cudaStreamDestroy(stream[0]));
+    CUDA_CHECK(cudaStreamDestroy(stream[1]));
 }
 
 
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
 {
+    // Pin the host-side text so that PCIe transfers of text can be overlapped kernel execution.
+    CUDA_CHECK(cudaHostRegister(const_cast<T_sym_*>(T_h_), n_ * sizeof(T_sym_), cudaHostRegisterDefault));
+
     select_pivots();
 
     compute_partition_IDs();
+
+    // Unpin the host-side text as we do not need the text anymore.
+    CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
 
     (void)SA;
 }
