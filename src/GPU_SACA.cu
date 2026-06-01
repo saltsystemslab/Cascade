@@ -116,8 +116,7 @@ void GPU_SACA<T_sym_>::select_pivots()
                 CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id] + chunk_symbol_count, null_d, (chunk_symbol_req - chunk_symbol_count) * sizeof(T_sym_), cudaMemcpyDeviceToDevice, stream[buf_id]));
 
             const auto block_count = (chunk_kgram_count + BLOCK_SZ - 1) / BLOCK_SZ;
-            // TODO: launch kernel.
-            (void)s_mem_sz; (void)block_count;
+            compute_kgram_histogram_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz, stream[buf_id] >>> (T_buf[buf_id], chunk_kgram_count, H_d);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -126,7 +125,6 @@ void GPU_SACA<T_sym_>::select_pivots()
         CUDA_CHECK(cudaStreamSynchronize(stream[1]));
 
         // Free the buffers.
-        CUDA_CHECK(cudaFree(null_d));
         CUDA_CHECK(cudaFree(T_buf[0]));
         CUDA_CHECK(cudaFree(T_buf[1]));
 
