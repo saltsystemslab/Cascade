@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <cstdlib>
 #include <iostream>
 
 
@@ -58,19 +59,64 @@ void GPU_SACA<T_sym_>::select_pivots()
     const auto hist_sz = 1llu << K;
     freq_cnt_t* H_d;    // The global histogram.
 
+    // Allocate the global histogram.
     CUDA_CHECK(cudaMalloc(&H_d, hist_sz * sizeof(freq_cnt_t)));
     CUDA_CHECK(cudaMemset(H_d, 0, hist_sz * sizeof(freq_cnt_t)));
 
+    constexpr std::size_t BLOCK_SZ = 128;
+    idx_t CHUNK_SZ; // Number of `K`-grams at each text-chunk.
+    T_sym_* T_buf[2];   // The text-chunk buffers.
+
+    // Determine the text-chunks' sizes for processing them in a streaming manner, and allocate space for the corresponding buffers.
+    {
+        std::size_t free_mem, total_mem;
+        CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
+
+        const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory for the chunk buffers.
+        const std::size_t per_sym_mem = 2 * sizeof(T_sym_); // Space required per-symbol across the two buffers.
+        CHUNK_SZ = budget / per_sym_mem;
+        CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
+        if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
+        {
+            std::cerr << "Too low device memory available for histogram streaming. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        const std::size_t buf_bytes = (CHUNK_SZ + K - 1) * sizeof(T_sym_);
+        CUDA_CHECK(cudaMalloc(T_buf + 0, buf_bytes));
+        CUDA_CHECK(cudaMalloc(T_buf + 1, buf_bytes));
+    }
+
     // Count the quantized k-gram frequencies into the histogram.
     {
-        constexpr std::size_t BLOCK_SZ = 128;
-        const auto kgram_count = n_;
-        const auto block_count = (kgram_count + BLOCK_SZ - 1) / BLOCK_SZ;
         const auto s_mem_sz = (BLOCK_SZ + K - 1) + (1llu << K) + 4; // Shared memory size:  quantized text-tile, followed by block-local histogram with `u8` counters,
                                                                     //                      followed by some padding for atomic-add workaround of `u8`s.
 
-        kgram_histogram_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz >>> (T_d_, n_, H_d);
-        CUDA_CHECK(cudaGetLastError());
+        const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
+        for(idx_t c = 0; c < chunk_count; ++c)  // Double-buffered chunk loop.
+        {
+            const auto buf_id = c % 2;  // Which buffer (and stream) to use for this chunk.
+            const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
+            const auto chunk_kgram_count = std::min(CHUNK_SZ, n_ - chunk_off);  // Count of `K`-grams in this chunk.
+            const auto transfer_sz = std::min(chunk_kgram_count + K - 1, n_ - chunk_off);   // Number of symbols to transfer from host to device for this chunk.
+
+            //  Asynchronously transfer this chunk to the device while the other stream's kernel is being executed (from the last iteration).
+            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, transfer_sz * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
+
+            const auto block_count = (chunk_kgram_count + BLOCK_SZ - 1) / BLOCK_SZ;
+            // TODO: launch kernel.
+            (void)s_mem_sz; (void)block_count;
+            CUDA_CHECK(cudaGetLastError());
+        }
+
+        // Wait for the streams to finish.
+        CUDA_CHECK(cudaStreamSynchronize(stream[0]));
+        CUDA_CHECK(cudaStreamSynchronize(stream[1]));
+
+        // Free the text-chunk buffers.
+        CUDA_CHECK(cudaFree(T_buf[0]));
+        CUDA_CHECK(cudaFree(T_buf[1]));
+
 
 #ifdef TESTS
             std::cerr << "Histogram verification: " << (test::validate_kgram_histogram(T_h_, n_, K, H_d) ? "Passes" : "Fails") << "\n";
