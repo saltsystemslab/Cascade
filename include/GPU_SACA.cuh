@@ -45,6 +45,8 @@ private:
 
     cudaStream_t stream[2]; // CUDA streams for double-buffered overlap of PCIe transfers and kernel executions.
 
+    T_sym_* null_d; // Device-side buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
+
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();

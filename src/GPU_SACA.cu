@@ -22,9 +22,14 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , n_(n)
     , T_h_(T)
     , p_(128)   // TODO: tune this.
+    , null_d(nullptr)
 {
     CUDA_CHECK(cudaStreamCreate(stream + 0));
     CUDA_CHECK(cudaStreamCreate(stream + 1));
+
+    CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
+    std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
+    CUDA_CHECK(cudaMemcpy(null_d, null_h.data(), (K - 1) * sizeof(T_sym_), cudaMemcpyHostToDevice));
 }
 
 
@@ -33,6 +38,8 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 {
     CUDA_CHECK(cudaStreamDestroy(stream[0]));
     CUDA_CHECK(cudaStreamDestroy(stream[1]));
+
+    CUDA_CHECK(cudaFree(null_d));
 }
 
 
@@ -44,7 +51,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
 
     select_pivots();
 
-    compute_partition_IDs();
+    // compute_partition_IDs();
 
     // Unpin the host-side text as we do not need the text anymore.
     CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
@@ -113,7 +120,8 @@ void GPU_SACA<T_sym_>::select_pivots()
         CUDA_CHECK(cudaStreamSynchronize(stream[0]));
         CUDA_CHECK(cudaStreamSynchronize(stream[1]));
 
-        // Free the text-chunk buffers.
+        // Free the buffers.
+        CUDA_CHECK(cudaFree(null_d));
         CUDA_CHECK(cudaFree(T_buf[0]));
         CUDA_CHECK(cudaFree(T_buf[1]));
 
