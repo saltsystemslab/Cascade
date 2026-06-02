@@ -34,11 +34,11 @@ std::vector<freq_cnt_t> get_partition_sizes(const std::vector<freq_cnt_t>& H, co
 template <typename  T_sym_>
 void compute_partition_IDs(const T_sym_* T, idx_t n, p_id_t* P_id, std::size_t k, const std::vector<pivot_t>& X);
 
-// Returns `true` iff the on-GPU partition-IDs `P_id_d` of quantized `k`-grams
-// of the text `T` of size `n` matches to the partition IDs computed at the CPU-
-// side.
+// Returns `true` iff the partition-IDs `P_id` of quantized `k`-grams of the
+// text `T` of size `n`, defined by the pivots `X`, match to the partition-IDs
+// computed at the CPU-side as reference.
 template <typename T_sym_>
-bool validate_partition_IDs(const T_sym_* T, idx_t n, std::size_t k, const std::vector<pivot_t>& X, const p_id_t* P_id_d);
+bool validate_partition_IDs(const T_sym_* T, idx_t n, std::size_t k, const std::vector<pivot_t>& X, const p_id_t* P_id);
 
 }
 

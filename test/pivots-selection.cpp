@@ -110,6 +110,15 @@ void compute_partition_IDs(const T_sym_* T, idx_t n, p_id_t* P_id, std::size_t k
 }
 
 
+template <typename T_sym_>
+bool validate_partition_IDs(const T_sym_* const T, const idx_t n, const std::size_t k, const std::vector<pivot_t>& X, const p_id_t* const P_id)
+{
+    std::vector<p_id_t> cpu_P_id(n);
+    compute_partition_IDs(T, n, cpu_P_id.data(), k, X);
+    return std::memcmp(P_id, cpu_P_id.data(), n * sizeof(p_id_t)) == 0;
+}
+
+
 
 // Template instantiations for the required instances.
 template void kgram_histogram(const char*, idx_t, freq_cnt_t*, std::size_t);
@@ -121,5 +130,10 @@ template void compute_partition_IDs(const char*, idx_t, p_id_t*, std::size_t, co
 template void compute_partition_IDs(const uint8_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
 template void compute_partition_IDs(const uint16_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
 template void compute_partition_IDs(const uint32_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
+
+template bool validate_partition_IDs(const char*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
+template bool validate_partition_IDs(const uint8_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
+template bool validate_partition_IDs(const uint16_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
+template bool validate_partition_IDs(const uint32_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
 
 }

@@ -51,7 +51,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
 
     select_pivots();
 
-    // compute_partition_IDs();
+    compute_partition_IDs();
 
     // Unpin the host-side text as we do not need the text anymore.
     CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
@@ -185,27 +185,80 @@ void GPU_SACA<T_sym_>::select_pivots()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_IDs()
 {
+    // Copy the pivots to the device.
     CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(pivot_t)));
 
     constexpr std::size_t BLOCK_SZ = 256;
-    const auto suf_count = n_;
-    const auto block_count = (suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
-    const auto s_mem_sz = BLOCK_SZ + K - 1; // Shared memory size: quantized text-tile.
+    idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
+    T_sym_* T_buf[2];   // The text-chunk buffers.
+    p_id_t* P_id_buf[2];    // The partition-ID buffers.
 
-    p_id_t* P_id_d;
-    CUDA_CHECK(cudaMalloc(reinterpret_cast<void**>(&P_id_d), n_ * sizeof(p_id_t)));
+    // Determine the chunks' sizes for processing them in a streaming manner, and allocate space for the corresponding buffers.
+    {
+        std::size_t free_mem, total_mem;
+        CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
 
-    compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz >>> (T_d_, n_, P_id_d, p_);
-    CUDA_CHECK(cudaGetLastError());
+        const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory for the chunk buffers.
+        const std::size_t per_idx_mem = 2 * (sizeof(T_sym_) + sizeof(p_id_t));  // Space required per-index across the two sets of buffers.
+        CHUNK_SZ = budget / per_idx_mem;
+        CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
+        if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
+        {
+            std::cerr << "Too low device memory available for partition-ID computation streaming. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
 
-    P_id.resize(n_);
-    CUDA_CHECK(cudaMemcpy(P_id.data(), P_id_d, n_ * sizeof(p_id_t), cudaMemcpyDeviceToHost));
+        const std::size_t text_buf_bytes = (CHUNK_SZ + K - 1) * sizeof(T_sym_);
+        const std::size_t p_id_buf_bytes = CHUNK_SZ * sizeof(p_id_t);
+        CUDA_CHECK(cudaMalloc(T_buf + 0, text_buf_bytes));      CUDA_CHECK(cudaMalloc(T_buf + 1, text_buf_bytes));
+        CUDA_CHECK(cudaMalloc(P_id_buf + 0, p_id_buf_bytes));   CUDA_CHECK(cudaMalloc(P_id_buf + 1, p_id_buf_bytes));
+
+        P_id.resize(n_);
+    }
+
+
+    // Move text in chunks to device, compute partition-IDs of the suffixes, and move the IDs to host.
+    {
+        const auto s_mem_sz = BLOCK_SZ + K - 1; // Shared memory size: quantized text-tile.
+        const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
+        for(idx_t c = 0; c < chunk_count; ++c)  // Double-buffered chunk loop.
+        {
+            const auto buf_id = c % 2;  // Which set of buffers (and stream) to use for this chunk.
+            const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
+            const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
+            const auto chunk_symbol_req = chunk_suf_count + K - 1;  // Number of symbols this chunk is required to have.
+            const auto chunk_symbol_count = std::min(chunk_symbol_req, n_ - chunk_off);    // Number of symbols to transfer from host to device for this chunk.
+
+            //  Asynchronously transfer this chunk to the device while the other stream's kernel is being executed (from the last iteration).
+            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, chunk_symbol_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
+
+            // Pad the tail of the chunk with null / terminator symbols if required.
+            if(chunk_symbol_count < chunk_symbol_req)   // Can happen at the last and at the previous-to-last chunks.
+                CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id] + chunk_symbol_count, null_d, (chunk_symbol_req - chunk_symbol_count) * sizeof(T_sym_), cudaMemcpyDeviceToDevice, stream[buf_id]));
+
+            const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
+            // TODO: launch kernel.
+            (void)s_mem_sz, (void)block_count;
+            CUDA_CHECK(cudaGetLastError());
+
+            // Asynchronously copy this chunk's partition-IDs to the host.
+            CUDA_CHECK(cudaMemcpyAsync(P_id.data() + chunk_off, P_id_buf[buf_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        }
+    }
+
+
+    // Wait for the streams to finish.
+    CUDA_CHECK(cudaStreamSynchronize(stream[0]));
+    CUDA_CHECK(cudaStreamSynchronize(stream[1]));
+
+    // Free the buffers.
+    CUDA_CHECK(cudaFree(T_buf[0]));     CUDA_CHECK(cudaFree(T_buf[1]));
+    CUDA_CHECK(cudaFree(P_id_buf[0]));  CUDA_CHECK(cudaFree(P_id_buf[1]));
+
 
 #ifdef TESTS
-    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id_d) ? "Passes" : "Fails") << "\n";
+    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id.data()) ? "Passes" : "Fails") << "\n";
 #endif
-
-    CUDA_CHECK(cudaFree(P_id_d));
 }
 
 
