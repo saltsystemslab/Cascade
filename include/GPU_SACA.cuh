@@ -151,12 +151,13 @@ void compute_kgram_histogram_kernel(const T_sym_* const __restrict__ T_chunk, co
 
 
 // Computes the partition-IDs (in `[0, part_count)`) of the `K`-grams of the
-// text `T`, of type `T_sym_` and size `n`, into `P_id`.
-// Grid organization: the blocks tile the text such that each thread processes
-// one `K`-gram.
+// text-chunk `T`, of type `T_sym_` and having `chunk_sz` many `K-grams, into
+// `P_id`.
+// Grid organization: one thread per `K`-gram of the chunk.
+// Shared memory layout: quantized text-tile
 template <typename T_sym_, std::size_t K, std::size_t BLOCK_SZ>
 __global__
-void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const idx_t n, p_id_t* const __restrict__ P_id, const p_id_t part_count)
+void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, const idx_t chunk_sz, p_id_t* const __restrict__ P_id, const p_id_t part_count)
 {
     constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
 
@@ -165,16 +166,21 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const idx_
     uint8_t* tile = s_mem;  // Quantized text-tile.
 
     const auto t_id = threadIdx.x;
-    const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text.
+    const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text-chunk.
 
     // Load the corresponding text-tile cooperatively, quantizing it on the fly.
     {
-        auto off = block_off + t_id;    // Offset into the text to load.
-        tile[t_id] = (off < n ? GPU_SACA<T_sym_>::quantize(T[off]) : 0u);
+        auto off = block_off + t_id;    // Offset into the text-chunk to load.
+        tile[t_id] = off < chunk_sz ?
+                        GPU_SACA<T_sym_>::quantize(T_chunk[off]) :
+                        0u;
+
         if(BLOCK_SZ + t_id < TILE_SZ)   // Process the tile-segment of size `K - 1` overhanging from the block.
         {
             off = block_off + BLOCK_SZ + t_id;
-            tile[BLOCK_SZ + t_id] = (off < n ? GPU_SACA<T_sym_>::quantize(T[off]) : 0u);
+            tile[BLOCK_SZ + t_id] = off < chunk_sz + K - 1 ?
+                                        GPU_SACA<T_sym_>::quantize(T_chunk[off]) :
+                                        0u;
         }
     }
 
@@ -182,10 +188,10 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T, const idx_
 
     // Pack each k-gram and compute its partition-ID.
     {
-        const auto off = block_off + t_id;  // Offset into the text being processed.
-        if(off < n)
+        const auto off = block_off + t_id;  // Offset into the text-chunk being processed.
+        if(off < chunk_sz)
         {
-            kgram_t quant_kgram = 0;    // Quantized k-gram at text-offset `off`.
+            kgram_t quant_kgram = 0;    // Quantized k-gram at text-chunk offset `off`.
 
             #pragma unroll
             for(uint16_t i = 0; i < K; ++i)
