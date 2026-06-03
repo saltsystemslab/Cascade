@@ -1,9 +1,10 @@
 
-#ifndef GPU_SACA_HPP
-#define GPU_SACA_HPP
+#ifndef GPU_SACA_CUH
+#define GPU_SACA_CUH
 
 
 #include "types.hpp"
+#include "Partition.cuh"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -15,7 +16,6 @@
 namespace gpu_saca
 {
 
-
 constexpr p_id_t MAX_PART_COUNT = 1024; // Maximum number of allowed partitions. TODO: better fix / tune it.
 extern __constant__ pivot_t pivots_d[];
 
@@ -23,7 +23,6 @@ extern __constant__ pivot_t pivots_d[];
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
 // TODO:
 //      1. Tune the number of partitions.
-//      2. Batch out data to host memory; currently everything will be in device memory.
 template <typename T_sym_>
 class GPU_SACA
 {
@@ -47,9 +46,14 @@ private:
 
     T_sym_* null_d; // Device-side buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 
+    Partition* const P_;    // The suffix partitions.
+
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
+
+    // Partitions the suffixes based on the selected pivots.
+    void partition();
 
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
@@ -212,7 +216,6 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, cons
         }
     }
 }
-
 
 }
 

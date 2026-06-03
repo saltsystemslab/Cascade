@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <new>
 #include <cstdlib>
 #include <iostream>
 
@@ -23,6 +24,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , T_h_(T)
     , p_(128)   // TODO: tune this.
     , null_d(nullptr)
+    , P_(util::allocate<Partition>(p_))
 {
     CUDA_CHECK(cudaStreamCreate(stream + 0));
     CUDA_CHECK(cudaStreamCreate(stream + 1));
@@ -40,6 +42,8 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     CUDA_CHECK(cudaStreamDestroy(stream[1]));
 
     CUDA_CHECK(cudaFree(null_d));
+
+    util::deallocate(P_);
 }
 
 
@@ -51,7 +55,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
 
     select_pivots();
 
-    compute_partition_IDs();
+    partition();
 
     // Unpin the host-side text as we do not need the text anymore.
     CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
@@ -178,6 +182,19 @@ void GPU_SACA<T_sym_>::select_pivots()
         const auto stats = util::Collection_Stats::get_collection_stat(part_sz);
         stats.print();
 #endif
+    }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::partition()
+{
+    compute_partition_IDs();
+
+    // Move the suffixes (with some associated prefixes) to their corresponding partitions.
+    {
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+            new (P_ + p_id) Partition(0);
     }
 }
 

@@ -11,6 +11,7 @@ set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 # Bundle the core source files into a variable.
 set(PROJECT_SRC
         GPU_SACA.cu
+        Partition.cu
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.
