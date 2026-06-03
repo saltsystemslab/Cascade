@@ -32,6 +32,22 @@ namespace caps_sa::timer
 namespace gpu_saca::util
 {
 
+// Returns pointer to a memory-allocation for `size` elements of type `T_`.
+template <typename T_>
+T_* allocate(const std::size_t size)
+{
+    return static_cast<T_*>(std::malloc(size * sizeof(T_)));
+}
+
+
+// Deallocates the pointer `ptr`, allocated with `allocate`.
+template <typename T_>
+void deallocate(T_* const ptr)
+{
+    std::free(ptr);
+}
+
+
 // Generates a random text of symbols of type `T_sym_` and of length `n` at `T`.
 template <typename T_sym_>
 void generate_random_text(std::vector<T_sym_>& T, const std::size_t n)
