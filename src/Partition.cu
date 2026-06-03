@@ -15,7 +15,7 @@ Partition::Partition(const idx_t cap):
     , w_buf(omp_get_max_threads())
 {
     for(auto& buf : w_buf)
-        buf.reserve(w_buf_cap);
+        buf.unwrap().reserve(w_buf_cap);
 }
 
 

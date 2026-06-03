@@ -7,6 +7,7 @@
 #include "types.hpp"
 #include "Suffix.hpp"
 #include "Spin_Lock.hpp"
+#include "utility.hpp"
 
 #include <cstddef>
 #include <vector>
@@ -27,7 +28,7 @@ private:
     util::Spin_Lock lock;   // Lock to update the partition in concurrent settings.
 
     using w_buf_t = std::vector<Suffix>;    // Type of worker-local buffers.
-    std::vector<w_buf_t> w_buf; // Worker-local buffers.
+    std::vector<util::Padded<w_buf_t>> w_buf;   // Worker-local buffers.
 
     static constexpr std::size_t w_buf_cap = 4 * 1024 * 1024llu / sizeof(Suffix);   // Worker-local buffers overflow to the partitions at size: 4KB.
 
