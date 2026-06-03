@@ -47,6 +47,7 @@ private:
     T_sym_* null_d; // Device-side buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 
     Partition* const P_;    // The suffix partitions.
+    std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
 
 
     // Selects the set of pivots for the partitioning of the suffixes.
@@ -54,6 +55,10 @@ private:
 
     // Partitions the suffixes based on the selected pivots.
     void partition();
+
+    // Computes the sizes of the suffix partitions based on the quantized `K`-
+    // gram histogram `H` and the selected pivots.
+    void compute_partition_sizes(const std::vector<freq_cnt_t>& H);
 
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();

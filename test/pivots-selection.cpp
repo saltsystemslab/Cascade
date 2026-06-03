@@ -64,25 +64,6 @@ bool validate_kgram_histogram(const T_sym_* const T_h, const idx_t n, const std:
 }
 
 
-std::vector<freq_cnt_t> get_partition_sizes(const std::vector<freq_cnt_t>& H, const std::vector<pivot_t>& X)
-{
-    const auto p = X.size() + 1;    // Number of partitions.
-    const auto hist_sz = H.size();  // Histogram size.
-
-    std::vector<freq_cnt_t> sz(p, 0);   // Partition sizes.
-    p_id_t p_id = 0;    // Which partition we're at right now.
-    for(std::size_t bin = 0; bin < hist_sz; ++bin)
-    {
-        if(p_id < X.size() && bin > X[p_id])    // Moving onto the next partition.
-            p_id++;
-
-        sz[p_id] += H[bin]; // The pivots are inclusive upper bounds of their partition.
-    }
-
-    return sz;
-}
-
-
 
 // Template instantiations for the required instances.
 template void kgram_histogram(const char*, idx_t, freq_cnt_t*, std::size_t);

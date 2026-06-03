@@ -177,11 +177,27 @@ void GPU_SACA<T_sym_>::select_pivots()
             pivots[j + rem_slot] = std::min(static_cast<pivot_t>(last_pivot + rem_slot + 1), max_bin);
 
 
+        compute_partition_sizes(H_h);
+
 #ifdef TESTS
-        const auto part_sz = test::get_partition_sizes(H_h, pivots);
-        const auto stats = util::Collection_Stats::get_collection_stat(part_sz);
+        const auto stats = util::Collection_Stats::get_collection_stat(H_h);
         stats.print();
 #endif
+    }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::compute_partition_sizes(const std::vector<freq_cnt_t>& H)
+{
+    P_sz.resize(p_, 0);
+    p_id_t p_id = 0;    // Which partition we're at right now.
+    for(std::size_t bin = 0; bin < H.size(); ++bin)
+    {
+        if(p_id < pivots.size() && bin > pivots[p_id])  // Moving onto the next partition.
+            p_id++;
+
+        P_sz[p_id] += H[bin];   // The pivots are inclusive upper bounds of their partition.
     }
 }
 
@@ -193,8 +209,9 @@ void GPU_SACA<T_sym_>::partition()
 
     // Move the suffixes (with some associated prefixes) to their corresponding partitions.
     {
+        // Allocate the partitions with required capacities.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            new (P_ + p_id) Partition(0);
+            new (P_ + p_id) Partition(P_sz[p_id]);
     }
 }
 

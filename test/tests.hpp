@@ -25,10 +25,6 @@ void kgram_histogram(const T_sym_* T, idx_t n, freq_cnt_t* H, std::size_t k);
 template <typename T_sym_>
 bool validate_kgram_histogram(const T_sym_* T, idx_t n, std::size_t k, const freq_cnt_t* H);
 
-// Returns the partition sizes defined by the frequency histogram `H` and the
-// pivot set `X`.
-std::vector<freq_cnt_t> get_partition_sizes(const std::vector<freq_cnt_t>& H, const std::vector<pivot_t>& X);
-
 // Computes the partition-IDs of the suffixes of the text `T` of size `n` into
 // `P_id` based on their prefix `k`-grams, where the partitions are defined by
 // the pivot `k`-grams in `X`.
