@@ -54,6 +54,17 @@ void kgram_histogram(const T_sym_* const T, const idx_t n, freq_cnt_t* const H, 
 }
 
 
+template <typename T_sym_>
+bool validate_kgram_histogram(const T_sym_* const T_h, const idx_t n, const std::size_t k, const freq_cnt_t* const H)
+{
+    const std::size_t hist_sz = 1llu << k;
+
+    std::vector<freq_cnt_t> cpu_hist(hist_sz);
+    kgram_histogram(T_h, n, cpu_hist.data(), k);
+    return std::memcmp(H, cpu_hist.data(), hist_sz * sizeof(freq_cnt_t)) == 0;
+}
+
+
 std::vector<freq_cnt_t> get_partition_sizes(const std::vector<freq_cnt_t>& H, const std::vector<pivot_t>& X)
 {
     const auto p = X.size() + 1;    // Number of partitions.
@@ -125,6 +136,11 @@ template void kgram_histogram(const char*, idx_t, freq_cnt_t*, std::size_t);
 template void kgram_histogram(const uint8_t*, idx_t, freq_cnt_t*, std::size_t);
 template void kgram_histogram(const uint16_t*, idx_t, freq_cnt_t*, std::size_t);
 template void kgram_histogram(const uint32_t*, idx_t, freq_cnt_t*, std::size_t);
+
+template bool validate_kgram_histogram(const char*, idx_t, std::size_t, const freq_cnt_t*);
+template bool validate_kgram_histogram(const uint8_t*, idx_t, std::size_t, const freq_cnt_t*);
+template bool validate_kgram_histogram(const uint16_t*, idx_t, std::size_t, const freq_cnt_t*);
+template bool validate_kgram_histogram(const uint32_t*, idx_t, std::size_t, const freq_cnt_t*);
 
 template void compute_partition_IDs(const char*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
 template void compute_partition_IDs(const uint8_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);

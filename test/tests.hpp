@@ -19,10 +19,11 @@ namespace gpu_saca::test
 template <typename T_sym_>
 void kgram_histogram(const T_sym_* T, idx_t n, freq_cnt_t* H, std::size_t k);
 
-// Returns `true` iff the on-GPU frequency histogram `H_d` of quantized
-// `k`-grams of the text `T` of size `n` matches to a CPU-side histogram.
+// Returns `true` iff the frequency histogram `H` of quantized `k`-grams of the
+// text `T` of size `n` matches to the histogram computed at the CPU-side as
+// reference.
 template <typename T_sym_>
-bool validate_kgram_histogram(const T_sym_* T, idx_t n, std::size_t k, const freq_cnt_t* H_d);
+bool validate_kgram_histogram(const T_sym_* T, idx_t n, std::size_t k, const freq_cnt_t* H);
 
 // Returns the partition sizes defined by the frequency histogram `H` and the
 // pivot set `X`.

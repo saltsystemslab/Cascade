@@ -128,11 +128,6 @@ void GPU_SACA<T_sym_>::select_pivots()
         // Free the buffers.
         CUDA_CHECK(cudaFree(T_buf[0]));
         CUDA_CHECK(cudaFree(T_buf[1]));
-
-
-#ifdef TESTS
-            std::cerr << "Histogram verification: " << (test::validate_kgram_histogram(T_h_, n_, K, H_d) ? "Passes" : "Fails") << "\n";
-#endif
     }
 
     // Select `p - 1` uniformly spread out (in terms of histogram mass) pivots.
@@ -140,6 +135,10 @@ void GPU_SACA<T_sym_>::select_pivots()
         std::vector<freq_cnt_t> H_h(hist_sz);   // Histogram at the device.
         CUDA_CHECK(cudaMemcpy(H_h.data(), H_d, hist_sz * sizeof(freq_cnt_t), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(H_d));
+
+#ifdef TESTS
+        std::cerr << "Histogram verification: " << (test::validate_kgram_histogram(T_h_, n_, K, H_h.data()) ? "Passes" : "Fails") << "\n";
+#endif
 
         const p_id_t pivot_count = p_ - 1;
         pivots.resize(pivot_count);
