@@ -10,7 +10,7 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 # Bundle the source files into a variable.
 set(TESTS_SRC
         pivots-selection.cpp
-        pivots-selection.cu
+        partitioning.cpp
 )
 
 # Define the tester library.

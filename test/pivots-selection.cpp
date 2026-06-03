@@ -2,11 +2,10 @@
 #include "tests.hpp"
 #include "omp.h"
 
-#include <cstdint>
-#include <cstddef>
 #include <limits>
 #include <vector>
 #include <cstring>
+#include <algorithm>
 #include <cassert>
 
 
@@ -84,52 +83,6 @@ std::vector<freq_cnt_t> get_partition_sizes(const std::vector<freq_cnt_t>& H, co
 }
 
 
-template <typename  T_sym_>
-void compute_partition_IDs(const T_sym_* T, idx_t n, p_id_t* P_id, std::size_t k, const std::vector<pivot_t>& X)
-{
-    // TODO: repeated code; have better policy for this.
-    const auto quantize = [](const T_sym_ x)
-    {
-        // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
-        constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
-        return x <= mid ? 0 : 1;
-    };
-
-    const auto part_count = X.size() + 1;
-    #pragma omp parallel for schedule(static)
-    for(std::size_t i = 0; i < n; ++i)
-    {
-        kgram_t quant_kgram = 0;    // Quantized k-gram.
-        for(std::size_t j = 0; j < k; ++j)
-            quant_kgram |= (i + j < n ?
-                                static_cast<kgram_t>(quantize(T[i + j])) << (k - 1 - j) :
-                                0);
-
-        // Binary search for `quant_kgram` into the pivots for the smallest `p_id` such that `quant_kgram <= pivots[p_id]`.
-        p_id_t low = 0, high = part_count - 1;  // The solution lies in the range `[low, high]`.
-        while(low < high)
-        {
-            const auto mid = low + (high - low) / 2;
-            if(quant_kgram <= X[mid])   // The solution lies in the range `[low, mid]`.
-                high = mid;
-            else    // It lies in the range `[mid + 1, high]`.
-                low = mid + 1;
-        }
-
-        P_id[i] = low;
-    }
-}
-
-
-template <typename T_sym_>
-bool validate_partition_IDs(const T_sym_* const T, const idx_t n, const std::size_t k, const std::vector<pivot_t>& X, const p_id_t* const P_id)
-{
-    std::vector<p_id_t> cpu_P_id(n);
-    compute_partition_IDs(T, n, cpu_P_id.data(), k, X);
-    return std::memcmp(P_id, cpu_P_id.data(), n * sizeof(p_id_t)) == 0;
-}
-
-
 
 // Template instantiations for the required instances.
 template void kgram_histogram(const char*, idx_t, freq_cnt_t*, std::size_t);
@@ -141,15 +94,5 @@ template bool validate_kgram_histogram(const char*, idx_t, std::size_t, const fr
 template bool validate_kgram_histogram(const uint8_t*, idx_t, std::size_t, const freq_cnt_t*);
 template bool validate_kgram_histogram(const uint16_t*, idx_t, std::size_t, const freq_cnt_t*);
 template bool validate_kgram_histogram(const uint32_t*, idx_t, std::size_t, const freq_cnt_t*);
-
-template void compute_partition_IDs(const char*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
-template void compute_partition_IDs(const uint8_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
-template void compute_partition_IDs(const uint16_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
-template void compute_partition_IDs(const uint32_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
-
-template bool validate_partition_IDs(const char*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
-template bool validate_partition_IDs(const uint8_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
-template bool validate_partition_IDs(const uint16_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
-template bool validate_partition_IDs(const uint32_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
 
 }
