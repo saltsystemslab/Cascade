@@ -54,7 +54,8 @@ private:
     // of the text—the symbol at index `idx` corresponds to the most significant
     // bits of the word.
     // NB: the text must have been appropriately padded at the tail.
-    template <idx_t N = sizeof(T_sym_)> uint64_t read_word(idx_t idx) const;
+    template <idx_t N = (8 / sizeof(T_sym_))>
+    uint64_t pack_word(idx_t idx) const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
@@ -98,14 +99,14 @@ __forceinline__ uint8_t GPU_SACA<T_sym_>::quantize(const T_sym_ x)
 
 template <typename T_sym_>
 template <idx_t N>
-inline uint64_t GPU_SACA<T_sym_>::read_word(idx_t idx) const
+inline uint64_t GPU_SACA<T_sym_>::pack_word(idx_t idx) const
 {
     if constexpr(N == 0)
         return 0;
     else
     {
         constexpr auto shift = (N - 1) * sizeof(T_sym_) * 8;
-        return (static_cast<uint64_t>(T_h_[idx]) << shift) | read_word<N - 1>(idx + 1);
+        return (static_cast<uint64_t>(T_h_[idx]) << shift) | pack_word<N - 1>(idx + 1);
     }
 }
 
