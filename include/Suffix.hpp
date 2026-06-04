@@ -20,6 +20,13 @@ private:
 
 public:
 
+    // Constructs a suffix with index `suf`, primary key `p_key`, and secondary
+    // key `s_key`.
+    Suffix(const idx_t suf, const idx_t p_key, const idx_t s_key):
+          suf(suf)
+        , key{p_key, s_key}
+    {}
+
     // Returns the suffix's index.
     auto suffix() const { return suf; }
 
