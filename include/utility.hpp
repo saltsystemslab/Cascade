@@ -94,11 +94,9 @@ void generate_random_text(std::vector<T_sym_>& T, const std::size_t n)
 }
 
 
-// Reads an entire file of elements of type `T_` from `file_path` into `v` and
-// returns the count of elements read. Terminates `v` by appending the least
-// symbol of type `T_`. It is included in the element count.
+// Returns the size of the file of elements of type `T_` at path `file_path`.
 template <typename T_>
-std::size_t read_file_terminated(const std::string& file_path, std::vector<T_>& v)
+std::size_t file_size(const std::string& file_path)
 {
     const auto file_bytes = std::filesystem::file_size(file_path);
     if(file_bytes % sizeof(T_) != 0)
@@ -107,12 +105,7 @@ std::size_t read_file_terminated(const std::string& file_path, std::vector<T_>& 
         std::exit(EXIT_FAILURE);
     }
 
-    v.resize(file_bytes / sizeof(T_) + 1);
-    std::ifstream is(file_path, std::ios::binary);
-    is.read(reinterpret_cast<char*>(v.data()), file_bytes);
-    v.back() = std::numeric_limits<T_>::min();
-
-    return v.size();
+    return file_bytes / sizeof(T_);
 }
 
 
