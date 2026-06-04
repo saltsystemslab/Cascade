@@ -30,9 +30,8 @@ private:
 
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
 
-    T_sym_* T_d_;   // The text in device.
     const idx_t n_; // Size of the text.
-    const T_sym_* const T_h_;   // Text at the host-side; required for async transfers and testing.
+    const T_sym_* const T_h_;   // Text at the host-side.
 
     const p_id_t p_;    // Number of partitions for the SA.
 
@@ -49,6 +48,13 @@ private:
     Partition* const P_;    // The suffix partitions.
     std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
 
+
+    // Returns the 64-bit word situated at the index `idx` of the text. The
+    // endian-ness of the word matches the lexicographical order of the text—
+    // the symbol at index `idx` correspond to the most significant bits of the
+    // word.
+    // NB: the text must have been appropriately padded at the tail.
+    uint64_t read_word(idx_t idx) const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
@@ -87,6 +93,21 @@ __forceinline__ uint8_t GPU_SACA<T_sym_>::quantize(const T_sym_ x)
     // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
     constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
     return x <= mid ? 0 : 1;
+}
+
+
+template <typename T_sym_>
+inline uint64_t GPU_SACA<T_sym_>::read_word(const idx_t idx) const
+{
+    constexpr auto sym = sizeof(uint64_t) / sizeof(T_sym_); // Number of symbols in the word.
+    constexpr auto bits_per_sym = sizeof(T_sym_) * 8;
+    uint64_t wrd = 0;
+
+    #pragma unroll
+    for(idx_t j = 0; j < sym; ++j)
+        wrd = (wrd << bits_per_sym) | static_cast<uint64_t>(T_h_[idx + j]);
+
+    return wrd;
 }
 
 
