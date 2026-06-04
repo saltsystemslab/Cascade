@@ -19,8 +19,7 @@ __constant__ pivot_t pivots_d[MAX_PART_COUNT];
 
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
-      T_d_(nullptr)
-    , n_(n)
+      n_(n)
     , T_h_(T)
     , p_(128)   // TODO: tune this.
     , null_d(nullptr)
