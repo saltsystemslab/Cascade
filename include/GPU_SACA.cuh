@@ -49,12 +49,12 @@ private:
     std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
 
 
-    // Returns the 64-bit word situated at the index `idx` of the text. The
-    // endian-ness of the word matches the lexicographical order of the text—
-    // the symbol at index `idx` correspond to the most significant bits of the
-    // word.
+    // Returns the `N` symbols situated at the index `idx` of the text as a 64-
+    // bit word. The endian-ness of the word matches the lexicographical order
+    // of the text—the symbol at index `idx` corresponds to the most significant
+    // bits of the word.
     // NB: the text must have been appropriately padded at the tail.
-    uint64_t read_word(idx_t idx) const;
+    template <idx_t N = sizeof(T_sym_)> uint64_t read_word(idx_t idx) const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
@@ -97,17 +97,16 @@ __forceinline__ uint8_t GPU_SACA<T_sym_>::quantize(const T_sym_ x)
 
 
 template <typename T_sym_>
-inline uint64_t GPU_SACA<T_sym_>::read_word(const idx_t idx) const
+template <idx_t N>
+inline uint64_t GPU_SACA<T_sym_>::read_word(idx_t idx) const
 {
-    constexpr auto sym = sizeof(uint64_t) / sizeof(T_sym_); // Number of symbols in the word.
-    constexpr auto bits_per_sym = sizeof(T_sym_) * 8;
-    uint64_t wrd = 0;
-
-    #pragma unroll
-    for(idx_t j = 0; j < sym; ++j)
-        wrd = (wrd << bits_per_sym) | static_cast<uint64_t>(T_h_[idx + j]);
-
-    return wrd;
+    if constexpr(N == 0)
+        return 0;
+    else
+    {
+        constexpr auto shift = (N - 1) * sizeof(T_sym_) * 8;
+        return (static_cast<uint64_t>(T_h_[idx]) << shift) | read_word<N - 1>(idx + 1);
+    }
 }
 
 
