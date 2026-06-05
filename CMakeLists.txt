@@ -164,6 +164,10 @@ target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_FLAGS})
 target_compile_options(libcubwt_driver PRIVATE ${COMPILE_FLAGS})
 target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 
+# Pass OpenMP flag through the CUDA compiler down to the host compiler.
+# `nvcc` does not recognize OpenMP directives.
+target_compile_options(core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
+
 
 # Link appropriate libraries and targets.
 
