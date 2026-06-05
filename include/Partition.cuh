@@ -24,6 +24,11 @@ public:
     // Allocates this partition for `cap` many suffixes.
     Partition(idx_t cap);
 
+    Partition(const Partition&) = delete;
+    Partition(Partition&&) = default;
+    Partition& operator=(const Partition&) = delete;
+    Partition& operator=(Partition&&) = delete;
+
     ~Partition();
 
     // Returns pointer to the (mutable) data of the partition.

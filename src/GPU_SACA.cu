@@ -24,7 +24,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , T_h_(T)
     , p_(128)   // TODO: tune this.
     , null_d(nullptr)
-    , P_(util::allocate<Partition>(p_))
 {
     CUDA_CHECK(cudaStreamCreate(stream + 0));
     CUDA_CHECK(cudaStreamCreate(stream + 1));
@@ -42,8 +41,6 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     CUDA_CHECK(cudaStreamDestroy(stream[1]));
 
     CUDA_CHECK(cudaFree(null_d));
-
-    util::deallocate(P_);
 }
 
 
@@ -210,6 +207,10 @@ void GPU_SACA<T_sym_>::partition()
     // Move the suffixes (with some associated prefixes) to their corresponding partitions.
     {
         // Allocate the partitions with required capacities.
+        P_.reserve(p_);
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+            P_.emplace_back(P_sz[p_id]);
+
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
             new (P_ + p_id) Partition(P_sz[p_id]);
     }

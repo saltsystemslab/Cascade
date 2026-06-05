@@ -45,7 +45,7 @@ private:
 
     T_sym_* null_d; // Device-side buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 
-    Partition* const P_;    // The suffix partitions.
+    std::vector<Partition> P_;  // The suffix partitions.
     std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
 
 
