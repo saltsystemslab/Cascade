@@ -28,8 +28,8 @@ private:
     static constexpr std::size_t w_buf_cap = 4 * 1024 * 1024llu / sizeof(Suffix);   // Worker-local buffers overflow at size: 4KB.
 
     std::vector<util::Padded<w_buf_t>> w_buf;   // Worker-local buffers.
-    Suffix* const sink; // Sink to flush the worker-local buffers.
-    std::size_t flushed;    // Number of suffixes flushed to the sink.
+    Suffix* const sink_; // Sink to flush the worker-local buffers.
+    std::size_t flushed_;   // Number of suffixes flushed to the sink.
 
     util::Spin_Lock lock;   // Mutually-exclusive access-lock to the sink.
 
@@ -50,6 +50,9 @@ public:
     // Flushes the buffer to the sink. There must be no concurrent pending add
     // invocations.
     void flush();
+
+    // Returns the number of suffixes flushed to the sink.
+    auto flushed() const { return flushed_; }
 };
 
 
@@ -63,8 +66,8 @@ inline void Suffix_Buffer::add(const idx_t suf, const idx_t p_key, const idx_t s
     if(buf.size() == w_buf_cap)
     {
         lock.lock();
-        std::memcpy(reinterpret_cast<void*>(sink + flushed), reinterpret_cast<void*>(buf.data()), w_buf_cap * sizeof(Suffix));
-        flushed += w_buf_cap;
+        std::memcpy(reinterpret_cast<void*>(sink_ + flushed_), reinterpret_cast<void*>(buf.data()), w_buf_cap * sizeof(Suffix));
+        flushed_ += w_buf_cap;
         lock.unlock();
 
         buf.clear();
