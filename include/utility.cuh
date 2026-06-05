@@ -28,10 +28,26 @@ while(0)
 
 namespace gpu_saca
 {
+    // Allocates memory for `sz` elements of type `T_` at the host, pins it, and
+    // places its address at `ptr`. Returns CUDA error-type encountered, if any.
+    template <typename T_>
+    auto pinned_allocate_host(T_*& ptr, const std::size_t sz)
+    {
+        return cudaHostAlloc(reinterpret_cast<void**>(&ptr), sz * sizeof(T_), cudaHostAllocDefault);
+    }
+
+    // Deallocates the pointer `ptr`, allocated with `pinned_allocate_host`.
+    // Returns CUDA error-type encountered, if any.
+    inline auto deallocate_host(void* const ptr)
+    {
+        return cudaFreeHost(ptr);
+    }
+
+
     // Atomically adds `val` to the value at address `addr`, and returns the
     // earlier value from there.
-    __device__ __forceinline__
-    uint8_t atomic_add_u8(uint8_t* addr, const uint8_t val)
+    __device__
+    __forceinline__ uint8_t atomic_add_u8(uint8_t* addr, const uint8_t val)
     {
         constexpr uintptr_t byte_off_mask = 0b11llu;    // Mask to extract the byte of interest's offset within the enclosing `u32` word.
         uint32_t* const word_addr = reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(addr) & ~byte_off_mask);    // Address of the enclosing `u32` word.

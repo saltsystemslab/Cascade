@@ -16,7 +16,7 @@ class Partition
 {
 private:
 
-    Suffix* const suf;  // The suffixes (along with sort-keys) in this partition.
+    Suffix* suf;    // The suffixes (along with sort-keys) in this partition.
     const idx_t cap;    // Capacity of the partition.
 
 public:
