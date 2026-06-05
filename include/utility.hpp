@@ -109,68 +109,6 @@ std::size_t file_size(const std::string& file_path)
 }
 
 
-// Wrapper class for a fixed-capacity buffer of elements of type `T_`.
-template <typename T_>
-class Fixed_Capacity_Buffer
-{
-private:
-
-    const std::size_t cap_; // Capacity of the buffer.
-    T_* const buf_; // The raw buffer.
-    std::size_t sz_;    // Number of elements in the buffer.
-
-
-public:
-
-    // Constructs a buffer with capacity `cap`.
-    Fixed_Capacity_Buffer(const std::size_t cap):
-          cap_(cap)
-        , buf_(allocate<T_>(cap))
-        , sz_(0)
-    {}
-
-    ~Fixed_Capacity_Buffer() { deallocate(buf_); }
-
-    Fixed_Capacity_Buffer(Fixed_Capacity_Buffer&& rhs) { *this = std::move(rhs); }
-
-    Fixed_Capacity_Buffer& operator=(Fixed_Capacity_Buffer&& rhs)
-    {
-        cap_ = rhs.cap_;
-        buf_ = rhs.buf_;
-        sz_ = rhs.sz_;
-        rhs.cap_ = 0;
-        rhs.buf_ = nullptr;
-        rhs.sz_ = 0;
-
-        return *this;
-    }
-
-    Fixed_Capacity_Buffer(const Fixed_Capacity_Buffer&) = delete;
-    Fixed_Capacity_Buffer& operator=(const Fixed_Capacity_Buffer&) = delete;
-
-    // Returns the memory region of the buffer.
-    T_* data() { return buf_; }
-
-    // Returns the memory region of the buffer.
-    const T_* data() const { return buf_; }
-
-    // Returns reference to the `idx`'th element of the buffer.
-    T_& operator[](const std::size_t idx) { return buf_[idx]; }
-
-    // Returns the `idx`'th element of the buffer.
-    const T_& operator[](const std::size_t idx) const { return buf_[idx]; }
-
-    // Returns the capacity of the buffer.
-    auto capacity() const { return cap_; }
-
-    // Frees the buffer's memory.
-    void free() { deallocate(buf_); buf_ = nullptr; cap_ = 0; }
-
-    // Returns the resident set size of the buffer.
-    std::size_t RSS() const { return sizeof(buf_) + sizeof(cap_) + capacity() * sizeof(T_); }
-};
-
-
 struct Collection_Stats
 {
     uint64_t n;

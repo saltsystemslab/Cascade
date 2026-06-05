@@ -1,5 +1,6 @@
 
 #include "GPU_SACA.cuh"
+#include "Suffix_Buffer.hpp"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "tests.hpp"
