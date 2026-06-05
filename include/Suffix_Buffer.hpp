@@ -25,7 +25,7 @@ class Suffix_Buffer
 private:
 
     using w_buf_t = std::vector<Suffix>;    // Type of worker-local buffers.
-    static constexpr std::size_t w_buf_cap = 4 * 1024 * 1024llu / sizeof(Suffix);   // Worker-local buffers overflow at size: 4KB.
+    static constexpr std::size_t w_buf_cap = 4 * 1024llu / sizeof(Suffix);  // Worker-local buffers overflow at size: 4KB.
 
     std::vector<util::Padded<w_buf_t>> w_buf;   // Worker-local buffers.
     Suffix* const sink_; // Sink to flush the worker-local buffers.
