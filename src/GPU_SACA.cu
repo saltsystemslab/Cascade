@@ -5,6 +5,8 @@
 #include "utility.cuh"
 #include "tests.hpp"
 
+#include "omp.h"
+
 #include <cstdint>
 #include <cstddef>
 #include <new>
@@ -206,13 +208,27 @@ void GPU_SACA<T_sym_>::partition()
 
     // Move the suffixes (with some associated prefixes) to their corresponding partitions.
     {
-        // Allocate the partitions with required capacities.
+        // Allocate the partitions with required capacities, and create concurrent buffer for each.
+
         P_.reserve(p_);
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
             P_.emplace_back(P_sz[p_id]);
 
+        std::vector<util::Padded<Suffix_Buffer>> P_buf;
+        P_buf.reserve(p_);
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            new (P_ + p_id) Partition(P_sz[p_id]);
+            P_buf.emplace_back(P_[p_id].data());
+
+
+        // Add suffix indices along with their 16-byte prefixes to their corresponding partitions (through the buffers).
+
+        #pragma omp parallel for schedule(static)
+        for(idx_t i = 0; i < n_; ++i)
+            P_buf[P_id[i]].unwrap().add(i, pack_word(i), pack_word(i + 8 / sizeof(T_sym_)));
+
+        #pragma omp parallel for schedule(static)
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+            P_buf[p_id].unwrap().flush();
     }
 }
 
