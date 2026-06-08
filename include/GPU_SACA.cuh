@@ -41,7 +41,8 @@ private:
 
     std::vector<p_id_t> P_id;   // Partition-IDs of the suffixes.
 
-    cudaStream_t stream[2]; // CUDA streams for double-buffered overlap of PCIe transfers and kernel executions.
+    static constexpr std::size_t STREAM_C = 3;  // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
+    cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
     T_sym_* null_d; // Device-side buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 

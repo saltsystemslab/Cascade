@@ -27,8 +27,8 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , p_(128)   // TODO: tune this.
     , null_d(nullptr)
 {
-    CUDA_CHECK(cudaStreamCreate(stream + 0));
-    CUDA_CHECK(cudaStreamCreate(stream + 1));
+    for(std::size_t s = 0; s < STREAM_C; ++s)
+        CUDA_CHECK(cudaStreamCreate(stream + s));
 
     CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
     std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
@@ -39,8 +39,8 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
-    CUDA_CHECK(cudaStreamDestroy(stream[0]));
-    CUDA_CHECK(cudaStreamDestroy(stream[1]));
+    for(std::size_t s = 0; s < STREAM_C; ++s)
+        CUDA_CHECK(cudaStreamDestroy(stream[s]));
 
     CUDA_CHECK(cudaFree(null_d));
 }
@@ -93,8 +93,8 @@ void GPU_SACA<T_sym_>::select_pivots()
         }
 
         const std::size_t buf_bytes = (CHUNK_SZ + K - 1) * sizeof(T_sym_);
-        CUDA_CHECK(cudaMalloc(T_buf + 0, buf_bytes));
-        CUDA_CHECK(cudaMalloc(T_buf + 1, buf_bytes));
+        for(std::size_t b = 0; b < 2; ++b)
+            CUDA_CHECK(cudaMalloc(T_buf + b, buf_bytes));
     }
 
     // Count the quantized k-gram frequencies into the histogram.
@@ -125,12 +125,12 @@ void GPU_SACA<T_sym_>::select_pivots()
         }
 
         // Wait for the streams to finish.
-        CUDA_CHECK(cudaStreamSynchronize(stream[0]));
-        CUDA_CHECK(cudaStreamSynchronize(stream[1]));
+        for(std::size_t s = 0; s < 2; ++s)
+            CUDA_CHECK(cudaStreamSynchronize(stream[s]));
 
         // Free the buffers.
-        CUDA_CHECK(cudaFree(T_buf[0]));
-        CUDA_CHECK(cudaFree(T_buf[1]));
+        for(std::size_t b = 0; b < 2; ++b)
+            CUDA_CHECK(cudaFree(T_buf[b]));
     }
 
     // Select `p - 1` uniformly spread out (in terms of histogram mass) pivots.
@@ -254,8 +254,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     constexpr std::size_t BLOCK_SZ = 256;
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
-    T_sym_* T_buf[2];   // The text-chunk buffers.
-    p_id_t* P_id_buf[2];    // The partition-ID buffers.
+    T_sym_* T_buf[STREAM_C];    // The text-chunk buffers.
+    p_id_t* P_id_buf[STREAM_C]; // The partition-ID buffers.
 
     // Determine the chunks' sizes for processing them in a streaming manner, and allocate space for the corresponding buffers.
     {
@@ -263,7 +263,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
 
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory for the chunk buffers.
-        const std::size_t per_idx_mem = 2 * (sizeof(T_sym_) + sizeof(p_id_t));  // Space required per-index across the two sets of buffers.
+        const std::size_t per_idx_mem = STREAM_C * (sizeof(T_sym_) + sizeof(p_id_t));   // Space required per-index across the three sets of buffers.
         CHUNK_SZ = budget / per_idx_mem;
         CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
         if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
@@ -274,8 +274,11 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
         const std::size_t text_buf_bytes = (CHUNK_SZ + K - 1) * sizeof(T_sym_);
         const std::size_t p_id_buf_bytes = CHUNK_SZ * sizeof(p_id_t);
-        CUDA_CHECK(cudaMalloc(T_buf + 0, text_buf_bytes));      CUDA_CHECK(cudaMalloc(T_buf + 1, text_buf_bytes));
-        CUDA_CHECK(cudaMalloc(P_id_buf + 0, p_id_buf_bytes));   CUDA_CHECK(cudaMalloc(P_id_buf + 1, p_id_buf_bytes));
+        for(std::size_t b = 0; b < STREAM_C; ++b)
+        {
+            CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
+            CUDA_CHECK(cudaMalloc(P_id_buf + b, p_id_buf_bytes));
+        }
 
         P_id.resize(n_);
     }
@@ -285,9 +288,9 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     {
         const auto s_mem_sz = BLOCK_SZ + K - 1; // Shared memory size: quantized text-tile.
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
-        for(idx_t c = 0; c < chunk_count; ++c)  // Double-buffered chunk loop.
+        for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
         {
-            const auto buf_id = c % 2;  // Which set of buffers (and stream) to use for this chunk.
+            const auto buf_id = c % 3;  // Which set of buffers (and stream) to use for this chunk.
             const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
             const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
             const auto chunk_symbol_req = chunk_suf_count + K - 1;  // Number of symbols this chunk is required to have.
@@ -312,12 +315,15 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
     // Wait for the streams to finish.
-    CUDA_CHECK(cudaStreamSynchronize(stream[0]));
-    CUDA_CHECK(cudaStreamSynchronize(stream[1]));
+    for(std::size_t s = 0; s < STREAM_C; ++s)
+        CUDA_CHECK(cudaStreamSynchronize(stream[s]));
 
     // Free the buffers.
-    CUDA_CHECK(cudaFree(T_buf[0]));     CUDA_CHECK(cudaFree(T_buf[1]));
-    CUDA_CHECK(cudaFree(P_id_buf[0]));  CUDA_CHECK(cudaFree(P_id_buf[1]));
+    for(std::size_t b = 0; b < 3; ++b)
+    {
+        CUDA_CHECK(cudaFree(T_buf[b]));
+        CUDA_CHECK(cudaFree(P_id_buf[b]));
+    }
 
 
 #ifdef TESTS
