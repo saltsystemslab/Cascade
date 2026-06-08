@@ -4,8 +4,8 @@
 
 
 
+#include "Sort_Key.hpp"
 #include "types.hpp"
-#include "Suffix.hpp"
 
 
 namespace gpu_saca
@@ -16,7 +16,8 @@ class Partition
 {
 private:
 
-    Suffix* suf;    // The suffixes (along with sort-keys) in this partition.
+    idx_t* suf_;    // The suffixes in this partition.
+    Sort_Key* key_; // The sort-keys of the suffixes in the partition.
     const idx_t cap;    // Capacity of the partition.
 
 public:
@@ -31,8 +32,11 @@ public:
 
     ~Partition();
 
-    // Returns pointer to the (mutable) data of the partition.
-    auto data() { return suf; }
+    // Returns pointer to the (mutable) suffix data of the partition.
+    auto suf() { return suf_; }
+
+    // Returns pointer to the (mutable) sort-key data of the partition.
+    auto key() { return key_; }
 };
 
 }

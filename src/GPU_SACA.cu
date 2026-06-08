@@ -218,7 +218,7 @@ void GPU_SACA<T_sym_>::partition()
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(P_[p_id].data());
+                P_buf.emplace_back(Suffix_Buffer{P_[p_id].suf(), P_[p_id].key()});
         }
 
 

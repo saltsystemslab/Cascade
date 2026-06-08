@@ -4,8 +4,9 @@
 
 
 
-#include "Suffix.hpp"
+#include "Sort_Key.hpp"
 #include "Spin_Lock.hpp"
+#include "types.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
@@ -24,19 +25,26 @@ class Suffix_Buffer
 {
 private:
 
-    using w_buf_t = std::vector<Suffix>;    // Type of worker-local buffers.
-    static constexpr std::size_t w_buf_cap = 4 * 1024llu / sizeof(Suffix);  // Worker-local buffers overflow at size: 4KB.
+    using suf_buf_t = std::vector<idx_t>;       // Type of worker-local suffix buffers.
+    using key_buf_t = std::vector<Sort_Key>;    // Type of worker-local sort-key (of suffixes) buffers.
 
-    std::vector<util::Padded<w_buf_t>> w_buf;   // Worker-local buffers.
-    Suffix* const sink_; // Sink to flush the worker-local buffers.
+    static constexpr std::size_t w_buf_cap = 4 * 1024llu / (sizeof(idx_t) + sizeof(Sort_Key));  // Worker-local buffers overflow at total size: 4KB.
+
+    std::vector<util::Padded<suf_buf_t>> w_suf_buf; // Worker-local suffix buffers.
+    std::vector<util::Padded<key_buf_t>> w_key_buf; // Worker-local sort-key buffers.
+
+    idx_t* const suf_sink_;     // Sink to flush the worker-local suffix buffers.
+    Sort_Key* const key_sink_;  // Sink to flush the worker-local sort-key buffers.
+
     std::size_t flushed_;   // Number of suffixes flushed to the sink.
 
     util::Spin_Lock lock;   // Mutually-exclusive access-lock to the sink.
 
 public:
 
-    // Constructs a buffer that overflows to `sink`.
-    Suffix_Buffer(Suffix* sink);
+    // Constructs a buffer that overflows suffixes to `suf_sink` and their keys
+    // to `key_sink`.
+    Suffix_Buffer(idx_t* suf_sink, Sort_Key* key_sink);
 
     Suffix_Buffer(const Suffix_Buffer&) = delete;
     Suffix_Buffer& operator=(const Suffix_Buffer&) = delete;
@@ -51,7 +59,7 @@ public:
     // invocations.
     void flush();
 
-    // Returns the number of suffixes flushed to the sink.
+    // Returns the number of suffixes flushed to the sinks.
     auto flushed() const { return flushed_; }
 };
 
@@ -59,18 +67,23 @@ public:
 inline void Suffix_Buffer::add(const idx_t suf, const idx_t p_key, const idx_t s_key)
 {
     const auto w_id = omp_get_thread_num();
-    auto& buf = w_buf[w_id].unwrap();
-    buf.emplace_back(suf, p_key, s_key);
-    assert(buf.size() <= w_buf_cap);
+    auto& suf_buf = w_suf_buf[w_id].unwrap();
+    auto& key_buf = w_key_buf[w_id].unwrap();
 
-    if(buf.size() == w_buf_cap)
+    suf_buf.push_back(suf);
+    key_buf.push_back({p_key, s_key});
+    assert(suf_buf.size() <= w_buf_cap), assert(key_buf.size() <= w_buf_cap), assert(suf_buf.size() == key_buf.size());
+
+    if(suf_buf.size() == w_buf_cap)
     {
         lock.lock();
-        std::memcpy(reinterpret_cast<void*>(sink_ + flushed_), reinterpret_cast<void*>(buf.data()), w_buf_cap * sizeof(Suffix));
+        std::memcpy(reinterpret_cast<void*>(suf_sink_ + flushed_), reinterpret_cast<void*>(suf_buf.data()), w_buf_cap * sizeof(idx_t));
+        std::memcpy(reinterpret_cast<void*>(key_sink_ + flushed_), reinterpret_cast<void*>(key_buf.data()), w_buf_cap * sizeof(Sort_Key));
         flushed_ += w_buf_cap;
         lock.unlock();
 
-        buf.clear();
+        suf_buf.clear();
+        key_buf.clear();
     }
 }
 
