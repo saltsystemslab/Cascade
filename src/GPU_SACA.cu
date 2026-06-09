@@ -1,16 +1,18 @@
 
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.hpp"
+#include "Sort_Key.cuh"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "tests.hpp"
 
 #include "omp.h"
+#include "cub/cub.cuh"
 
 #include <cstdint>
 #include <cstddef>
-#include <new>
 #include <cstdlib>
+#include <algorithm>
 #include <iostream>
 
 
@@ -58,6 +60,8 @@ void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
 
     // Unpin the host-side text as we do not need the text anymore.
     CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
+
+    initial_rank();
 
     (void)SA;
 }
@@ -329,6 +333,58 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 #ifdef TESTS
     std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id.data()) ? "Passes" : "Fails") << "\n";
 #endif
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::initial_rank()
+{
+    Sort_Key* key_buf[STREAM_C][2]; // Sort-keys of suffixes.
+    idx_t* suf_buf[STREAM_C][2];    // Suffixes.
+    void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort.
+
+    // Verify device memory budget and allocate device buffers for the streams.
+    {
+        // Each suffix in each stream needs: 1. `DoubleBuffer` keys, input and output (2 x `Sort_key`);
+        //      2. `DoubleBuffer` values, input and output (2 x `idx_t`).
+        // `cub` itself requires a sort-workspace.
+        // Memory constraint: STREAM_C x (2 x P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+
+        const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+        std::size_t workspace_sz = 0;
+        {
+            cub::DoubleBuffer<Sort_Key> keys;
+            cub::DoubleBuffer<idx_t> vals;
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                nullptr, workspace_sz,
+                keys, vals,
+                P_sz_max,
+                Sort_Key_Decomposer{}
+            ));
+        }
+
+        std::size_t free_mem, total_mem;
+        CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
+        const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
+        const std::size_t per_stream_budget = 2 * P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz;
+        if(STREAM_C * per_stream_budget > budget)
+        {
+            std::cerr << "Too low device memory available for initial-ranking process streaming. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+
+        for(std::size_t b = 0; b < STREAM_C; ++b)   // For each stream
+        {
+            for(std::size_t r = 0; r < 1; ++r)  // For each buffer in the radix-sort ping-pong
+            {
+                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Sort_Key)));
+                CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
+            }
+
+            CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
+        }
+    }
 }
 
 
