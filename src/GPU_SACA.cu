@@ -376,7 +376,7 @@ void GPU_SACA<T_sym_>::initial_rank()
 
         for(std::size_t b = 0; b < STREAM_C; ++b)   // For each stream
         {
-            for(std::size_t r = 0; r < 1; ++r)  // For each buffer in the radix-sort ping-pong
+            for(std::size_t r = 0; r < 2; ++r)  // For each buffer in the radix-sort ping-pong
             {
                 CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Sort_Key)));
                 CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
