@@ -294,7 +294,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
         for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
         {
-            const auto buf_id = c % 3;  // Which set of buffers (and stream) to use for this chunk.
+            const auto buf_id = c % STREAM_C;   // Which set of buffers (and stream) to use for this chunk.
             const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
             const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
             const auto chunk_symbol_req = chunk_suf_count + K - 1;  // Number of symbols this chunk is required to have.
@@ -323,7 +323,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         CUDA_CHECK(cudaStreamSynchronize(stream[s]));
 
     // Free the buffers.
-    for(std::size_t b = 0; b < 3; ++b)
+    for(std::size_t b = 0; b < STREAM_C; ++b)
     {
         CUDA_CHECK(cudaFree(T_buf[b]));
         CUDA_CHECK(cudaFree(P_id_buf[b]));
@@ -339,9 +339,10 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
-    Sort_Key* key_buf[STREAM_C][2]; // Sort-keys of suffixes.
-    idx_t* suf_buf[STREAM_C][2];    // Suffixes.
-    void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort.
+    Sort_Key* key_buf[STREAM_C][2]; // Input and output buffers for sort-keys of suffixes, per stream.
+    idx_t* suf_buf[STREAM_C][2];    // Input and output buffers for suffixes, per stream.
+    void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort, per stream.
+    std::size_t workspace_sz = 0;
 
     // Verify device memory budget and allocate device buffers for the streams.
     {
@@ -351,7 +352,6 @@ void GPU_SACA<T_sym_>::initial_rank()
         // Memory constraint: STREAM_C x (2 x P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
         const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
-        std::size_t workspace_sz = 0;
         {
             cub::DoubleBuffer<Sort_Key> keys;
             cub::DoubleBuffer<idx_t> vals;
@@ -384,6 +384,58 @@ void GPU_SACA<T_sym_>::initial_rank()
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
         }
+    }
+
+
+    // Move partitions to device in a triple-buffered manner, sort based on the associated prefixes, and move the output to host.
+    {
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        {
+            if(P_sz[p_id] == 0) // Skip empty partitions.
+                continue;
+
+            const std::size_t buf_id = p_id % STREAM_C; // Which set of buffers (and stream) to use for this chunk.
+            const auto part_sz = P_sz[p_id];    // Size of this partition.
+
+            cub::DoubleBuffer<Sort_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);    // Input and output buffers for the sort-keys of suffixes at the device.
+            cub::DoubleBuffer<idx_t>    suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);    // Input and output buffers for the suffixes at the device.
+            auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
+
+            // Asynchronously transfer this partition to the device.
+            CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], P_[p_id].key(), part_sz * sizeof(Sort_Key), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], P_[p_id].suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+
+            // Sort the partition.
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                workspace, workspace_sz,
+                key, suf,
+                part_sz,
+                Sort_Key_Decomposer{},
+                0, 128,
+                stream[buf_id]
+            ));
+
+            // Asynchronously copy this partition's sort-output to host.
+            CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), key.Current(), part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(P_[p_id].suf(), suf.Current(), part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        }
+    }
+
+
+    // Wait for the streams to finish.
+    for(std::size_t s = 0; s < STREAM_C; ++s)
+        CUDA_CHECK(cudaStreamSynchronize(stream[s]));
+
+    // Free the buffers.
+    for(std::size_t b = 0; b < STREAM_C; ++b)
+    {
+        for(std::size_t r = 0; r < 2; ++r)
+        {
+            CUDA_CHECK(cudaFree(key_buf[b][r]));
+            CUDA_CHECK(cudaFree(suf_buf[b][r]));
+        }
+
+        CUDA_CHECK(cudaFree(workspace_buf[b]));
     }
 }
 
