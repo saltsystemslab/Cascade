@@ -352,15 +352,27 @@ void GPU_SACA<T_sym_>::initial_rank()
         // Memory constraint: STREAM_C x (2 x P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
         const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+
+        // Compute required workspaces-sizes for the sort and the scan.
         {
             cub::DoubleBuffer<Sort_Key> keys;
             cub::DoubleBuffer<idx_t> vals;
+            std::size_t sort_workspace_sz = 0;
             CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                nullptr, workspace_sz,
+                nullptr, sort_workspace_sz,
                 keys, vals,
                 P_sz_max,
                 Sort_Key_Decomposer{}
             ));
+
+            std::size_t scan_workspace_sz = 0;
+            CUDA_CHECK(cub::DeviceScan::InclusiveSum(
+                nullptr, scan_workspace_sz,
+                static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
+                2 * P_sz_max
+            ));
+
+            workspace_sz = std::max(sort_workspace_sz, scan_workspace_sz);
         }
 
         std::size_t free_mem, total_mem;
