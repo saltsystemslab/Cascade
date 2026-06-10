@@ -16,11 +16,11 @@ namespace gpu_saca
 // Decomposer of a 16-byte sort-key to its primary and secondary keys.
 struct Sort_Key_Decomposer
 {
-__device__
-cuda::std::tuple<idx_t&, idx_t&> operator()(Sort_Key& key) const
-{
-    return {key.primary, key.secondary};
-}
+    __device__ __host__
+    cuda::std::tuple<idx_t&, idx_t&> operator()(Sort_Key& key) const
+    {
+        return {key.primary, key.secondary};
+    }
 };
 
 }
