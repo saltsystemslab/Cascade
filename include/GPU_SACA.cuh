@@ -5,6 +5,7 @@
 
 #include "types.hpp"
 #include "Partition.cuh"
+#include "Sort_Key.hpp"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -246,6 +247,28 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, cons
             P_id[off] = low;
         }
     }
+}
+
+
+// Flags the distinct sort-keys from the sorted `Sort_Key` array of size `n`,
+// into the 64-bit array `flag_u64` of size `2 * n`. `K` and `flag_u64` will be
+// byte-aligned: the `i`'th sort-key from `K` has its flag at the `2 * i`'th
+// index of `flag_u64`—thus the odd indices in `flag_u64` will be 0-holes.
+// Grid organization: one thread per sort-key.
+// Shared memory layout: no usage.
+template <std::size_t BLOCK_SZ>
+__global__
+void flag_distinct_keys_kernel(const Sort_Key* const __restrict__ K, uint64_t* const __restrict__ flag_u64, const idx_t n)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+    flag_u64[2 * i + 1] = 0;    // Hole in the flag array corresponding to the `i`'th sort-key.
+    if(i == 0)  // First sort-key is trivially distinct.
+        flag_u64[0] = 1;
+    else
+        flag_u64[2 * i] = (K[i].primary != K[i - 1].primary || K[i].secondary != K[i - 1].secondary);
 }
 
 }

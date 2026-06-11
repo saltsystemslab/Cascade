@@ -399,7 +399,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     }
 
 
-    // Move partitions to device in a triple-buffered manner, sort based on the associated prefixes, and move the output to host.
+    // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
     {
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
@@ -414,18 +414,39 @@ void GPU_SACA<T_sym_>::initial_rank()
             auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
 
             // Asynchronously transfer this partition to the device.
-            CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], P_[p_id].key(), part_sz * sizeof(Sort_Key), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], P_[p_id].suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            {
+                CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], P_[p_id].key(), part_sz * sizeof(Sort_Key), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], P_[p_id].suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            }
+
 
             // Sort the partition.
-            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                workspace, workspace_sz,
-                key, suf,
-                part_sz,
-                Sort_Key_Decomposer{},
-                0, 128,
-                stream[buf_id]
-            ));
+            {
+                CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                    workspace, workspace_sz,
+                    key, suf,
+                    part_sz,
+                    Sort_Key_Decomposer{},
+                    0, 128,
+                    stream[buf_id]
+                ));
+            }
+
+
+            // Rank the sort-output.
+            {
+                const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
+                Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
+                uint64_t* const flag_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Flags for distinct keys.
+                uint64_t* const rank_u64 = reinterpret_cast<uint64_t*>(K);  // Output ranks of the keys.
+
+                constexpr std::size_t BLOCK_SZ = 256;
+                const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+                flag_distinct_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                    (K, flag_u64, part_sz);
+                CUDA_CHECK(cudaGetLastError());
+            }
+
 
             // Asynchronously copy this partition's sort-output to host.
             CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), key.Current(), part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
