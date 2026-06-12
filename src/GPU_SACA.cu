@@ -51,17 +51,27 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
 {
+    using namespace caps_sa::timer;
+
     // Pin the host-side text so that PCIe transfers of text can be overlapped kernel execution.
     CUDA_CHECK(cudaHostRegister(const_cast<T_sym_*>(T_h_), n_ * sizeof(T_sym_), cudaHostRegisterDefault));
 
+    const auto t_0 = now();
+
     select_pivots();
+    const auto t_1 = now();
+    std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
     partition();
+    const auto t_2 = now();
+    std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
     // Unpin the host-side text as we do not need the text anymore.
     CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
 
     initial_rank();
+    const auto t_3 = now();
+    std::cerr << "Initial ranking completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
 
     (void)SA;
 }
