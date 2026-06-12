@@ -504,7 +504,7 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
 #ifdef TESTS
-    // TODO: validate initial-ranks.
+    std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key) ? "Passes" : "Fails") << "\n";
     CUDA_CHECK(deallocate_host(sorted_key));
 #endif
 }

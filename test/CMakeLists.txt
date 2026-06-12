@@ -11,6 +11,7 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 set(TESTS_SRC
         pivots-selection.cpp
         partitioning.cpp
+        ranking.cpp
 )
 
 # Define the tester library.

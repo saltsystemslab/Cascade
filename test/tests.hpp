@@ -5,6 +5,8 @@
 
 
 #include "types.hpp"
+#include "Partition.hpp"
+#include "Sort_Key.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -36,6 +38,14 @@ void compute_partition_IDs(const T_sym_* T, idx_t n, p_id_t* P_id, std::size_t k
 // computed at the CPU-side as reference.
 template <typename T_sym_>
 bool validate_partition_IDs(const T_sym_* T, idx_t n, std::size_t k, const std::vector<pivot_t>& X, const p_id_t* P_id);
+
+// Returns `true` iff the keys in `key`, corresponding to the partition `part`,
+// are sorted, and `part` is properly ranked based on the sorted keys.
+bool validate_local_ranking(const Partition& part, const Sort_Key* key);
+
+// Returns `true` iff all the partitions in `P` are properly sorted-and-ranked,
+// with their keys being packed flat at `key` after the device-side sort.
+bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* key);
 
 }
 

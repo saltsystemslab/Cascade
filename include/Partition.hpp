@@ -38,6 +38,12 @@ public:
     // Returns pointer to the (mutable) sort-key data of the partition.
     auto key() { return key_; }
 
+    // Returns pointer to the (immutable) suffix data of the partition.
+    auto suf() const { return suf_; }
+
+    // Returns pointer to the (immutable) sort-key data of the partition.
+    auto key() const { return key_; }
+
     // Returns the size of the partition.
     auto size() const { return sz_; }
 };
