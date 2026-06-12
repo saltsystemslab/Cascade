@@ -1,6 +1,6 @@
 
-#ifndef PARTITION_CUH
-#define PARTITION_CUH
+#ifndef PARTITION_HPP
+#define PARTITION_HPP
 
 
 
@@ -18,7 +18,7 @@ private:
 
     idx_t* suf_;    // The suffixes in this partition.
     Sort_Key* key_; // The sort-keys of the suffixes in the partition.
-    const idx_t cap;    // Capacity of the partition.
+    const idx_t sz_;    // Size of the partition.
 
 public:
 
@@ -37,6 +37,9 @@ public:
 
     // Returns pointer to the (mutable) sort-key data of the partition.
     auto key() { return key_; }
+
+    // Returns the size of the partition.
+    auto size() const { return sz_; }
 };
 
 }

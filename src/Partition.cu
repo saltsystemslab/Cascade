@@ -1,5 +1,5 @@
 
-#include "Partition.cuh"
+#include "Partition.hpp"
 #include "utility.cuh"
 
 #include "omp.h"
@@ -8,13 +8,13 @@
 namespace gpu_saca
 {
 
-Partition::Partition(const idx_t cap):
+Partition::Partition(const idx_t sz):
       suf_(nullptr)
     , key_(nullptr)
-    , cap(cap)
+    , sz_(sz)
 {
-    CUDA_CHECK(pinned_allocate_host(suf_, cap));
-    CUDA_CHECK(pinned_allocate_host(key_, cap));
+    CUDA_CHECK(pinned_allocate_host(suf_, sz_));
+    CUDA_CHECK(pinned_allocate_host(key_, sz_));
 }
 
 

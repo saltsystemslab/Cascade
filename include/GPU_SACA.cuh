@@ -4,7 +4,7 @@
 
 
 #include "types.hpp"
-#include "Partition.cuh"
+#include "Partition.hpp"
 #include "Sort_Key.hpp"
 #include "utility.cuh"
 
