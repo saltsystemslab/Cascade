@@ -411,6 +411,16 @@ void GPU_SACA<T_sym_>::initial_rank()
 
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
     {
+#ifdef TESTS
+        Sort_Key* sorted_key;   // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those.
+        CUDA_CHECK(pinned_allocate_host(sorted_key, n_));
+
+        std::vector<idx_t> P_off(p_);   // Offset of each partition's sorted keys in the flat packed `sorted_key` array.
+        P_off[0] = 0;
+        for(p_id_t p_id = 1; p_id < p_; ++p_id)
+            P_off[i] = P_off[p_id - 1] + P_sz[p_id - 1];
+#endif
+
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
             if(P_sz[p_id] == 0) // Skip empty partitions.
@@ -450,6 +460,10 @@ void GPU_SACA<T_sym_>::initial_rank()
                 uint64_t* const flag_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Flags for distinct keys.
                 uint64_t* const rank_u64 = reinterpret_cast<uint64_t*>(K);  // Output ranks of the keys.
 
+#ifdef TESTS    // Save the sorted keys for validation-testing, as they will be rewritten to with ranks.
+                CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
+#endif
+
                 constexpr std::size_t BLOCK_SZ = 256;
                 const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
                 flag_distinct_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
@@ -487,6 +501,12 @@ void GPU_SACA<T_sym_>::initial_rank()
 
         CUDA_CHECK(cudaFree(workspace_buf[b]));
     }
+
+
+#ifdef TESTS
+    // TODO: validate initial-ranks.
+    CUDA_CHECK(deallocate_host(sorted_key));
+#endif
 }
 
 
