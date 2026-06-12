@@ -376,7 +376,7 @@ void GPU_SACA<T_sym_>::initial_rank()
             ));
 
             std::size_t scan_workspace_sz = 0;
-            CUDA_CHECK(cub::DeviceScan::InclusiveSum(
+            CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
                 nullptr, scan_workspace_sz,
                 static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
                 2 * P_sz_max
@@ -444,8 +444,8 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
             // Rank the sort-output.
+            const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
             {
-                const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
                 Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
                 uint64_t* const flag_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Flags for distinct keys.
                 uint64_t* const rank_u64 = reinterpret_cast<uint64_t*>(K);  // Output ranks of the keys.
@@ -466,7 +466,7 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
             // Asynchronously copy the updated partition to host.
-            CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), key_buf[buf_id][key.selector], part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), key_buf[buf_id][sort_op_selector], part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(P_[p_id].suf(), suf.Current(), part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
     }
