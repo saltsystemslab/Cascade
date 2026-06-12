@@ -445,11 +445,18 @@ void GPU_SACA<T_sym_>::initial_rank()
                 flag_distinct_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                     (K, flag_u64, part_sz);
                 CUDA_CHECK(cudaGetLastError());
+
+                CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+                    workspace, workspace_sz,
+                    flag_u64, rank_u64,
+                    2 * part_sz,
+                    stream[buf_id]
+                ));
             }
 
 
-            // Asynchronously copy this partition's sort-output to host.
-            CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), key.Current(), part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
+            // Asynchronously copy the updated partition to host.
+            CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), key_buf[buf_id][key.selector], part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(P_[p_id].suf(), suf.Current(), part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
     }
