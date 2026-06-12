@@ -410,15 +410,16 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
+
+    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those. Only allocated and used in validation testing.
     {
 #ifdef TESTS
-        Sort_Key* sorted_key;   // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those.
         CUDA_CHECK(pinned_allocate_host(sorted_key, n_));
 
         std::vector<idx_t> P_off(p_);   // Offset of each partition's sorted keys in the flat packed `sorted_key` array.
         P_off[0] = 0;
         for(p_id_t p_id = 1; p_id < p_; ++p_id)
-            P_off[i] = P_off[p_id - 1] + P_sz[p_id - 1];
+            P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
 #endif
 
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
