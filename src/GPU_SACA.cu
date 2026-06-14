@@ -376,9 +376,10 @@ void GPU_SACA<T_sym_>::initial_rank()
             ));
 
             std::size_t scan_workspace_sz = 0;
-            CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            CUDA_CHECK(cub::DeviceScan::InclusiveScan(
                 nullptr, scan_workspace_sz,
                 static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
+                cub::Max(),
                 2 * P_sz_max
             ));
 
@@ -458,7 +459,7 @@ void GPU_SACA<T_sym_>::initial_rank()
             const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
             {
                 Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
-                uint64_t* const flag_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Flags for distinct keys.
+                uint64_t* const off_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][1 - sort_op_selector]);   // Offsets of distinct keys.
                 uint64_t* const rank_u64 = reinterpret_cast<uint64_t*>(K);  // Output ranks of the keys.
 
 #ifdef TESTS    // Save the sorted keys for validation-testing, as they will be rewritten to with ranks.
@@ -467,13 +468,14 @@ void GPU_SACA<T_sym_>::initial_rank()
 
                 constexpr std::size_t BLOCK_SZ = 256;
                 const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
-                flag_distinct_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                    (K, flag_u64, part_sz);
+                flag_distinct_key_offsets_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                    (K, off_u64, part_sz);
                 CUDA_CHECK(cudaGetLastError());
 
-                CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+                CUDA_CHECK(cub::DeviceScan::InclusiveScan(
                     workspace, workspace_sz,
-                    flag_u64, rank_u64,
+                    off_u64, rank_u64,
+                    cub::Max(),
                     2 * part_sz,
                     stream[buf_id]
                 ));

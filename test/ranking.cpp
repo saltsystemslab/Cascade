@@ -34,7 +34,7 @@ bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
 
         // Ranking-check
         const bool eq_keys = (key[i].primary == key[i - 1].primary && key[i].secondary == key[i - 1].secondary);
-        const auto exp_rank = rank[i - 1].primary + !eq_keys;
+        const auto exp_rank = eq_keys ? rank[i - 1].primary : i;
         if(rank[i].primary != exp_rank)
             valid = false;
     }
