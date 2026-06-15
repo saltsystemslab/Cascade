@@ -29,29 +29,32 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
       n_(n)
     , T_h_(T)
     , p_(128)   // TODO: tune this.
-    , P_id(nullptr)
     , null_d(nullptr)
+    , P_id(nullptr)
+    , rho(nullptr)
 {
-    for(std::size_t s = 0; s < STREAM_C; ++s)
-        CUDA_CHECK(cudaStreamCreate(stream + s));
-
-    P_id = util::allocate<p_id_t>(n_);
-
     CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
     std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
     CUDA_CHECK(cudaMemcpy(null_d, null_h.data(), (K - 1) * sizeof(T_sym_), cudaMemcpyHostToDevice));
+
+    P_id = util::allocate<p_id_t>(n_);
+    rho = util::allocate<idx_t>(n_);
+
+    for(std::size_t s = 0; s < STREAM_C; ++s)
+        CUDA_CHECK(cudaStreamCreate(stream + s));
 }
 
 
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
-    for(std::size_t s = 0; s < STREAM_C; ++s)
-        CUDA_CHECK(cudaStreamDestroy(stream[s]));
+    CUDA_CHECK(cudaFree(null_d));
 
     util::deallocate(P_id);
+    util::deallocate(rho);
 
-    CUDA_CHECK(cudaFree(null_d));
+    for(std::size_t s = 0; s < STREAM_C; ++s)
+        CUDA_CHECK(cudaStreamDestroy(stream[s]));
 }
 
 
