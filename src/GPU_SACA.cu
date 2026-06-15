@@ -222,6 +222,11 @@ void GPU_SACA<T_sym_>::compute_partition_sizes(const std::vector<freq_cnt_t>& H)
 
         P_sz[p_id] += H[bin];   // The pivots are inclusive upper bounds of their partition.
     }
+
+    P_off.resize(p_);
+    P_off[0] = 0;
+    for(p_id_t p_id = 1; p_id < p_; ++p_id)
+        P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
 }
 
 
