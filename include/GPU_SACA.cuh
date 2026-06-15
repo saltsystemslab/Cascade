@@ -87,6 +87,14 @@ private:
     // Updates the global ranks of the suffixes in the `p_id`'th partition.
     void update_global_rank(p_id_t p_id);
 
+    // Keeps exponentiating the effective prefix-context of the suffixes until
+    // the suffixes are fully sorted.
+    void exponentiate_prefix();
+
+    // Exponentiates the effective prefix-context of the suffixes at the `p_id`
+    // 'th partition from `k`.
+    void exponentiate_prefix(p_id_t p_id, idx_t k);
+
 
 public:
 

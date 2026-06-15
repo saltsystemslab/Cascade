@@ -83,6 +83,10 @@ void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
     const auto t_3 = now();
     std::cerr << "Initial ranking completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
 
+    exponentiate_prefix();
+    const auto t_4 = now();
+    std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
+
     (void)SA;
 }
 
@@ -549,6 +553,35 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
     #pragma omp parallel for schedule(static)
     for(idx_t j = 0; j < sz; ++j)
         rho[part.suf(j)] = rank_off + part.key(j).primary;
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::exponentiate_prefix()
+{
+    const idx_t ell = 16 / sizeof(T_sym_);
+    for(idx_t k = ell; k < n_; k *= 2)
+    {
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+            exponentiate_prefix(p_id, k);
+    }
+
+    // TODO: re-sort and re-rank.
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::exponentiate_prefix(const p_id_t p_id, const idx_t k)
+{
+    auto& part = P_[p_id];
+    const idx_t sz = P_sz[p_id];
+
+    #pragma omp parallel for schedule(static)
+    for(idx_t j = 0; j < sz; ++j)
+    {
+        const idx_t suf = part.suf(j);
+        part.key(j).secondary = (suf + k ? rho[suf + k] : 0);
+    }
 }
 
 
