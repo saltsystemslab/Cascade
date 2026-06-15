@@ -46,6 +46,12 @@ public:
 
     // Returns the size of the partition.
     auto size() const { return sz_; }
+
+    // Returns the `i`'th suffix in the partition.
+    auto suf(const idx_t i) const { return suf_[i]; }
+
+    // Returns the `i`'th sort-key in the partition.
+    auto key(const idx_t i) const { return key_[i]; }
 };
 
 }

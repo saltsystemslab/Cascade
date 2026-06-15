@@ -426,6 +426,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
 
     Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those. Only allocated and used in validation testing.
+    (void)sorted_key;
     {
 #ifdef TESTS
         CUDA_CHECK(pinned_allocate_host(sorted_key, n_));
@@ -523,6 +524,31 @@ void GPU_SACA<T_sym_>::initial_rank()
     std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key) ? "Passes" : "Fails") << "\n";
     CUDA_CHECK(deallocate_host(sorted_key));
 #endif
+
+
+    // Compute the initial global ranking.
+    update_global_ranks();
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::update_global_ranks()
+{
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        update_global_rank(p_id);
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
+{
+    const auto& part = P_[p_id];
+    const auto sz = P_sz[p_id];
+    const auto rank_off = P_off[p_id];
+
+    #pragma omp parallel for schedule(static)
+    for(idx_t j = 0; j < sz; ++j)
+        rho[part.suf(j)] = rank_off + part.key(j).primary;
 }
 
 

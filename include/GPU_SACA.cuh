@@ -80,6 +80,13 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
+    // Updates the global ranks of the suffixes based on the current status of
+    // the partitions.
+    void update_global_ranks();
+
+    // Updates the global ranks of the suffixes in the `p_id`'th partition.
+    void update_global_rank(p_id_t p_id);
+
 
 public:
 

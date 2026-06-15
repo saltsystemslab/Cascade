@@ -16,7 +16,7 @@ Suffix_Buffer::Suffix_Buffer(idx_t* const suf_sink, Sort_Key* const key_sink):
     , key_sink_(key_sink)
     , flushed_(0)
 {
-    for(std::size_t w_id = 0; w_id < omp_get_max_threads(); ++w_id)
+    for(int w_id = 0; w_id < omp_get_max_threads(); ++w_id)
         w_suf_buf[w_id].unwrap().reserve(w_buf_cap),
         w_key_buf[w_id].unwrap().reserve(w_buf_cap);
 }
