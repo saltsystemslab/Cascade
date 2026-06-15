@@ -41,7 +41,7 @@ private:
 
     std::vector<pivot_t> pivots;    // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
-    std::vector<p_id_t> P_id;   // Partition-IDs of the suffixes.
+    p_id_t* P_id;   // Partition-IDs of the suffixes.
 
     static constexpr std::size_t STREAM_C = 3;  // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.

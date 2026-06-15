@@ -29,10 +29,13 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
       n_(n)
     , T_h_(T)
     , p_(128)   // TODO: tune this.
+    , P_id(nullptr)
     , null_d(nullptr)
 {
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamCreate(stream + s));
+
+    P_id = util::allocate<p_id_t>(n_);
 
     CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
     std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
@@ -45,6 +48,8 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 {
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamDestroy(stream[s]));
+
+    util::deallocate(P_id);
 
     CUDA_CHECK(cudaFree(null_d));
 }
@@ -295,8 +300,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
             CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
             CUDA_CHECK(cudaMalloc(P_id_buf + b, p_id_buf_bytes));
         }
-
-        P_id.resize(n_);
     }
 
 
@@ -325,7 +328,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
             CUDA_CHECK(cudaGetLastError());
 
             // Asynchronously copy this chunk's partition-IDs to the host.
-            CUDA_CHECK(cudaMemcpyAsync(P_id.data() + chunk_off, P_id_buf[buf_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(P_id + chunk_off, P_id_buf[buf_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
     }
 
@@ -343,7 +346,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
 #ifdef TESTS
-    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id.data()) ? "Passes" : "Fails") << "\n";
+    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id) ? "Passes" : "Fails") << "\n";
 #endif
 }
 
