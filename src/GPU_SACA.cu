@@ -11,6 +11,8 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <limits>
+#include <vector>
 #include <cstdlib>
 #include <algorithm>
 #include <iostream>

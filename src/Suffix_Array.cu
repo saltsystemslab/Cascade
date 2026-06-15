@@ -9,6 +9,8 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cmath>
+#include <algorithm>
+#include <iostream>
 
 #include <thrust/device_vector.h>
 #include <thrust/sequence.h>

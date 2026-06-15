@@ -3,6 +3,8 @@
 
 #include "omp.h"
 
+#include <utility>
+
 
 namespace gpu_saca
 {

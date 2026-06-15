@@ -11,8 +11,10 @@
 #include <cstdint>
 #include <string>
 #include <queue>
+#include <deque>
 #include <vector>
 #include <iostream>
+#include <cstdlib>
 
 
 namespace caps_sa
