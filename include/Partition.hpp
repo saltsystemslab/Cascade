@@ -52,6 +52,9 @@ public:
 
     // Returns the `i`'th sort-key in the partition.
     auto key(const idx_t i) const { return key_[i]; }
+
+    // Returns a mutable reference to `i`'th sort-key in the partition.
+    auto& key(const idx_t i) { return key_[i]; }
 };
 
 }
