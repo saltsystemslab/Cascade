@@ -39,8 +39,6 @@ private:
 
     static constexpr std::size_t K = 12;    // k-gram size for frequency counting of prefixes.
 
-    T_sym_* null_d; // Device-side buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
-
     std::vector<pivot_t> pivots;    // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
     p_id_t* P_id;   // Partition-IDs of the suffixes.
@@ -53,6 +51,16 @@ private:
 
     static constexpr std::size_t STREAM_C = 3;  // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
+
+    // Device-side data and related.
+    // {
+        T_sym_* null_d; // Buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
+
+        Sort_Key* key_buf[STREAM_C][2]; // Input and output buffers for sort-keys of suffixes, per stream.
+        idx_t* suf_buf[STREAM_C][2];    // Input and output buffers for suffixes, per stream.
+        void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort and scan, per stream.
+        std::size_t workspace_sz;       // Size of the `cub` workspace.
+    // }
 
 
     // Returns the `N` symbols situated at the index `idx` of the text as a 64-

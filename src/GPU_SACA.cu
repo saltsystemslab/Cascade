@@ -29,19 +29,29 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
       n_(n)
     , T_h_(T)
     , p_(128)   // TODO: tune this.
-    , null_d(nullptr)
     , P_id(nullptr)
     , rho(nullptr)
+    , null_d(nullptr)
+    , workspace_sz(0)
 {
-    CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
-    std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
-    CUDA_CHECK(cudaMemcpy(null_d, null_h.data(), (K - 1) * sizeof(T_sym_), cudaMemcpyHostToDevice));
-
     P_id = util::allocate<p_id_t>(n_);
     rho = util::allocate<idx_t>(n_);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamCreate(stream + s));
+
+    CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
+    std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
+    CUDA_CHECK(cudaMemcpy(null_d, null_h.data(), (K - 1) * sizeof(T_sym_), cudaMemcpyHostToDevice));
+
+    for(std::size_t b = 0; b < STREAM_C; ++b)
+    {
+        for(std::size_t r = 0; r < 2; ++r)
+            key_buf[b][r] = nullptr,
+            suf_buf[b][r] = nullptr;
+
+        workspace_buf[b] = nullptr;
+    }
 }
 
 
@@ -55,6 +65,17 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamDestroy(stream[s]));
+
+    for(std::size_t b = 0; b < STREAM_C; ++b)
+    {
+        for(std::size_t r = 0; r < 2; ++r)
+        {
+            CUDA_CHECK(cudaFree(key_buf[b][r]));
+            CUDA_CHECK(cudaFree(suf_buf[b][r]));
+        }
+
+        CUDA_CHECK(cudaFree(workspace_buf[b]));
+    }
 }
 
 
@@ -366,11 +387,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
-    Sort_Key* key_buf[STREAM_C][2]; // Input and output buffers for sort-keys of suffixes, per stream.
-    idx_t* suf_buf[STREAM_C][2];    // Input and output buffers for suffixes, per stream.
-    void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort, per stream.
-    std::size_t workspace_sz = 0;
-
     // Verify device memory budget and allocate device buffers for the streams.
     {
         // Each suffix in each stream needs: 1. `DoubleBuffer` keys, input and output (2 x `Sort_key`);
