@@ -74,6 +74,10 @@ private:
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
 
+    // Allocates spaces for the required device data structures; returns `true`
+    // iff the device had enough space for such.
+    bool allocate_device_space();
+
     // Partitions the suffixes based on the selected pivots.
     void partition();
 

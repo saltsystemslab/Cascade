@@ -93,6 +93,12 @@ void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
+    if(!allocate_device_space())
+    {
+        std::cerr << "Too low device memory available for the process. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
     partition();
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
@@ -256,6 +262,69 @@ void GPU_SACA<T_sym_>::compute_partition_sizes(const std::vector<freq_cnt_t>& H)
 
 
 template <typename T_sym_>
+bool GPU_SACA<T_sym_>::allocate_device_space()
+{
+    // Each suffix in each stream needs: 1. `DoubleBuffer` keys, input and output (2 x `Sort_key`);
+    //      2. `DoubleBuffer` values, input and output (2 x `idx_t`).
+    // `cub` itself requires a workspace for sort and scan.
+    // Memory constraint: STREAM_C x (2 x P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+
+    const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+
+    // Compute required workspaces-sizes for the sort and the scan.
+    {
+        cub::DoubleBuffer<Sort_Key> keys;
+        cub::DoubleBuffer<idx_t> vals;
+        std::size_t sort_workspace_sz = 0;
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+            nullptr, sort_workspace_sz,
+            keys, vals,
+            P_sz_max,
+            Sort_Key_Decomposer{}
+        ));
+
+        std::size_t scan_workspace_sz = 0;
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+            nullptr, scan_workspace_sz,
+            static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
+            cub::Max(),
+            2 * P_sz_max
+        ));
+
+        workspace_sz = std::max(sort_workspace_sz, scan_workspace_sz);
+    }
+
+
+    // Check if the device has enough space for the buffers.
+    {
+        std::size_t free_mem, total_mem;
+        CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
+        const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
+        const std::size_t per_stream_budget = 2 * P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz;
+        if(STREAM_C * per_stream_budget > budget)
+            return false;
+    }
+
+
+    // Allocate the required spaces in the device.
+    {
+        for(std::size_t b = 0; b < STREAM_C; ++b)   // For each stream
+        {
+            for(std::size_t r = 0; r < 2; ++r)  // For each buffer in the radix-sort ping-pong
+            {
+                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Sort_Key)));
+                CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
+            }
+
+            CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
+        }
+    }
+
+    return true;
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::partition()
 {
     compute_partition_IDs();
@@ -387,62 +456,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
-    // Verify device memory budget and allocate device buffers for the streams.
-    {
-        // Each suffix in each stream needs: 1. `DoubleBuffer` keys, input and output (2 x `Sort_key`);
-        //      2. `DoubleBuffer` values, input and output (2 x `idx_t`).
-        // `cub` itself requires a sort-workspace.
-        // Memory constraint: STREAM_C x (2 x P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
-
-        const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
-
-        // Compute required workspaces-sizes for the sort and the scan.
-        {
-            cub::DoubleBuffer<Sort_Key> keys;
-            cub::DoubleBuffer<idx_t> vals;
-            std::size_t sort_workspace_sz = 0;
-            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                nullptr, sort_workspace_sz,
-                keys, vals,
-                P_sz_max,
-                Sort_Key_Decomposer{}
-            ));
-
-            std::size_t scan_workspace_sz = 0;
-            CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-                nullptr, scan_workspace_sz,
-                static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
-                cub::Max(),
-                2 * P_sz_max
-            ));
-
-            workspace_sz = std::max(sort_workspace_sz, scan_workspace_sz);
-        }
-
-        std::size_t free_mem, total_mem;
-        CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-        const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = 2 * P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz;
-        if(STREAM_C * per_stream_budget > budget)
-        {
-            std::cerr << "Too low device memory available for initial-ranking process streaming. Aborting.\n";
-            std::exit(EXIT_FAILURE);
-        }
-
-
-        for(std::size_t b = 0; b < STREAM_C; ++b)   // For each stream
-        {
-            for(std::size_t r = 0; r < 2; ++r)  // For each buffer in the radix-sort ping-pong
-            {
-                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Sort_Key)));
-                CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
-            }
-
-            CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
-        }
-    }
-
-
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
 
     Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those. Only allocated and used in validation testing.
@@ -526,18 +539,6 @@ void GPU_SACA<T_sym_>::initial_rank()
     // Wait for the streams to finish.
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamSynchronize(stream[s]));
-
-    // Free the buffers.
-    for(std::size_t b = 0; b < STREAM_C; ++b)
-    {
-        for(std::size_t r = 0; r < 2; ++r)
-        {
-            CUDA_CHECK(cudaFree(key_buf[b][r]));
-            CUDA_CHECK(cudaFree(suf_buf[b][r]));
-        }
-
-        CUDA_CHECK(cudaFree(workspace_buf[b]));
-    }
 
 
 #ifdef TESTS
