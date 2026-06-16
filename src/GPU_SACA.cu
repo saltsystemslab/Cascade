@@ -463,11 +463,6 @@ void GPU_SACA<T_sym_>::initial_rank()
     {
 #ifdef TESTS
         CUDA_CHECK(pinned_allocate_host(sorted_key, n_));
-
-        std::vector<idx_t> P_off(p_);   // Offset of each partition's sorted keys in the flat packed `sorted_key` array.
-        P_off[0] = 0;
-        for(p_id_t p_id = 1; p_id < p_; ++p_id)
-            P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
 #endif
 
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
