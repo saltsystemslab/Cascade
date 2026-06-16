@@ -582,10 +582,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     for(idx_t k = ell; k < n_; k *= 2)
     {
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        {
             exponentiate_prefix(p_id, k);
+        }
     }
-
-    // TODO: re-sort and re-rank.
 }
 
 
@@ -599,7 +599,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix(const p_id_t p_id, const idx_t k)
     for(idx_t j = 0; j < sz; ++j)
     {
         const idx_t suf = part.suf(j);
-        part.key(j).secondary = (suf + k ? rho[suf + k] : 0);
+        part.key(j).secondary = (suf + k < n_ ? rho[suf + k] : 0);
     }
 }
 
