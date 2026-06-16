@@ -62,6 +62,10 @@ private:
         std::size_t workspace_sz;       // Size of the `cub` workspace.
     // }
 
+#ifdef TESTS
+    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those.
+#endif
+
 
     // Returns the `N` symbols situated at the index `idx` of the text as a 64-
     // bit word. The endian-ness of the word matches the lexicographical order
@@ -91,6 +95,9 @@ private:
 
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
+
+    // Sorts and ranks the `p_id`'th partition at the device.
+    void sort_and_rank(p_id_t p_id);
 
     // Updates the global ranks of the suffixes based on the current status of
     // the partitions.
