@@ -114,6 +114,9 @@ private:
     // 'th partition from `k`.
     void exponentiate_prefix(p_id_t p_id, idx_t k);
 
+    // Allocates enough space into `SA` and concatenates the partitions into it.
+    void concatenate_partitions(idx_t*& SA);
+
 
 public:
 

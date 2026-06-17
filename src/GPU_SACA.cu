@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <limits>
 #include <vector>
+#include <cstring>
 #include <cstdlib>
 #include <algorithm>
 #include <iostream>
@@ -88,7 +89,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
+void GPU_SACA<T_sym_>::build_SA(idx_t* SA)
 {
     using namespace caps_sa::timer;
 
@@ -122,7 +123,9 @@ void GPU_SACA<T_sym_>::build_SA(idx_t* const SA)
     const auto t_4 = now();
     std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
 
-    (void)SA;
+    concatenate_partitions(SA);
+    const auto t_5 = now();
+    std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
 }
 
 
@@ -612,6 +615,25 @@ void GPU_SACA<T_sym_>::exponentiate_prefix(const p_id_t p_id, const idx_t k)
     {
         const idx_t suf = part.suf(j);
         part.key(j).secondary = (suf + k < n_ ? rho[suf + k] : 0);
+    }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
+{
+    SA = rho;
+    rho = nullptr;
+
+    // Copy over the sorted partitions to their appropriate offsets.
+    #pragma omp parallel for schedule(static)
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+    {
+        const auto& part = P_[p_id];
+        const auto sz    = P_sz[p_id];
+        const auto off   = P_off[p_id];
+
+        std::memcpy(SA + off, part.suf(), sz * sizeof(idx_t));
     }
 }
 
