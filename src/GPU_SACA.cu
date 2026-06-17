@@ -581,10 +581,22 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     const idx_t ell = 16 / sizeof(T_sym_);
     for(idx_t k = ell; k < n_; k *= 2)
     {
+        // For each partition, exponentiate the prefix-context of its suffixes, and then sort-and-rank it.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
+            if(P_sz[p_id] == 0) // Skip empty partitions.
+                continue;
+
             exponentiate_prefix(p_id, k);
+            sort_and_rank(p_id);
         }
+
+        // Wait for the streams to finish updating the local-ranks.
+        for(std::size_t s = 0; s < STREAM_C; ++s)
+            CUDA_CHECK(cudaStreamSynchronize(stream[s]));
+
+        // Update global-ranks based on the updated local-ranks.
+        update_global_ranks();
     }
 }
 
