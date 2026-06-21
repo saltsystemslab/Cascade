@@ -598,6 +598,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         for(std::size_t s = 0; s < STREAM_C; ++s)
             CUDA_CHECK(cudaStreamSynchronize(stream[s]));
 
+#ifdef TESTS
+        std::cerr << "Rankings verification for prefix-context " << (2 * k) << ": " << (test::validate_local_rankings(P_, sorted_key) ? "Passes" : "Fails") << "\n";
+#endif
+
         // Update global-ranks based on the updated local-ranks.
         update_global_ranks();
     }
