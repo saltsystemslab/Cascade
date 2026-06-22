@@ -47,6 +47,12 @@ bool validate_local_ranking(const Partition& part, const Sort_Key* key);
 // with their keys being packed flat at `key` after the device-side sort.
 bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* key);
 
+// Returns the symbol `tau` such that roughly half of the symbol occurrences in
+// the text `T`, of size `n`, fall into `[min, tau]` and the rest into
+// `(tau, max]`.
+template <typename T_sym_>
+T_sym_ universe_split_threshold(const T_sym_* T, idx_t n);
+
 }
 
 

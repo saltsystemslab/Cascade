@@ -4,6 +4,7 @@
 #include "Parser.hpp"
 #include "utility.hpp"
 #include "utility.cuh"
+#include "tests.hpp"
 
 #include <cstddef>
 #include <limits>
@@ -51,6 +52,8 @@ int main(int argc, char** argv)
         gpu_saca::GPU_SACA<T_sym_> saca(T, n);
 
         const auto t_0 = caps_sa::timer::now();
+        // const auto tau = gpu_saca::test::universe_split_threshold(T, n);
+        // std::cerr << "tau: " << tau << "\n";
         saca.build_SA(nullptr);
         const auto t_1 = caps_sa::timer::now();
         std::cerr << "Time taken: " << caps_sa::timer::duration(t_1 - t_0) << "s.\n";

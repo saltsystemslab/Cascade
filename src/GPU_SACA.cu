@@ -244,9 +244,12 @@ void GPU_SACA<T_sym_>::select_pivots()
 
         compute_partition_sizes(H_h);
 
-#ifdef TESTS
-        const auto stats = util::Collection_Stats::get_collection_stat(H_h);
-        stats.print();
+#ifdef STATS
+        std::cerr << "Quantized " << K << "-gram frequency histogram stats:\n";
+        util::Collection_Stats::get_collection_stat(H_h).print();
+
+        std::cerr << "Partition-size stats:\n";
+        util::Collection_Stats::get_collection_stat(P_sz).print();
 #endif
     }
 }

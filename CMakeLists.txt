@@ -82,8 +82,13 @@ list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 # Add the required preprocessor definitions (`#define`s) to pass on.
 add_compile_definitions(PROJECT_VERSION=${CMAKE_PROJECT_VERSION})
 add_compile_definitions(CMAKE_EXPORT_COMPILE_COMMANDS)  # For better `clangd` scanning.
+
 if(TESTS)
     add_compile_definitions(TESTS)
+endif()
+
+if(STATS)
+    add_compile_definitions(STATS)
 endif()
 
 

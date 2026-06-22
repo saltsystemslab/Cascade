@@ -125,14 +125,14 @@ struct Collection_Stats
     void print() const
     {
         const int w = 20;   // Label column width
-        std::printf("%-*s %llu\n",    w, "Size:",           (unsigned long long)n);
-        std::printf("%-*s %llu\n",    w, "Total mass:",     (unsigned long long)total);
-        std::printf("%-*s %llu\n",    w, "Minimum:",        (unsigned long long)min);
-        std::printf("%-*s %llu\n",    w, "Maximum:",        (unsigned long long)max);
-        std::printf("%-*s %.2f\n",    w, "Mean:",           mean);
-        std::printf("%-*s %.2f\n",    w, "Median:",         median);
-        std::printf("%-*s %.2f\n",    w, "Std deviation:",  std_dev);
-        std::printf("%-*s %.4f\n",    w, "Imbalance:",      imbalance);
+        std::printf("\t%-*s %llu\n",    w, "Size:",           (unsigned long long)n);
+        std::printf("\t%-*s %llu\n",    w, "Total mass:",     (unsigned long long)total);
+        std::printf("\t%-*s %llu\n",    w, "Minimum:",        (unsigned long long)min);
+        std::printf("\t%-*s %llu\n",    w, "Maximum:",        (unsigned long long)max);
+        std::printf("\t%-*s %.2f\n",    w, "Mean:",           mean);
+        std::printf("\t%-*s %.2f\n",    w, "Median:",         median);
+        std::printf("\t%-*s %.2f\n",    w, "Std deviation:",  std_dev);
+        std::printf("\t%-*s %.4f\n",    w, "Imbalance:",      imbalance);
     }
 
 
