@@ -587,11 +587,21 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     const idx_t ell = 16 / sizeof(T_sym_);
     for(idx_t k = ell; k < n_; k *= 2)
     {
+        p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `k`).
+
         // For each partition, exponentiate the prefix-context of its suffixes, and then sort-and-rank it.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
             if(P_sz[p_id] == 0) // Skip empty partitions.
                 continue;
+
+            const auto part_sz = P_sz[p_id];
+            const auto last_rank = P_[p_id].key(part_sz - 1).primary;
+            if(last_rank == part_sz - 1)    // Skip partitions already fully-sorted.
+            {
+                sorted_part++;
+                continue;
+            }
 
             exponentiate_prefix(p_id, k);
             sort_and_rank(p_id);
@@ -600,6 +610,13 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Wait for the streams to finish updating the local-ranks.
         for(std::size_t s = 0; s < STREAM_C; ++s)
             CUDA_CHECK(cudaStreamSynchronize(stream[s]));
+
+#ifdef STATS
+        std::cerr << "Number of partitions fully-sorted by context-size " << k << ": " << sorted_part << ".\n";
+#endif
+
+        if(sorted_part == p_)   // All partitions have already been sorted by the earlier prefix-contexts.
+            break;
 
 #ifdef TESTS
         std::cerr << "Rankings verification for prefix-context " << (2 * k) << ": " << (test::validate_local_rankings(P_, sorted_key) ? "Passes" : "Fails") << "\n";
