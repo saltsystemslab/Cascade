@@ -57,7 +57,7 @@ set(DEBUG_FLAGS -ggdb)
 # Bundle the extra optimization flags (not associated with the `-O` levels)
 # that we want to pass on to the compiler.
 # Reference: https://gcc.gnu.org/onlinedocs/gcc/Optimize-Options.html
-set(OPTIMIZE_FLAGS -march=native -mavx)
+set(OPTIMIZE_FLAGS -mavx2)
 
 # Bundle miscellaneous required flags.
 set(MISC_FLAGS "")
@@ -148,7 +148,7 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET libcubwt_driver PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-set(CUDA_ARCH "70-real")
+set(CUDA_ARCH "70-real;80-real;90-real")
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
