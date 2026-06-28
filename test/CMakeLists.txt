@@ -12,6 +12,7 @@ set(TESTS_SRC
         pivots-selection.cpp
         partitioning.cpp
         ranking.cpp
+        end-to-end.cpp
 )
 
 # Define the tester library.

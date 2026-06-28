@@ -130,7 +130,7 @@ public:
     static uint8_t quantize(T_sym_ x);
 
     // Builds the suffix array into `SA`.
-    void build_SA(idx_t* SA);
+    void build_SA(idx_t*& SA);
 };
 
 

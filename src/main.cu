@@ -1,7 +1,7 @@
 
 #include "Suffix_Array.hpp"
 #include "GPU_SACA.cuh"
-#include "Parser.hpp"
+#include "types.hpp"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "tests.hpp"
@@ -50,13 +50,16 @@ int main(int argc, char** argv)
 
     {
         gpu_saca::GPU_SACA<T_sym_> saca(T, n);
+        gpu_saca::idx_t* SA;
 
         const auto t_0 = caps_sa::timer::now();
-        // const auto tau = gpu_saca::test::universe_split_threshold(T, n);
-        // std::cerr << "tau: " << tau << "\n";
-        saca.build_SA(nullptr);
+        saca.build_SA(SA);
         const auto t_1 = caps_sa::timer::now();
         std::cerr << "Time taken: " << caps_sa::timer::duration(t_1 - t_0) << "s.\n";
+
+#ifdef TESTS
+        std::cerr << "Suffix array validation: " << (gpu_saca::test::is_correct_SA(SA, T, n) ? "Passes" : "Fails") << ".\n";
+#endif
     }
 
 

@@ -53,6 +53,13 @@ bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* ke
 template <typename T_sym_>
 T_sym_ universe_split_threshold(const T_sym_* T, idx_t n);
 
+// Returns `true` iff `SA` is a permutation of `[0, n)`.
+bool is_permutation(const idx_t* SA, idx_t n);
+
+// Returns `true` iff `SA` is the suffix array of the text `T` of size `n`.
+template <typename T_sym_>
+bool is_correct_SA(const idx_t* SA, const T_sym_* T, idx_t n);
+
 }
 
 

@@ -89,7 +89,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::build_SA(idx_t* SA)
+void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
 {
     using namespace caps_sa::timer;
 
