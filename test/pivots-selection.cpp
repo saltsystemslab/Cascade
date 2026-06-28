@@ -45,7 +45,7 @@ void kgram_histogram(const T_sym_* const T, const idx_t n, freq_cnt_t* const H, 
             local_hist[quant_kgram]++;
         }
 
-        #pragma omp for schedule(static)    // Global reduction of the local counts.
+        // Global reduction of the local counts.
         for(std::size_t b = 0; b < hist_sz; ++b)
             #pragma omp atomic
             H[b] += local_hist[b];
