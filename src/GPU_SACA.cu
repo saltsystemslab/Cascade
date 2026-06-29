@@ -256,6 +256,23 @@ void GPU_SACA<T_sym_>::select_pivots()
 
 
 template <typename T_sym_>
+idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
+{
+    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Sort_Key) + sizeof(idx_t));   // Device-space requirement for a suffix in its partition: it occupies space in two buffers for the radix-sort.
+                                                                                    // NB: The workspace-size is not being taken into account here; ideally it should be amortized per-suffix here.
+    std::size_t free_mem, total_mem;
+    CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
+    const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
+
+    const idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);  // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
+    const idx_t p_min = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
+    const auto p_sz_bound = n_ / p_min; // Maximum supported size of a partition based on the minimum partition-count.
+
+    return p_sz_bound;
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_sizes(const std::vector<freq_cnt_t>& H)
 {
     P_sz.resize(p_, 0);

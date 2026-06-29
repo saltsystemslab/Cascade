@@ -50,7 +50,7 @@ private:
 
     idx_t* rho; // Global rank of the suffixes.
 
-    static constexpr std::size_t STREAM_C = 3;  // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
+    static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
     // Device-side data and related.
@@ -82,6 +82,12 @@ private:
     // Returns the packed prefix-key filled with `K` symbols of the text from
     // the index `idx` onward.
     Prefix_Key pack_prefix(idx_t idx) const;
+
+    // Returns the inclusive upper-bound for the maximum supported partition-
+    // size. The rationale used in fixing this is that, in the case when the
+    // partitions are large enough such that `STREAM_C = 3` partitions can fully
+    // occupy the available device-memory, their sizes must be evenly balanced.
+    idx_t partition_size_upper_bound() const;
 
     // Allocates spaces for the required device data structures; returns `true`
     // iff the device had enough space for such.
