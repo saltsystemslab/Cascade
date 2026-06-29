@@ -4,6 +4,7 @@
 
 
 #include "types.hpp"
+#include "Prefix_Key.cuh"
 #include "Partition.hpp"
 #include "Sort_Key.hpp"
 #include "utility.cuh"
@@ -77,6 +78,10 @@ private:
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
+
+    // Returns the packed prefix-key filled with `K` symbols of the text from
+    // the index `idx` onward.
+    Prefix_Key pack_prefix(idx_t idx) const;
 
     // Allocates spaces for the required device data structures; returns `true`
     // iff the device had enough space for such.
@@ -155,6 +160,21 @@ inline uint64_t GPU_SACA<T_sym_>::pack_word(idx_t idx) const
         constexpr auto shift = (N - 1) * sizeof(T_sym_) * 8;
         return (static_cast<uint64_t>(T_h_[idx]) << shift) | pack_word<N - 1>(idx + 1);
     }
+}
+
+
+template <typename T_sym_>
+inline Prefix_Key GPU_SACA<T_sym_>::pack_prefix(const idx_t idx) const
+{
+    constexpr idx_t sym_per_word = 8 / sizeof(T_sym_);
+
+    Prefix_Key pre_key;
+
+    #pragma unroll
+    for(std::size_t i = 0; i < Prefix_Key::PREFIX_WORDS; ++i)
+        pre_key.word[i] = pack_word(idx + i * sym_per_word);
+
+    return pre_key;
 }
 
 
