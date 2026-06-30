@@ -43,8 +43,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamCreate(stream + s));
 
-    constexpr idx_t null_count = Prefix_Key::PREFIX_WORDS * sizeof(idx_t) / sizeof(T_sym_);
-    CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));  // TODO: what amount of padding do we require now? Should be `Prefix_Key::PREFIX_WORDS` many words.
+    CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
     std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
     CUDA_CHECK(cudaMemcpy(null_d, null_h.data(), (K - 1) * sizeof(T_sym_), cudaMemcpyHostToDevice));
 
@@ -355,7 +354,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::partition()
 {
-    // compute_partition_IDs();
+    compute_partition_IDs();
 
     // Move the suffixes (with some associated prefixes) to their corresponding partitions.
     {
@@ -397,12 +396,11 @@ void GPU_SACA<T_sym_>::partition()
 }
 
 
-/*
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_IDs()
 {
-    // Copy the pivots to the device.
-    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(pivot_t)));
+    // Copy the pivots to the device constant-memory.
+    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(Prefix_Key)));
 
     constexpr std::size_t BLOCK_SZ = 256;
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
@@ -436,7 +434,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     // Move text in chunks to device, compute partition-IDs of the suffixes, and move the IDs to host.
     {
-        const auto s_mem_sz = BLOCK_SZ + K - 1; // Shared memory size: quantized text-tile.
+        const auto s_mem_sz = (BLOCK_SZ + K - 1) * sizeof(T_sym_);  // Shared memory size: text-tile.
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
         for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
         {
@@ -477,10 +475,9 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
 #ifdef TESTS
-    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id) ? "Passes" : "Fails") << "\n";
+    // std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id) ? "Passes" : "Fails") << "\n";
 #endif
 }
-*/
 
 
 template <typename T_sym_>
