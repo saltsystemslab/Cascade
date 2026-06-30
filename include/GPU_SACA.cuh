@@ -89,6 +89,10 @@ private:
     // occupy the available device-memory, their sizes must be evenly balanced.
     idx_t partition_size_upper_bound() const;
 
+    // Returns the required `cub` workspace-size in bytes, for sort and scan,
+    // for `part_sz` many elements.
+    static std::size_t cub_workspace_size(idx_t part_sz);
+
     // Allocates spaces for the required device data structures; returns `true`
     // iff the device had enough space for such.
     bool allocate_device_space();

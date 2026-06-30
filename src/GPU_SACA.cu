@@ -259,16 +259,63 @@ template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
     constexpr std::size_t bytes_per_suf = 2 * (sizeof(Sort_Key) + sizeof(idx_t));   // Device-space requirement for a suffix in its partition: it occupies space in two buffers for the radix-sort.
-                                                                                    // NB: The workspace-size is not being taken into account here; ideally it should be amortized per-suffix here.
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
 
-    const idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);  // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
+    idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);   // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
+    while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.
+    {
+        const auto workspace_sz = cub_workspace_size(p_sz_max);
+        if(STREAM_C * (p_sz_max * bytes_per_suf + workspace_sz) <= budget)
+            break;
+
+        if(STREAM_C * workspace_sz >= budget)
+        {
+            std::cerr << "Device memory cannot even accommodate the CUB workspaces. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        const idx_t next_p_sz_max = (budget - STREAM_C * workspace_sz) / (STREAM_C * bytes_per_suf);
+        if(next_p_sz_max >= p_sz_max)   // Converged to a fixed-point without being able to compute a suitable `p_sz_max`.
+        {
+            std::cerr << "Unable to determine a suitable partition-size upper bound. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        p_sz_max = next_p_sz_max;
+    }
+
     const idx_t p_min = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
     const auto p_sz_bound = n_ / p_min; // Maximum supported size of a partition based on the minimum partition-count.
 
     return p_sz_bound;
+}
+
+
+template <typename T_sym_>
+std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
+{
+    cub::DoubleBuffer<Sort_Key> keys;
+    cub::DoubleBuffer<idx_t> vals;
+
+    std::size_t sort_workspace_sz = 0;
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+        nullptr, sort_workspace_sz,
+        keys, vals,
+        part_sz,
+        Sort_Key_Decomposer{}
+    ));
+
+    std::size_t scan_workspace_sz = 0;
+    CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+        nullptr, scan_workspace_sz,
+        static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
+        cub::Max(),
+        2 * part_sz
+    ));
+
+    return std::max(sort_workspace_sz, scan_workspace_sz);
 }
 
 
