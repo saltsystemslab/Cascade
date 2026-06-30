@@ -15,7 +15,8 @@ namespace gpu_saca
 // Fixed-width, MSB-first packed prefix of some suffix.
 struct Prefix_Key
 {
-    static constexpr idx_t PREFIX_WORDS = 4;    // Number of 64-bit words per prefix key.
+    static constexpr idx_t PREFIX_WORDS = 2;    // Number of 64-bit words per prefix key.
+                                                // Currently set to `2` so that `Prefix_Key`s have 16-bytes, and thus it matches `Sort_Key`-width — no wasted resolution from the partitioning.
 
     idx_t word[PREFIX_WORDS];   // The packed-words representation of the given prefix; `word[0]` holds the most significant symbols at its highest bits.
 };
