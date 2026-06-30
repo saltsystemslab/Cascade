@@ -32,6 +32,18 @@ inline bool operator<(const Prefix_Key& x, const Prefix_Key& y)
     return false;
 }
 
+
+__host__ __device__
+inline bool operator<=(const Prefix_Key& x, const Prefix_Key& y)
+{
+    #pragma unroll
+    for(std::size_t i = 0; i < Prefix_Key::PREFIX_WORDS; ++i)
+        if(x.word[i] != y.word[i])
+            return x.word[i] < y.word[i];
+
+    return true;
+}
+
 }
 
 
