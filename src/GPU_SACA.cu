@@ -475,7 +475,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
 #ifdef TESTS
-    // std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id) ? "Passes" : "Fails") << "\n";
+    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
 #endif
 }
 

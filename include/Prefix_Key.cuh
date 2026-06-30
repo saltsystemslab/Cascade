@@ -23,6 +23,7 @@ struct Prefix_Key
 
 
     // Returns the prefix-key from `T`.
+    // NB: it must have enough padding when extracting prefixes from the tail.
     template <typename T_sym_>
     CUDA_SPECIFIER
     static Prefix_Key pack_prefix(const T_sym_* T);

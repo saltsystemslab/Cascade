@@ -6,6 +6,7 @@
 
 #include "types.hpp"
 #include "Partition.hpp"
+#include "Prefix_Key.cuh"
 #include "Sort_Key.hpp"
 
 #include <cstdint>
@@ -16,30 +17,11 @@
 namespace gpu_saca::test
 {
 
-/*
-// Computes the frequency histogram of the quantized `k`-grams of the text `T`
-// of size `n` into `H`.
+// Returns `true` iff the partition-IDs `P_id` of the text `T` (of size `n`),
+// defined by the pivots `X`, match to the partition-IDs computed at the CPU-
+// side as reference.
 template <typename T_sym_>
-void kgram_histogram(const T_sym_* T, idx_t n, freq_cnt_t* H, std::size_t k);
-
-// Returns `true` iff the frequency histogram `H` of quantized `k`-grams of the
-// text `T` of size `n` matches to the histogram computed at the CPU-side as
-// reference.
-template <typename T_sym_>
-bool validate_kgram_histogram(const T_sym_* T, idx_t n, std::size_t k, const freq_cnt_t* H);
-
-// Computes the partition-IDs of the suffixes of the text `T` of size `n` into
-// `P_id` based on their prefix `k`-grams, where the partitions are defined by
-// the pivot `k`-grams in `X`.
-template <typename  T_sym_>
-void compute_partition_IDs(const T_sym_* T, idx_t n, p_id_t* P_id, std::size_t k, const std::vector<pivot_t>& X);
-
-// Returns `true` iff the partition-IDs `P_id` of quantized `k`-grams of the
-// text `T` of size `n`, defined by the pivots `X`, match to the partition-IDs
-// computed at the CPU-side as reference.
-template <typename T_sym_>
-bool validate_partition_IDs(const T_sym_* T, idx_t n, std::size_t k, const std::vector<pivot_t>& X, const p_id_t* P_id);
-*/
+bool validate_partition_IDs(const T_sym_* T, idx_t n, const std::vector<Prefix_Key>& X, const p_id_t* P_id);
 
 // Returns `true` iff the keys in `key`, corresponding to the partition `part`,
 // are sorted, and `part` is properly ranked based on the sorted keys.
