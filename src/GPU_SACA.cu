@@ -289,7 +289,7 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     }
 
     const idx_t p_min = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
-    const auto p_sz_bound = n_ / p_min; // Maximum supported size of a partition based on the minimum partition-count.
+    const auto p_sz_bound = (n_ + p_min - 1) / p_min;   // Maximum supported size of a partition based on the minimum partition-count.
 
     return p_sz_bound;
 }
