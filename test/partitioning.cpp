@@ -11,6 +11,7 @@
 namespace gpu_saca::test
 {
 
+/*
 template <typename  T_sym_>
 void compute_partition_IDs(const T_sym_* T, idx_t n, p_id_t* P_id, std::size_t k, const std::vector<pivot_t>& X)
 {
@@ -55,6 +56,7 @@ bool validate_partition_IDs(const T_sym_* const T, const idx_t n, const std::siz
     compute_partition_IDs(T, n, cpu_P_id.data(), k, X);
     return std::memcmp(P_id, cpu_P_id.data(), n * sizeof(p_id_t)) == 0;
 }
+*/
 
 
 template <typename T_sym_>
@@ -67,7 +69,7 @@ T_sym_ universe_split_threshold(const T_sym_* T, const std::size_t n)
 
     // Per-thread local frequency tables.
     const auto n_threads = omp_get_max_threads();
-    std::vector<std::vector<freq_cnt_t>> local_freq(n_threads, std::vector<freq_cnt_t>(universe_sz, 0));
+    std::vector<std::vector<idx_t>> local_freq(n_threads, std::vector<idx_t>(universe_sz, 0));
 
     #pragma omp parallel
     {
@@ -80,11 +82,11 @@ T_sym_ universe_split_threshold(const T_sym_* T, const std::size_t n)
     }
 
     // Reduce the per-thread tables into a single frequency table.
-    std::vector<freq_cnt_t> freq(universe_sz, 0);
+    std::vector<idx_t> freq(universe_sz, 0);
     #pragma omp parallel for schedule(static)
     for(std::size_t v = 0; v < universe_sz; ++v)
     {
-        freq_cnt_t sum = 0;
+        idx_t sum = 0;
         for(int t = 0; t < n_threads; ++t)
             sum += local_freq[t][v];
 
@@ -93,8 +95,8 @@ T_sym_ universe_split_threshold(const T_sym_* T, const std::size_t n)
 
     // Walk the cumulative distribution to find the smallest value `tau` such
     // that the cumulative mass up to and including `tau` reaches half the total.
-    const freq_cnt_t half = n / 2;
-    freq_cnt_t cum_sum = 0;
+    const idx_t half = n / 2;
+    idx_t cum_sum = 0;
     T_sym_ tau = 0;
     for(std::size_t v = 0; v < universe_sz; ++v)
     {
@@ -111,6 +113,7 @@ T_sym_ universe_split_threshold(const T_sym_* T, const std::size_t n)
 
 
 
+/*
 // Template instantiations for the required instances.
 template void compute_partition_IDs(const char*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
 template void compute_partition_IDs(const uint8_t*, idx_t, p_id_t*, std::size_t, const std::vector<pivot_t>&);
@@ -121,6 +124,7 @@ template bool validate_partition_IDs(const char*, idx_t, std::size_t, const std:
 template bool validate_partition_IDs(const uint8_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
 template bool validate_partition_IDs(const uint16_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
 template bool validate_partition_IDs(const uint32_t*, idx_t, std::size_t, const std::vector<pivot_t>&, const p_id_t*);
+*/
 
 template char       universe_split_threshold(const char*, std::size_t);
 template uint8_t    universe_split_threshold(const uint8_t*, std::size_t);

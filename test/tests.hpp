@@ -16,6 +16,7 @@
 namespace gpu_saca::test
 {
 
+/*
 // Computes the frequency histogram of the quantized `k`-grams of the text `T`
 // of size `n` into `H`.
 template <typename T_sym_>
@@ -38,6 +39,7 @@ void compute_partition_IDs(const T_sym_* T, idx_t n, p_id_t* P_id, std::size_t k
 // computed at the CPU-side as reference.
 template <typename T_sym_>
 bool validate_partition_IDs(const T_sym_* T, idx_t n, std::size_t k, const std::vector<pivot_t>& X, const p_id_t* P_id);
+*/
 
 // Returns `true` iff the keys in `key`, corresponding to the partition `part`,
 // are sorted, and `part` is properly ranked based on the sorted keys.

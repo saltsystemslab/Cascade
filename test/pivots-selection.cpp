@@ -12,6 +12,7 @@
 namespace gpu_saca::test
 {
 
+/*
 template <typename T_sym_>
 void kgram_histogram(const T_sym_* const T, const idx_t n, freq_cnt_t* const H, const std::size_t k)
 {
@@ -75,5 +76,6 @@ template bool validate_kgram_histogram(const char*, idx_t, std::size_t, const fr
 template bool validate_kgram_histogram(const uint8_t*, idx_t, std::size_t, const freq_cnt_t*);
 template bool validate_kgram_histogram(const uint16_t*, idx_t, std::size_t, const freq_cnt_t*);
 template bool validate_kgram_histogram(const uint32_t*, idx_t, std::size_t, const freq_cnt_t*);
+*/
 
 }

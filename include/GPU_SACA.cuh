@@ -20,7 +20,7 @@ namespace gpu_saca
 {
 
 constexpr p_id_t MAX_PIVOT_COUNT = CONST_MEM_SZ / sizeof(Prefix_Key);   // Maximum supported number of pivots.
-extern __constant__ pivot_t pivots_d[];
+extern __constant__ Prefix_Key pivots_d[];
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
@@ -113,7 +113,7 @@ private:
 
     // Computes the sizes of the suffix partitions based on the quantized `K`-
     // gram histogram `H` and the selected pivots.
-    void compute_partition_sizes(const std::vector<freq_cnt_t>& H);
+    // void compute_partition_sizes(const std::vector<freq_cnt_t>& H);
 
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
@@ -195,6 +195,7 @@ inline Prefix_Key GPU_SACA<T_sym_>::pack_prefix(const idx_t idx) const
 }
 
 
+/*
 // Adds the histogram of the quantized `K`-grams of the text-chunk `T_chunk`, of
 // symbols of type `T_sym_` and having `chunk_sz` many `K`-grams, into `H`. The
 // chunk must be ensured to have `chunk_sz + K - 1` symbols with enough padding.
@@ -326,6 +327,7 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, cons
         }
     }
 }
+*/
 
 
 // Flags the distinct sort-keys from the sorted `Sort_Key` array of size `n`,

@@ -24,7 +24,7 @@
 namespace gpu_saca
 {
 
-__constant__ pivot_t pivots_d[MAX_PIVOT_COUNT];
+__constant__ Prefix_Key pivots_d[MAX_PIVOT_COUNT];
 
 
 template <typename T_sym_>
