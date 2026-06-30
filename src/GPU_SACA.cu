@@ -15,6 +15,8 @@
 #include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <random>
+#include <cmath>
 #include <algorithm>
 #include <iostream>
 
@@ -101,7 +103,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     select_pivots();
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
-/*
+
     if(!allocate_device_space())
     {
         std::cerr << "Too low device memory available for the process. Aborting.\n";
@@ -126,7 +128,6 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     concatenate_partitions(SA);
     const auto t_5 = now();
     std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
-*/
 }
 
 
@@ -320,7 +321,6 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 }
 
 
-/*
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_sizes(const std::vector<freq_cnt_t>& H)
 {
@@ -535,7 +535,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id) ? "Passes" : "Fails") << "\n";
 #endif
 }
-*/
 
 
 template <typename T_sym_>
