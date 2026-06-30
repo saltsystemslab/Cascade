@@ -19,7 +19,7 @@
 namespace gpu_saca
 {
 
-constexpr p_id_t MAX_PART_COUNT = 1024; // Maximum number of allowed partitions. TODO: better fix / tune it.
+constexpr p_id_t MAX_PIVOT_COUNT = CONST_MEM_SZ / sizeof(Prefix_Key);   // Maximum supported number of pivots.
 extern __constant__ pivot_t pivots_d[];
 
 
@@ -36,11 +36,11 @@ private:
     const idx_t n_; // Size of the text.
     const T_sym_* const T_h_;   // Text at the host-side.
 
-    const p_id_t p_;    // Number of partitions for the SA.
+    p_id_t p_;  // Number of partitions for the SA.
 
     static constexpr std::size_t K = 12;    // k-gram size for frequency counting of prefixes.
 
-    std::vector<pivot_t> pivots;    // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
+    std::vector<Prefix_Key> pivots; // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
     p_id_t* P_id;   // Partition-IDs of the suffixes.
 
@@ -52,6 +52,13 @@ private:
 
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
+
+    // Sampling parameters.
+    // {
+        static constexpr idx_t OVERSAMPLING_FACTOR = 32;    // Oversampling-factor.
+        static constexpr idx_t PARTITION_SLACK_FACTOR = 4;  // Allowed slack factor for actual partition-count over the expected count.
+        static constexpr uint64_t SAMPLE_SEED = 0x9E3779B97F4A7C15ull;  // Fixed seed for random sampling, for reproducibility.
+    // }
 
     // Device-side data and related.
     // {

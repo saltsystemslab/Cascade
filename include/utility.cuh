@@ -28,6 +28,8 @@ while(0)
 
 namespace gpu_saca
 {
+    constexpr std::size_t CONST_MEM_SZ = 64 * 1024; // 64-KB of constant memory across all CUDA compute capabilities.
+
     // Allocates memory for `sz` elements of type `T_` at the host, pins it, and
     // places its address at `ptr`. Returns CUDA error-type encountered, if any.
     template <typename T_>
