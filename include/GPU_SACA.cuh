@@ -208,7 +208,7 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, cons
 
     // Shared memory pattern: text-tile of size `TILE_SZ`.
     extern __shared__ uint8_t s_mem[];
-    T_sym_* tile = s_mem;   // Text-tile.
+    T_sym_* tile = reinterpret_cast<T_sym_*>(s_mem);   // Text-tile.
 
     const auto t_id = threadIdx.x;
     const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text-chunk.
@@ -234,24 +234,7 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, cons
         const auto off = block_off + t_id;  // Offset into the text-chunk being processed.
         if(off < chunk_sz)
         {
-            constexpr idx_t sym_per_word = sizeof(idx_t) / sizeof(T_sym_);
-            Prefix_Key pre_key;
-
-            #pragma unroll
-            for(idx_t w = 0; w < Prefix_Key::PREFIX_WORDS; ++w)
-            {
-                idx_t word = 0;
-
-                #pragma unroll
-                for(idx_t j = 0; j < sym_per_word; ++j)
-                {
-                    const idx_t shift = (sym_per_word - 1 - j) * sizeof(T_sym_) * 8;
-                    word |= (static_cast<idx_t>(tile[t_id + (w * sym_per_word + j)]) << shift); // Note the endianness of the quantization.
-                }
-
-                pre_key.word[w] = word;
-            }
-
+            const auto pre_key = Prefix_Key::pack_prefix(tile + t_id);
 
             // Binary search for the smallest `p_id` such that `pre_key <= pivots[p_id]`.
             p_id_t low = 0, high = part_count - 1;  // The solution lies in the range `[low, high]`.
