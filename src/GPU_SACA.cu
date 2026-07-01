@@ -150,7 +150,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 
             #pragma omp for schedule(static)
             for(idx_t i = 0; i < s; ++i)
-                S[i] = pack_prefix(dist(rng));
+                S[i] = Prefix_Key::pack_prefix(T_h_ + dist(rng));
         }
 
         std::sort(S.begin(), S.end());
@@ -376,7 +376,7 @@ void GPU_SACA<T_sym_>::partition()
         {
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
-                P_buf[P_id[i]].unwrap().add(i, pack_word(i), pack_word(i + 8 / sizeof(T_sym_)));
+                P_buf[P_id[i]].unwrap().add(i, util::pack_word(T_h_ + i), util::pack_word(T_h_ + i + 8 / sizeof(T_sym_)));
 
             #pragma omp parallel for schedule(static)
             for(p_id_t p_id = 0; p_id < p_; ++p_id)

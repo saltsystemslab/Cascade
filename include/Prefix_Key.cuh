@@ -6,6 +6,7 @@
 
 #include "cross-compile.hpp"
 #include "types.hpp"
+#include "utility.hpp"
 
 #include <cstddef>
 
@@ -44,18 +45,7 @@ inline Prefix_Key Prefix_Key::pack_prefix(const T_sym_* const T)
 
     #pragma unroll
     for(idx_t w = 0; w < Prefix_Key::PREFIX_WORDS; ++w)
-    {
-        idx_t word = 0;
-
-        #pragma unroll
-        for(idx_t j = 0; j < sym_per_word; ++j)
-        {
-            const idx_t shift = (sym_per_word - 1 - j) * sizeof(T_sym_) * 8;
-            word |= (static_cast<idx_t>(T[(w * sym_per_word + j)]) << shift); // Note the endianness of the quantization.
-        }
-
-        pre_key.word[w] = word;
-    }
+        pre_key.word[w] = util::pack_word(T + w * sym_per_word);
 
     return pre_key;
 }

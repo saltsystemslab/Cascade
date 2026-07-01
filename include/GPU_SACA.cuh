@@ -74,21 +74,8 @@ private:
     Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those.
 #endif
 
-
-    // Returns the `N` symbols situated at the index `idx` of the text as a 64-
-    // bit word. The endian-ness of the word matches the lexicographical order
-    // of the text—the symbol at index `idx` corresponds to the most significant
-    // bits of the word.
-    // NB: the text must have been appropriately padded at the tail.
-    template <idx_t N = (8 / sizeof(T_sym_))>
-    uint64_t pack_word(idx_t idx) const;
-
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
-
-    // Returns the packed prefix-key filled with `K` symbols of the text from
-    // the index `idx` onward.
-    Prefix_Key pack_prefix(idx_t idx) const;
 
     // Returns the inclusive upper-bound for the maximum supported partition-
     // size. The rationale used in fixing this is that, in the case when the
@@ -154,45 +141,6 @@ public:
     // Builds the suffix array into `SA`.
     void build_SA(idx_t*& SA);
 };
-
-
-template <typename T_sym_>
-__device__ __host__
-__forceinline__ uint8_t GPU_SACA<T_sym_>::quantize(const T_sym_ x)
-{
-    // Maximum element of the lower half: exactly `2^(N - 1)` values at each half.
-    constexpr T_sym_ mid = std::numeric_limits<T_sym_>::min() / 2 + std::numeric_limits<T_sym_>::max() / 2;
-    return x <= mid ? 0 : 1;
-}
-
-
-template <typename T_sym_>
-template <idx_t N>
-inline uint64_t GPU_SACA<T_sym_>::pack_word(idx_t idx) const
-{
-    if constexpr(N == 0)
-        return 0;
-    else
-    {
-        constexpr auto shift = (N - 1) * sizeof(T_sym_) * 8;
-        return (static_cast<uint64_t>(T_h_[idx]) << shift) | pack_word<N - 1>(idx + 1);
-    }
-}
-
-
-template <typename T_sym_>
-inline Prefix_Key GPU_SACA<T_sym_>::pack_prefix(const idx_t idx) const
-{
-    constexpr idx_t sym_per_word = 8 / sizeof(T_sym_);
-
-    Prefix_Key pre_key;
-
-    #pragma unroll
-    for(std::size_t i = 0; i < Prefix_Key::PREFIX_WORDS; ++i)
-        pre_key.word[i] = pack_word(idx + i * sym_per_word);
-
-    return pre_key;
-}
 
 
 // Computes the partition-IDs (in `[0, part_count)`) of the suffixes of the
