@@ -28,7 +28,7 @@ int main(int argc, char** argv)
 */
     // using T_sym_ = uint8_t;
     using T_sym_ = uint16_t;
-    constexpr auto null_count = 16 / sizeof(T_sym_);
+    constexpr auto null_count = sizeof(gpu_saca::Prefix_Key) / sizeof(T_sym_);
 
     const std::string file_path(argv[1]);
     const auto sym_count = gpu_saca::util::file_size<T_sym_>(file_path);
