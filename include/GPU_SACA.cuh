@@ -145,21 +145,32 @@ public:
 
 // Computes the partition-IDs (in `[0, part_count)`) of the suffixes of the
 // text-chunk `T_chunk`, of type `T_sym_` and having `chunk_sz` many suffixes,
-// into `P_id`.
+// into `P_id`. Also accumulates the per-partition suffix counts of this chunk
+// into the global histogram `P_sz`.
 // Grid organization: one thread per suffix of the chunk.
-// Shared memory layout: text-tile
+// Shared memory layout: text-tile (`T_sym_`) | block-local histogram (`uint32_t`)
 template <typename T_sym_, idx_t K, idx_t BLOCK_SZ>
 __global__
-void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, const idx_t chunk_sz, p_id_t* const __restrict__ P_id, const p_id_t part_count)
+void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, const idx_t chunk_sz,
+                                    p_id_t* const __restrict__ P_id, const p_id_t part_count, idx_t* const __restrict__ P_sz)
 {
     constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
 
-    // Shared memory pattern: text-tile of size `TILE_SZ`.
+    // Shared memory pattern: text-tile of size `TILE_SZ`, followed by block-local histogram of size `part_count`.
     extern __shared__ uint8_t s_mem[];
-    T_sym_* tile = reinterpret_cast<T_sym_*>(s_mem);   // Text-tile.
+    T_sym_* const tile         = reinterpret_cast<T_sym_*>(s_mem);  // Text-tile.
+    constexpr idx_t tile_bytes = TILE_SZ * sizeof(T_sym_);
+    constexpr idx_t hist_off   = ((tile_bytes + alignof(uint32_t) - 1) / alignof(uint32_t)) * alignof(uint32_t);
+    uint32_t* const local_hist = reinterpret_cast<uint32_t*>(s_mem + hist_off);
 
     const auto t_id = threadIdx.x;
     const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text-chunk.
+
+    // Clear the block-local histogram cooperatively.
+    {
+        for(idx_t j = t_id; j < part_count; j += BLOCK_SZ)
+            local_hist[j] = 0;
+    }
 
     // Load the corresponding text-tile cooperatively.
     {
@@ -177,7 +188,7 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, cons
 
     __syncthreads();
 
-    // Pack each suffix's `K`-prefix and compute its partition-ID.
+    // Pack each suffix's `K`-prefix and compute its partition-ID, and count it.
     {
         const auto off = block_off + t_id;  // Offset into the text-chunk being processed.
         if(off < chunk_sz)
@@ -196,7 +207,19 @@ void compute_partition_IDs_kernel(const T_sym_* const __restrict__ T_chunk, cons
             }
 
             P_id[off] = low;
+
+            // Count this suffix into the block-local histogram.
+            atomicAdd(local_hist + P_id[off], 1u);
         }
+    }
+
+    __syncthreads();
+
+    // Flush the block-local counts into the global-local histogram.
+    {
+        for(idx_t j = t_id; j < part_count; j += BLOCK_SZ)
+            if(local_hist[j])
+                atomicAdd(reinterpret_cast<unsigned long long*>(P_sz + j), static_cast<unsigned long long>(local_hist[j]));
     }
 }
 

@@ -104,18 +104,18 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
-    if(!allocate_device_space())
-    {
-        std::cerr << "Too low device memory available for the process. Aborting.\n";
-        std::exit(EXIT_FAILURE);
-    }
-
     partition();
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
     // Unpin the host-side text as we do not need the text anymore.
     CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
+
+    if(!allocate_device_space())
+    {
+        std::cerr << "Too low device memory available for the process. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 
     initial_rank();
     const auto t_3 = now();
@@ -407,6 +407,12 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     T_sym_* T_buf[STREAM_C];    // The text-chunk buffers.
     p_id_t* P_id_buf[STREAM_C]; // The partition-ID buffers.
 
+    idx_t* P_sz_d;  // Global partition-size histogram at the device.
+    {
+        CUDA_CHECK(cudaMalloc(&P_sz_d, p_ * sizeof(idx_t)));
+        CUDA_CHECK(cudaMemset(P_sz_d, 0, p_ * sizeof(idx_t)));
+    }
+
     // Determine the chunks' sizes for processing them in a streaming manner, and allocate space for the corresponding buffers.
     {
         std::size_t free_mem, total_mem;
@@ -432,9 +438,13 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     }
 
 
-    // Move text in chunks to device, compute partition-IDs of the suffixes, and move the IDs to host.
+    // Stream text in chunks to device, compute partition-IDs and per-partition counts, and move the output to host.
     {
-        const auto s_mem_sz = (BLOCK_SZ + K - 1) * sizeof(T_sym_);  // Shared memory size: text-tile.
+        constexpr idx_t tile_bytes = (BLOCK_SZ + K - 1) * sizeof(T_sym_);
+        constexpr idx_t hist_off = ((tile_bytes + alignof(uint32_t) - 1) / alignof(uint32_t)) * alignof(uint32_t);
+        const idx_t hist_bytes = p_ * sizeof(uint32_t);
+        const auto s_mem_sz = hist_off + hist_bytes;    // Shared memory: text-tile | block-local histogram.
+
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
         for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
         {
@@ -453,7 +463,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
             const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
             compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz, stream[buf_id] >>>
-                (T_buf[buf_id], chunk_suf_count, P_id_buf[buf_id], p_);
+                (T_buf[buf_id], chunk_suf_count, P_id_buf[buf_id], p_, P_sz_d);
             CUDA_CHECK(cudaGetLastError());
 
             // Asynchronously copy this chunk's partition-IDs to the host.
@@ -471,6 +481,23 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     {
         CUDA_CHECK(cudaFree(T_buf[b]));
         CUDA_CHECK(cudaFree(P_id_buf[b]));
+    }
+
+    // Move the partition-sizes to the host.
+    {
+        P_sz.resize(p_);
+        CUDA_CHECK(cudaMemcpy(P_sz.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(P_sz_d));
+
+        P_off.resize(p_);
+        P_off[0] = 0;
+        for(p_id_t p_id = 1; p_id < p_; ++p_id)
+            P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
+
+#ifdef STATS
+        std::cerr << "Partition-size stats:\n";
+        util::Collection_Stats::get_collection_stat(P_sz).print();
+#endif
     }
 
 
