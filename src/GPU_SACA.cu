@@ -629,16 +629,24 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
         p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `k`).
 
-        // For each partition, exponentiate the prefix-context of its suffixes, and then sort-and-rank it.
+        // For each partition, exponentiate the prefix-context of its suffixes.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
-            if(is_sorted[p_id]) // Skip partitions already fully-sorted.
+            if(is_sorted[p_id]) // Skip partitions with already stable rankings.
             {
                 sorted_part++;
                 continue;
             }
 
             exponentiate_prefix(p_id, k);
+        }
+
+        // Sort-and-rank each partition.
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        {
+            if(is_sorted[p_id]) // Skip partitions already fully-sorted.
+                continue;
+
             sort_and_rank(p_id);
         }
 
