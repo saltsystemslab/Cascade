@@ -206,7 +206,8 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     constexpr std::size_t bytes_per_suf = 2 * (sizeof(Sort_Key) + sizeof(idx_t));   // Device-space requirement for a suffix in its partition: it occupies space in two buffers for the radix-sort.
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-    const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
+    const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
+    const std::size_t budget = raw_budget / PART_SZ_IMBALANCE_SLACK;    // The actual partition-sizes, to be found out later, can be larger due to the probabilistic nature of pivoting.
 
     idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);   // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
     while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.

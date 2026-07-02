@@ -33,6 +33,10 @@ private:
 
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
 
+    // Assumed worst-case ratio of actual max partition-size to the target
+    // estimated during pivots-selection.
+    static constexpr double PART_SZ_IMBALANCE_SLACK = 1.20;
+
     const idx_t n_; // Size of the text.
     const T_sym_* const T_h_;   // Text at the host-side.
 
