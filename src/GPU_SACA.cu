@@ -15,6 +15,8 @@
 #include <vector>
 #include <cstring>
 #include <cstdlib>
+#include <random>
+#include <cmath>
 #include <algorithm>
 #include <iostream>
 
@@ -22,15 +24,16 @@
 namespace gpu_saca
 {
 
-__constant__ pivot_t pivots_d[MAX_PART_COUNT];
+__constant__ Prefix_Key pivots_d[MAX_PIVOT_COUNT];
 
 
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
       n_(n)
     , T_h_(T)
-    , p_(128)   // TODO: tune this.
+    , p_(0)
     , P_id(nullptr)
+    , is_unsorted_d(nullptr)
     , rho(nullptr)
     , null_d(nullptr)
     , workspace_sz(0)
@@ -66,6 +69,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     CUDA_CHECK(cudaFree(null_d));
 
     util::deallocate(P_id);
+    CUDA_CHECK(cudaFree(is_unsorted_d));
     util::deallocate(rho);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
@@ -102,18 +106,18 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
-    if(!allocate_device_space())
-    {
-        std::cerr << "Too low device memory available for the process. Aborting.\n";
-        std::exit(EXIT_FAILURE);
-    }
-
     partition();
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
     // Unpin the host-side text as we do not need the text anymore.
     CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
+
+    if(!allocate_device_space())
+    {
+        std::cerr << "Too low device memory available for the process. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 
     initial_rank();
     const auto t_3 = now();
@@ -132,146 +136,131 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::select_pivots()
 {
-    const auto hist_sz = 1llu << K;
-    freq_cnt_t* H_d;    // The global histogram.
+    const idx_t p_sz_max = partition_size_upper_bound();    // Maximum supported partition-size based on the device-memory budget.
+    const idx_t p_min = (n_ + p_sz_max - 1) / p_sz_max;     // Minimum number of partitions.
+    const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PIVOT_COUNT + 1);  // Maximum number of partitions.
 
-    // Allocate the global histogram.
-    CUDA_CHECK(cudaMalloc(&H_d, hist_sz * sizeof(freq_cnt_t)));
-    CUDA_CHECK(cudaMemset(H_d, 0, hist_sz * sizeof(freq_cnt_t)));
+    const idx_t s = OVERSAMPLING_FACTOR * p_max * std::log2(n_);    // Number of samples.
+    std::vector<Prefix_Key> S(s);   // The samples.
 
-    constexpr std::size_t BLOCK_SZ = 128;
-    idx_t CHUNK_SZ; // Number of `K`-grams at each text-chunk.
-    T_sym_* T_buf[2];   // The text-chunk buffers.
-
-    // Determine the text-chunks' sizes for processing them in a streaming manner, and allocate space for the corresponding buffers.
+    // Draw and sort the samples.
     {
-        std::size_t free_mem, total_mem;
-        CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
-
-        const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory for the chunk buffers.
-        const std::size_t per_sym_mem = 2 * sizeof(T_sym_); // Space required per-symbol across the two buffers.
-        CHUNK_SZ = budget / per_sym_mem;
-        CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
-        if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
+        #pragma omp parallel
         {
-            std::cerr << "Too low device memory available for histogram streaming. Aborting.\n";
-            std::exit(EXIT_FAILURE);
+            std::mt19937_64 rng(SAMPLE_SEED + omp_get_thread_num());    // Fixed per-thread RNG for reproducibility.
+            std::uniform_int_distribution<idx_t> dist(0, n_ - 1);
+
+            #pragma omp for schedule(static)
+            for(idx_t i = 0; i < s; ++i)
+                S[i] = Prefix_Key::pack_prefix(T_h_ + dist(rng));
         }
 
-        const std::size_t buf_bytes = (CHUNK_SZ + K - 1) * sizeof(T_sym_);
-        for(std::size_t b = 0; b < 2; ++b)
-            CUDA_CHECK(cudaMalloc(T_buf + b, buf_bytes));
+        std::sort(S.begin(), S.end());
     }
 
-    // Count the quantized k-gram frequencies into the histogram.
+    // Pick the final pivots.
     {
-        const auto s_mem_sz = (BLOCK_SZ + K - 1) + (1llu << K) + 4; // Shared memory size:  quantized text-tile, followed by block-local histogram with `u8` counters,
-                                                                    //                      followed by some padding for atomic-add workaround of `u8`s.
+        const double strip_sz_exp = static_cast<double>(n_) / (s + 1);  // Each gap between consecutive samples corresponds to a strip of the SA, of expected size `n / (s + 1)`.
 
-        const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
-        for(idx_t c = 0; c < chunk_count; ++c)  // Double-buffered chunk loop.
+        int64_t i = 0;
+        int64_t part_beg = 0;   // Sample index where the current partition begins.
+        while(i < static_cast<int64_t>(s))
         {
-            const auto buf_id = c % 2;  // Which buffer (and stream) to use for this chunk.
-            const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
-            const auto chunk_kgram_count = std::min(CHUNK_SZ, n_ - chunk_off);  // Count of `K`-grams in this chunk.
-            const auto chunk_symbol_req = chunk_kgram_count + K - 1;    // Number of symbols this chunk is required to have.
-            const auto chunk_symbol_count = std::min(chunk_symbol_req, n_ - chunk_off);    // Number of symbols to transfer from host to device for this chunk.
-
-            //  Asynchronously transfer this chunk to the device while the other stream's kernel is being executed (from the last iteration).
-            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, chunk_symbol_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
-
-            // Pad the tail of the chunk with null / terminator symbols if required.
-            if(chunk_symbol_count < chunk_symbol_req)   // Can happen at the last and at the previous-to-last chunks.
-                CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id] + chunk_symbol_count, null_d, (chunk_symbol_req - chunk_symbol_count) * sizeof(T_sym_), cudaMemcpyDeviceToDevice, stream[buf_id]));
-
-            const auto block_count = (chunk_kgram_count + BLOCK_SZ - 1) / BLOCK_SZ;
-            compute_kgram_histogram_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz, stream[buf_id] >>>
-                (T_buf[buf_id], chunk_kgram_count, H_d);
-            CUDA_CHECK(cudaGetLastError());
-        }
-
-        // Wait for the streams to finish.
-        for(std::size_t s = 0; s < 2; ++s)
-            CUDA_CHECK(cudaStreamSynchronize(stream[s]));
-
-        // Free the buffers.
-        for(std::size_t b = 0; b < 2; ++b)
-            CUDA_CHECK(cudaFree(T_buf[b]));
-    }
-
-    // Select `p - 1` uniformly spread out (in terms of histogram mass) pivots.
-    {
-        std::vector<freq_cnt_t> H_h(hist_sz);   // Histogram at the device.
-        CUDA_CHECK(cudaMemcpy(H_h.data(), H_d, hist_sz * sizeof(freq_cnt_t), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaFree(H_d));
-
-#ifdef TESTS
-        std::cerr << "Histogram verification: " << (test::validate_kgram_histogram(T_h_, n_, K, H_h.data()) ? "Passes" : "Fails") << "\n";
-#endif
-
-        const p_id_t pivot_count = p_ - 1;
-        pivots.resize(pivot_count);
-        freq_cnt_t cum_sum = 0;
-        std::size_t j = 0;  // Number of collected pivots.
-        for(std::size_t i = 0; i < hist_sz && j < pivot_count; ++i)
-        {
-            cum_sum += H_h[i];
-            if(j < pivot_count && cum_sum >= (j + 1) * n_ / p_)
+            const auto hops = i - part_beg + 1; // Number of sample-hops made in the current partition from the preceding partition.
+            if(hops * strip_sz_exp <= p_sz_max) // Advance till the current partition's size remains at most `p_sz_max`.
+                i++;
+            else
             {
-                const auto target = (j + 1) * n_ / p_;
-                const auto before = cum_sum - H_h[i];
-                const auto after  = cum_sum;
+                const auto excl_idx = i;    // Sample to exclude from the current partition.
+                auto pivot_idx = i - 1;
 
-                // Place the split point before or after bin `i`, where ever the mass sum is closer to the target sum.
-                pivot_t split = (target - before <= after - target ?
-                                    (i > 0 ? i - 1 : 0) :
-                                    i);
-                if(j > 0 && split <= pivots[j - 1]) // Nudge the pivot forward if the bin is really heavy.
-                    split = pivots[j - 1] + 1;
+                // Backoff past all occurrences of the excluded sample's matches, so equal prefixes aren't split across partitions.
+                while(pivot_idx >= part_beg && !(S[pivot_idx] < S[excl_idx]))
+                    pivot_idx--;
 
-                pivots[j++] = split;
+                if(pivot_idx < part_beg)
+                {
+                    std::cerr << "In pivots-selection, a single `K`-prefix exceeds maximum supported partition-size. Increase `K`. Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+
+                pivots.push_back(S[pivot_idx]); // Inclusive upper-bound of the current partition.
+                if(pivots.size() + 1 > p_max)
+                {
+                    std::cerr << "In pivots-selection, partition-count exceeds maximum supported partition-count. Increase `K`. Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+
+                i = part_beg = pivot_idx + 1;
             }
         }
 
-        // Fill any remaining pivots with consecutive bin indices following the last pivot.
-        // These will correspond to empty partition but keeps the pivot-set fully populated and non-decreasing.
-        // Special case when partition-count is larger than count of unique quantized `k`-grams.
-        const pivot_t last_pivot = (j > 0 ? pivots[j - 1] : 0);
-        const pivot_t max_bin = (1llu << K) - 1;
-        for(pivot_t rem_slot = 0; j + rem_slot < pivot_count; ++rem_slot)
-            pivots[j + rem_slot] = std::min(static_cast<pivot_t>(last_pivot + rem_slot + 1), max_bin);
-
-
-        compute_partition_sizes(H_h);
-
-#ifdef STATS
-        std::cerr << "Quantized " << K << "-gram frequency histogram stats:\n";
-        util::Collection_Stats::get_collection_stat(H_h).print();
-
-        std::cerr << "Partition-size stats:\n";
-        util::Collection_Stats::get_collection_stat(P_sz).print();
-#endif
+        p_ = pivots.size() + 1;
     }
 }
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::compute_partition_sizes(const std::vector<freq_cnt_t>& H)
+idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
-    P_sz.resize(p_, 0);
-    p_id_t p_id = 0;    // Which partition we're at right now.
-    for(std::size_t bin = 0; bin < H.size(); ++bin)
-    {
-        if(p_id < pivots.size() && bin > pivots[p_id])  // Moving onto the next partition.
-            p_id++;
+    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Sort_Key) + sizeof(idx_t));   // Device-space requirement for a suffix in its partition: it occupies space in two buffers for the radix-sort.
+    std::size_t free_mem, total_mem;
+    CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
+    const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
 
-        P_sz[p_id] += H[bin];   // The pivots are inclusive upper bounds of their partition.
+    idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);   // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
+    while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.
+    {
+        const auto workspace_sz = cub_workspace_size(p_sz_max);
+        if(STREAM_C * (p_sz_max * bytes_per_suf + workspace_sz) <= budget)
+            break;
+
+        if(STREAM_C * workspace_sz >= budget)
+        {
+            std::cerr << "Device memory cannot even accommodate the CUB workspaces. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        const idx_t next_p_sz_max = (budget - STREAM_C * workspace_sz) / (STREAM_C * bytes_per_suf);
+        if(next_p_sz_max >= p_sz_max)   // Converged to a fixed-point without being able to compute a suitable `p_sz_max`.
+        {
+            std::cerr << "Unable to determine a suitable partition-size upper bound. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        p_sz_max = next_p_sz_max;
     }
 
-    P_off.resize(p_);
-    P_off[0] = 0;
-    for(p_id_t p_id = 1; p_id < p_; ++p_id)
-        P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
+    const idx_t p_min = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
+    const auto p_sz_bound = (n_ + p_min - 1) / p_min;   // Maximum supported size of a partition based on the minimum partition-count.
+
+    return p_sz_bound;
+}
+
+
+template <typename T_sym_>
+std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
+{
+    cub::DoubleBuffer<Sort_Key> keys;
+    cub::DoubleBuffer<idx_t> vals;
+
+    std::size_t sort_workspace_sz = 0;
+    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+        nullptr, sort_workspace_sz,
+        keys, vals,
+        part_sz,
+        Sort_Key_Decomposer{}
+    ));
+
+    std::size_t scan_workspace_sz = 0;
+    CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+        nullptr, scan_workspace_sz,
+        static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
+        cub::Max(),
+        2 * part_sz
+    ));
+
+    return std::max(sort_workspace_sz, scan_workspace_sz);
 }
 
 
@@ -336,6 +325,8 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
         }
+
+        CUDA_CHECK(cudaMalloc(&is_unsorted_d, p_ * sizeof(int)));
     }
 
     return true;
@@ -367,7 +358,7 @@ void GPU_SACA<T_sym_>::partition()
         {
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
-                P_buf[P_id[i]].unwrap().add(i, pack_word(i), pack_word(i + 8 / sizeof(T_sym_)));
+                P_buf[P_id[i]].unwrap().add(i, util::pack_word(T_h_ + i), util::pack_word(T_h_ + i + 8 / sizeof(T_sym_)));
 
             #pragma omp parallel for schedule(static)
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -390,13 +381,19 @@ void GPU_SACA<T_sym_>::partition()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_IDs()
 {
-    // Copy the pivots to the device.
-    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(pivot_t)));
+    // Copy the pivots to the device constant-memory.
+    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(Prefix_Key)));
 
     constexpr std::size_t BLOCK_SZ = 256;
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
     T_sym_* T_buf[STREAM_C];    // The text-chunk buffers.
     p_id_t* P_id_buf[STREAM_C]; // The partition-ID buffers.
+
+    idx_t* P_sz_d;  // Global partition-size histogram at the device.
+    {
+        CUDA_CHECK(cudaMalloc(&P_sz_d, p_ * sizeof(idx_t)));
+        CUDA_CHECK(cudaMemset(P_sz_d, 0, p_ * sizeof(idx_t)));
+    }
 
     // Determine the chunks' sizes for processing them in a streaming manner, and allocate space for the corresponding buffers.
     {
@@ -423,9 +420,13 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     }
 
 
-    // Move text in chunks to device, compute partition-IDs of the suffixes, and move the IDs to host.
+    // Stream text in chunks to device, compute partition-IDs and per-partition counts, and move the output to host.
     {
-        const auto s_mem_sz = BLOCK_SZ + K - 1; // Shared memory size: quantized text-tile.
+        constexpr idx_t tile_bytes = (BLOCK_SZ + K - 1) * sizeof(T_sym_);
+        constexpr idx_t hist_off = ((tile_bytes + alignof(uint32_t) - 1) / alignof(uint32_t)) * alignof(uint32_t);
+        const idx_t hist_bytes = p_ * sizeof(uint32_t);
+        const auto s_mem_sz = hist_off + hist_bytes;    // Shared memory: text-tile | block-local histogram.
+
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
         for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
         {
@@ -444,7 +445,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
             const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
             compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz, stream[buf_id] >>>
-                (T_buf[buf_id], chunk_suf_count, P_id_buf[buf_id], p_);
+                (T_buf[buf_id], chunk_suf_count, P_id_buf[buf_id], p_, P_sz_d);
             CUDA_CHECK(cudaGetLastError());
 
             // Asynchronously copy this chunk's partition-IDs to the host.
@@ -464,9 +465,26 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         CUDA_CHECK(cudaFree(P_id_buf[b]));
     }
 
+    // Move the partition-sizes to the host.
+    {
+        P_sz.resize(p_);
+        CUDA_CHECK(cudaMemcpy(P_sz.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaFree(P_sz_d));
+
+        P_off.resize(p_);
+        P_off[0] = 0;
+        for(p_id_t p_id = 1; p_id < p_; ++p_id)
+            P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
+
+#ifdef STATS
+        std::cerr << "Partition-size stats:\n";
+        util::Collection_Stats::get_collection_stat(P_sz).print();
+#endif
+    }
+
 
 #ifdef TESTS
-    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, K, pivots, P_id) ? "Passes" : "Fails") << "\n";
+    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
 #endif
 }
 
@@ -474,6 +492,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
+    CUDA_CHECK(cudaMemset(is_unsorted_d, 0, p_ * sizeof(int)));
+
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
@@ -495,7 +515,10 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
     // Compute the initial global ranking.
+    is_sorted.resize(p_, 0);
     update_global_ranks();
+
+    collect_sortedness_flags(); // NB: this must happen *after* `rho` has been updated for the first time.
 }
 
 
@@ -543,7 +566,7 @@ void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
         flag_distinct_key_offsets_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, off_u64, part_sz);
+            (K, off_u64, part_sz, is_unsorted_d + p_id);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -565,10 +588,21 @@ void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
 
 
 template <typename T_sym_>
+void GPU_SACA<T_sym_>::collect_sortedness_flags()
+{
+    auto& is_unsorted = is_sorted;
+    CUDA_CHECK(cudaMemcpy(is_unsorted.data(), is_unsorted_d, p_ * sizeof(int), cudaMemcpyDeviceToHost));
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        is_sorted[p_id] = (is_unsorted[p_id] == 0);
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::update_global_ranks()
 {
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        update_global_rank(p_id);
+        if(!is_sorted[p_id])    // Skip redundant updates for stable rankings.
+            update_global_rank(p_id);
 }
 
 
@@ -591,17 +625,14 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     const idx_t ell = 16 / sizeof(T_sym_);
     for(idx_t k = ell; k < n_; k *= 2)
     {
+        CUDA_CHECK(cudaMemset(is_unsorted_d, 0, p_ * sizeof(int)));
+
         p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `k`).
 
         // For each partition, exponentiate the prefix-context of its suffixes, and then sort-and-rank it.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
-            if(P_sz[p_id] == 0) // Skip empty partitions.
-                continue;
-
-            const auto part_sz = P_sz[p_id];
-            const auto last_rank = P_[p_id].key(part_sz - 1).primary;
-            if(last_rank == part_sz - 1)    // Skip partitions already fully-sorted.
+            if(is_sorted[p_id]) // Skip partitions already fully-sorted.
             {
                 sorted_part++;
                 continue;
@@ -628,6 +659,9 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
         // Update global-ranks based on the updated local-ranks.
         update_global_ranks();
+
+        // Refresh partitions' sortedness flags.
+        collect_sortedness_flags();
     }
 }
 

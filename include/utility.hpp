@@ -4,6 +4,8 @@
 
 
 
+#include "cross-compile.hpp"
+
 #include <cstdint>
 #include <cstddef>
 #include <limits>
@@ -63,6 +65,24 @@ public:
 
     const T_& unwrap() const { return data_; }
 };
+
+
+// Returns the `N` symbols situated at the text `T` as a 64-bit word. The
+// endian-ness of the word matches the lexicographical order of the text—the
+// symbol at index `idx` corresponds to the most significant bits of the word.
+// NB: the text must have been appropriately padded at the tail.
+template <typename T_sym_, uint64_t N = (8 / sizeof(T_sym_))>
+CUDA_SPECIFIER
+uint64_t pack_word(const T_sym_* const T)
+{
+    if constexpr(N == 0)
+        return 0;
+    else
+    {
+        constexpr uint64_t shift = (N - 1) * sizeof(T_sym_) * 8;
+        return (static_cast<uint64_t>(*T) << shift) | pack_word<T_sym_, N - 1>(T + 1);
+    }
+}
 
 
 // Returns pointer to a memory-allocation for `size` elements of type `T_`.
