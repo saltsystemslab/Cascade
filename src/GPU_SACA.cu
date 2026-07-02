@@ -33,6 +33,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , T_h_(T)
     , p_(0)
     , P_id(nullptr)
+    , is_unsorted_d(nullptr)
     , rho(nullptr)
     , null_d(nullptr)
     , workspace_sz(0)
@@ -68,6 +69,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     CUDA_CHECK(cudaFree(null_d));
 
     util::deallocate(P_id);
+    CUDA_CHECK(cudaFree(is_unsorted_d));
     util::deallocate(rho);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
@@ -262,28 +264,6 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 }
 
 
-/*
-template <typename T_sym_>
-void GPU_SACA<T_sym_>::compute_partition_sizes(const std::vector<freq_cnt_t>& H)
-{
-    P_sz.resize(p_, 0);
-    p_id_t p_id = 0;    // Which partition we're at right now.
-    for(std::size_t bin = 0; bin < H.size(); ++bin)
-    {
-        if(p_id < pivots.size() && bin > pivots[p_id])  // Moving onto the next partition.
-            p_id++;
-
-        P_sz[p_id] += H[bin];   // The pivots are inclusive upper bounds of their partition.
-    }
-
-    P_off.resize(p_);
-    P_off[0] = 0;
-    for(p_id_t p_id = 1; p_id < p_; ++p_id)
-        P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
-}
-*/
-
-
 template <typename T_sym_>
 bool GPU_SACA<T_sym_>::allocate_device_space()
 {
@@ -345,6 +325,8 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
         }
+
+        CUDA_CHECK(cudaMalloc(&is_unsorted_d, p_ * sizeof(int)));
     }
 
     return true;
@@ -510,6 +492,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
+    CUDA_CHECK(cudaMemset(is_unsorted_d, 0, p_ * sizeof(int)));
+
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
@@ -531,7 +515,10 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
     // Compute the initial global ranking.
+    is_sorted.resize(p_, 0);
     update_global_ranks();
+
+    collect_sortedness_flags(); // NB: this must happen *after* `rho` has been updated for the first time.
 }
 
 
@@ -579,7 +566,7 @@ void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
         flag_distinct_key_offsets_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, off_u64, part_sz);
+            (K, off_u64, part_sz, is_unsorted_d + p_id);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -601,10 +588,21 @@ void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
 
 
 template <typename T_sym_>
+void GPU_SACA<T_sym_>::collect_sortedness_flags()
+{
+    auto& is_unsorted = is_sorted;
+    CUDA_CHECK(cudaMemcpy(is_unsorted.data(), is_unsorted_d, p_ * sizeof(int), cudaMemcpyDeviceToHost));
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        is_sorted[p_id] = (is_unsorted[p_id] == 0);
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::update_global_ranks()
 {
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        update_global_rank(p_id);
+        if(!is_sorted[p_id])    // Skip redundant updates for stable rankings.
+            update_global_rank(p_id);
 }
 
 
@@ -627,17 +625,14 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     const idx_t ell = 16 / sizeof(T_sym_);
     for(idx_t k = ell; k < n_; k *= 2)
     {
+        CUDA_CHECK(cudaMemset(is_unsorted_d, 0, p_ * sizeof(int)));
+
         p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `k`).
 
         // For each partition, exponentiate the prefix-context of its suffixes, and then sort-and-rank it.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
-            if(P_sz[p_id] == 0) // Skip empty partitions.
-                continue;
-
-            const auto part_sz = P_sz[p_id];
-            const auto last_rank = P_[p_id].key(part_sz - 1).primary;
-            if(last_rank == part_sz - 1)    // Skip partitions already fully-sorted.
+            if(is_sorted[p_id]) // Skip partitions already fully-sorted.
             {
                 sorted_part++;
                 continue;
@@ -664,6 +659,9 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
         // Update global-ranks based on the updated local-ranks.
         update_global_ranks();
+
+        // Refresh partitions' sortedness flags.
+        collect_sortedness_flags();
     }
 }
 

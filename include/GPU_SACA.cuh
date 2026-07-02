@@ -48,6 +48,9 @@ private:
     std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
 
+    std::vector<int> is_sorted; // Whether a partition has been fully-sorted or not.
+    int* is_unsorted_d;         // Device-side marker for whether a partition is still unsorted or not.
+
     idx_t* rho; // Global rank of the suffixes.
 
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
@@ -107,6 +110,9 @@ private:
 
     // Sorts and ranks the `p_id`'th partition at the device.
     void sort_and_rank(p_id_t p_id);
+
+    // Copies the partitions' sortedness flags from the device to the host.
+    void collect_sortedness_flags();
 
     // Updates the global ranks of the suffixes based on the current status of
     // the partitions.
@@ -230,20 +236,37 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 // at the `2 * i`'th index of `off_u64`—thus the odd indices in `off_u64` will
 // be 0-holes.
 // Grid organization: one thread per sort-key.
-// Shared memory layout: no usage.
+// Shared memory layout: no dynamic memory usage.
 template <std::size_t BLOCK_SZ>
 __global__
-void flag_distinct_key_offsets_kernel(const Sort_Key* const __restrict__ K, uint64_t* const __restrict__ off_u64, const idx_t n)
+void flag_distinct_key_offsets_kernel(  const Sort_Key* const __restrict__ K,
+                                        uint64_t* const __restrict__ off_u64, const idx_t n, int* const __restrict__ is_unsorted)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
+    // Shared memory pattern: one `int` indicator of sorted-ness.
+    __shared__ int sorted;  // Whether this block has already been fully-sorted or not.
+    if(threadIdx.x == 0)
+        sorted = 1;
+
+    __syncthreads();
+
     off_u64[2 * i + 1] = 0; // Hole in the flag array corresponding to the `i`'th sort-key.
     if(i == 0)
         off_u64[0] = 0; // First group always starts at offset `0`.
     else
-        off_u64[2 * i] = (K[i].primary != K[i - 1].primary || K[i].secondary != K[i - 1].secondary) ? i : 0;
+    {
+        const bool tie = (K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
+        off_u64[2 * i] = !tie ? i : 0;
+        if(tie)
+            sorted = 0;
+    }
+
+    __syncthreads();
+    if(threadIdx.x == 0 && !sorted)
+        *is_unsorted = 1;
 }
 
 }
