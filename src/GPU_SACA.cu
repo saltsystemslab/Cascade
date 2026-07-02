@@ -5,6 +5,7 @@
 #include "utility.hpp"
 #include "utility.cuh"
 #include "tests.hpp"
+#include "profile.hpp"
 
 #include "omp.h"
 #include "cub/cub.cuh"
@@ -96,38 +97,48 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
 {
     using namespace caps_sa::timer;
+    PROFILE_SCOPE("build_SA");
 
     // Pin the host-side text so that PCIe transfers of text can be overlapped kernel execution.
-    CUDA_CHECK(cudaHostRegister(const_cast<T_sym_*>(T_h_), n_ * sizeof(T_sym_), cudaHostRegisterDefault));
+    {
+        PROFILE_SCOPE("host_register_text");
+        CUDA_CHECK(cudaHostRegister(const_cast<T_sym_*>(T_h_), n_ * sizeof(T_sym_), cudaHostRegisterDefault));
+    }
 
     const auto t_0 = now();
 
-    select_pivots();
+    {   PROFILE_SCOPE("select_pivots");             select_pivots();    }
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
-    partition();
+    {   PROFILE_SCOPE("partition");                 partition();    }
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
     // Unpin the host-side text as we do not need the text anymore.
-    CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
-
-    if(!allocate_device_space())
     {
-        std::cerr << "Too low device memory available for the process. Aborting.\n";
-        std::exit(EXIT_FAILURE);
+        PROFILE_SCOPE("host_unregister_text");
+        CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
     }
 
-    initial_rank();
+    {
+        PROFILE_SCOPE("allocate_device_space");
+        if(!allocate_device_space())
+        {
+            std::cerr << "Too low device memory available for the process. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+    }
+
+    {   PROFILE_SCOPE("initial_rank");              initial_rank();}
     const auto t_3 = now();
     std::cerr << "Initial ranking completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
 
-    exponentiate_prefix();
+    {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_4 = now();
     std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
 
-    concatenate_partitions(SA);
+    {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(SA);}
     const auto t_5 = now();
     std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
 }

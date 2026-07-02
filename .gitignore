@@ -41,7 +41,7 @@
 *.dwo
 
 # scripts
-scripts/
+scripts/GPU/
 
 # docker-build
 build/

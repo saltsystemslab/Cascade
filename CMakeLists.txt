@@ -91,6 +91,10 @@ if(STATS)
     add_compile_definitions(STATS)
 endif()
 
+if(PROFILE)
+    add_compile_definitions(PROFILE)
+endif()
+
 
 # Set path for modules required to search for existing packages in the system.
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
