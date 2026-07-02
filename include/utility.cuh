@@ -46,6 +46,16 @@ namespace gpu_saca
     }
 
 
+    // Logs the current amount of free device-memory.
+    static void log_free_mem(const char* const where)
+    {
+        std::size_t free_mem, total_mem;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        std::cerr   << "[mem] " << where << ": free = "
+                    << (free_mem / (1024.0*1024.0*1024.0)) << " GBs.\n";
+    }
+
+
     // Atomically adds `val` to the value at address `addr`, and returns the
     // earlier value from there.
     __device__
