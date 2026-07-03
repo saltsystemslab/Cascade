@@ -247,35 +247,17 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 // Shared memory layout: no dynamic memory usage.
 template <idx_t BLOCK_SZ>
 __global__
-void initial_rank_key_groups_kernel(const Sort_Key* const __restrict__ K, const idx_t n, uint64_t* const __restrict__ rank_u64, int* const __restrict__ is_unsorted)
+void initial_rank_key_groups_kernel(const Sort_Key* const __restrict__ K, const idx_t n, uint64_t* const __restrict__ rank_u64)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    // Shared memory pattern: one `int` indicator of sorted-ness.
-    __shared__ int sorted;  // Whether this block has already been fully-sorted or not.
-    if(threadIdx.x == 0)
-        sorted = 1;
-
-    __syncthreads();
-
-
     rank_u64[2 * i + 1] = 0;    // Hole in the flag array corresponding to the `i`'th sort-key.
     if(i == 0)
         rank_u64[0] = 0;    // First group always starts at offset `0`.
     else
-    {
-        const bool tie = (K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
-        rank_u64[2 * i] = (!tie ? i : 0);
-        if(tie)
-            sorted = 0;
-    }
-
-
-    __syncthreads();
-    if(threadIdx.x == 0 && !sorted)
-        *is_unsorted = 1;
+        rank_u64[2 * i] = (K[i].primary != K[i - 1].primary || K[i].secondary != K[i - 1].secondary ? i : 0);
 }
 
 

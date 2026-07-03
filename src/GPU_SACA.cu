@@ -554,6 +554,9 @@ void GPU_SACA<T_sym_>::initial_rank()
     is_sorted.resize(p_, 0);
     { PROFILE_SCOPE("update_global_ranks");     update_global_ranks();}
 
+    // TODO: temporary workaround before full-compaction lands.
+    CUDA_CHECK(cudaMemset(is_unsorted_d, 1, p_ * sizeof(int)));
+
     // NB: this must happen *after* `rho` has been updated for the first time.
     { PROFILE_SCOPE("collect_sortedness_flags");    collect_sortedness_flags(); }
 }
@@ -606,7 +609,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank(const p_id_t p_id)
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
         initial_rank_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, part_sz, key_group_rank_u64, is_unsorted_d + p_id);
+            (K, part_sz, key_group_rank_u64);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::InclusiveScan(
