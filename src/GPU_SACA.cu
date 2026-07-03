@@ -363,14 +363,16 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::partition()
 {
-    compute_partition_IDs();
+    { PROFILE_SCOPE("compute_partition_IDs");   compute_partition_IDs(); }
 
     // Move the suffixes (with some associated prefixes) to their corresponding partitions.
     {
+        PROFILE_SCOPE("scatter_to_partition");
         std::vector<util::Padded<Suffix_Buffer>> P_buf;
 
         // Allocate the partitions with required capacities, and create concurrent buffer for each.
         {
+            PROFILE_SCOPE("allocate_partition_buffers");
             P_.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_.emplace_back(P_sz[p_id]);
@@ -383,6 +385,7 @@ void GPU_SACA<T_sym_>::partition()
 
         // Add suffix indices along with their 16-byte prefixes to their corresponding partitions (through the buffers).
         {
+            PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
                 P_buf[P_id[i]].unwrap().add(i, util::pack_word(T_h_ + i), util::pack_word(T_h_ + i + 8 / sizeof(T_sym_)));
@@ -522,18 +525,24 @@ void GPU_SACA<T_sym_>::initial_rank()
     CUDA_CHECK(cudaMemset(is_unsorted_d, 0, p_ * sizeof(int)));
 
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
-    for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
-        if(P_sz[p_id] == 0) // Skip empty partitions.
-            continue;
+        PROFILE_SCOPE("sort_and_rank_dispatch");
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        {
+            if(P_sz[p_id] == 0) // Skip empty partitions.
+                continue;
 
-        sort_and_rank(p_id);
+            sort_and_rank(p_id);
+        }
     }
 
 
     // Wait for the streams to finish.
-    for(std::size_t s = 0; s < STREAM_C; ++s)
-        CUDA_CHECK(cudaStreamSynchronize(stream[s]));
+    {
+        PROFILE_SCOPE("stream_sync");
+        for(std::size_t s = 0; s < STREAM_C; ++s)
+            CUDA_CHECK(cudaStreamSynchronize(stream[s]));
+    }
 
 
 #ifdef TESTS
@@ -543,15 +552,18 @@ void GPU_SACA<T_sym_>::initial_rank()
 
     // Compute the initial global ranking.
     is_sorted.resize(p_, 0);
-    update_global_ranks();
+    { PROFILE_SCOPE("update_global_ranks");     update_global_ranks();}
 
-    collect_sortedness_flags(); // NB: this must happen *after* `rho` has been updated for the first time.
+    // NB: this must happen *after* `rho` has been updated for the first time.
+    { PROFILE_SCOPE("collect_sortedness_flags");    collect_sortedness_flags(); }
 }
 
 
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
 {
+    PROFILE_SCOPE_FMT("sort_and_rank_p%d", static_cast<int>(p_id));
+
     const std::size_t buf_id = p_id % STREAM_C; // Which set of buffers (and stream) to use for this partition.
     const auto part_sz = P_sz[p_id];    // Size of this partition.
 
@@ -652,34 +664,45 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     const idx_t ell = 16 / sizeof(T_sym_);
     for(idx_t k = ell; k < n_; k *= 2)
     {
+        PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));
+
         CUDA_CHECK(cudaMemset(is_unsorted_d, 0, p_ * sizeof(int)));
 
         p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `k`).
 
         // For each partition, exponentiate the prefix-context of its suffixes.
-        for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
-            if(is_sorted[p_id]) // Skip partitions with already stable rankings.
+            PROFILE_SCOPE("cpu_gather");
+            for(p_id_t p_id = 0; p_id < p_; ++p_id)
             {
-                sorted_part++;
-                continue;
-            }
+                if(is_sorted[p_id]) // Skip partitions with already stable rankings.
+                {
+                    sorted_part++;
+                    continue;
+                }
 
-            exponentiate_prefix(p_id, k);
+                exponentiate_prefix(p_id, k);
+            }
         }
 
         // Sort-and-rank each partition.
-        for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
-            if(is_sorted[p_id]) // Skip partitions already fully-sorted.
-                continue;
+            PROFILE_SCOPE("sort_and_rank_dispatch");
+            for(p_id_t p_id = 0; p_id < p_; ++p_id)
+            {
+                if(is_sorted[p_id]) // Skip partitions already fully-sorted.
+                    continue;
 
-            sort_and_rank(p_id);
+                sort_and_rank(p_id);
+            }
         }
 
         // Wait for the streams to finish updating the local-ranks.
-        for(std::size_t s = 0; s < STREAM_C; ++s)
-            CUDA_CHECK(cudaStreamSynchronize(stream[s]));
+        {
+            PROFILE_SCOPE("stream_sync");
+            for(std::size_t s = 0; s < STREAM_C; ++s)
+                CUDA_CHECK(cudaStreamSynchronize(stream[s]));
+        }
 
 #ifdef STATS
         std::cerr << "Number of partitions fully-sorted by context-size " << k << ": " << sorted_part << ".\n";
@@ -693,10 +716,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 #endif
 
         // Update global-ranks based on the updated local-ranks.
-        update_global_ranks();
+        { PROFILE_SCOPE("update_global_ranks"); update_global_ranks();}
 
         // Refresh partitions' sortedness flags.
-        collect_sortedness_flags();
+        { PROFILE_SCOPE("collect_sortedness_flags");    collect_sortedness_flags();}
     }
 }
 
