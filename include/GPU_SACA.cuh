@@ -112,6 +112,9 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
+    // Sorts and initially ranks the `p_id`'th partition at the device.
+    void sort_and_init_rank(p_id_t p_id);
+
     // Sorts and ranks the `p_id`'th partition at the device.
     void sort_and_rank(p_id_t p_id);
 
@@ -231,6 +234,48 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
             if(local_hist[j])
                 atomicAdd(reinterpret_cast<unsigned long long*>(P_sz + j), static_cast<unsigned long long>(local_hist[j]));
     }
+}
+
+
+// Initializes the ranks of the distinct sort-key groups from the sorted array
+// `K` (of size `n`) into the 64-bit rank array `rank_u64` (of size `2 * n`).
+// The first key of a group is ranked by its offset into `K`, whereas the rest
+// of the keys in the group are ranked `0`. `K` and `rank_u64` will be byte-
+// aligned: the `i`'th sort-key from `K` has its rank at the `2 * i`'th index of
+// `rank_u64`—thus the odd indices in `rank_u64` will be 0-holes.
+// Grid organization: one thread per sort-key.
+// Shared memory layout: no dynamic memory usage.
+template <idx_t BLOCK_SZ>
+__global__
+void initial_rank_key_groups_kernel(const Sort_Key* const __restrict__ K, const idx_t n, uint64_t* const __restrict__ rank_u64, int* const __restrict__ is_unsorted)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+    // Shared memory pattern: one `int` indicator of sorted-ness.
+    __shared__ int sorted;  // Whether this block has already been fully-sorted or not.
+    if(threadIdx.x == 0)
+        sorted = 1;
+
+    __syncthreads();
+
+
+    rank_u64[2 * i + 1] = 0;    // Hole in the flag array corresponding to the `i`'th sort-key.
+    if(i == 0)
+        rank_u64[0] = 0;    // First group always starts at offset `0`.
+    else
+    {
+        const bool tie = (K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
+        rank_u64[2 * i] = (!tie ? i : 0);
+        if(tie)
+            sorted = 0;
+    }
+
+
+    __syncthreads();
+    if(threadIdx.x == 0 && !sorted)
+        *is_unsorted = 1;
 }
 
 
