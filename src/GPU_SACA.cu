@@ -4,6 +4,7 @@
 #include "Sort_Key.cuh"
 #include "utility.hpp"
 #include "utility.cuh"
+#include "env.hpp"
 #include "tests.hpp"
 #include "profile.hpp"
 
@@ -218,7 +219,8 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
-    const std::size_t budget = raw_budget / PART_SZ_IMBALANCE_SLACK;    // The actual partition-sizes, to be found out later, can be larger due to the probabilistic nature of pivoting.
+    const double imb_slack = env::get_f64("GPU_SACA_IMBALANCE_SLACK").value_or(PART_SZ_IMBALANCE_SLACK);
+    const std::size_t budget = raw_budget / imb_slack;  // The actual partition-sizes, to be found out later, can be larger due to the probabilistic nature of pivoting.
 
     idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);   // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
     while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.
@@ -243,7 +245,20 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
         p_sz_max = next_p_sz_max;
     }
 
-    const idx_t p_min = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
+    const idx_t p_min_from_budget = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
+    idx_t p_min = p_min_from_budget;
+
+    // Optional override of required minimum partition-count.
+    {
+        if(const auto p_target = env::get_u64("GPU_SACA_P_TARGET"); p_target)
+        {
+            if(*p_target < p_min_from_budget)
+                std::cerr << "The provided required minimum partition-count falls below device-budget minimum. Discarding it.";
+            else
+                p_min = *p_target;
+        }
+    }
+
     const auto p_sz_bound = (n_ + p_min - 1) / p_min;   // Maximum supported size of a partition based on the minimum partition-count.
 
     return p_sz_bound;
