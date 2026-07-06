@@ -7,6 +7,7 @@
 #include "Prefix_Key.cuh"
 #include "Partition.hpp"
 #include "Sort_Key.hpp"
+#include "Non_Unique_Rank_Marker.cuh"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -24,8 +25,6 @@ extern __constant__ Prefix_Key pivots_d[];
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
-// TODO:
-//      1. Tune the number of partitions.
 template <typename T_sym_>
 class GPU_SACA
 {
@@ -150,10 +149,6 @@ public:
 
     ~GPU_SACA();
 
-    // Returns `1` if `x` is in the upper half of `T_sym_`'s range, `0` otherwise.
-    __device__ __host__
-    static uint8_t quantize(T_sym_ x);
-
     // Builds the suffix array into `SA`.
     void build_SA(idx_t*& SA);
 };
@@ -269,8 +264,8 @@ void initialize_key_group_ranks_kernel( const Sort_Key* const __restrict__ K, co
 // array `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
 // respectively. The first entry of a group is ranked by its offset into `K`,
 // whereas the rest of the entries in the group are ranked `0`. `SA` is the
-// corresponding partial SA of the partition, and the MSBs of the suffix indices
-// with unique sort-keys are set to `1`, and to `0` otherwise.
+// corresponding partial SA of the partition, and the suffixes with non-unique
+// sort-keys are marked here.
 // Grid organization: one thread per sort-key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
@@ -310,7 +305,9 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
 
     const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
     const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
-    SA[i] = (!pre_tie && !suc_tie ? (SA[i] | MSB) : (SA[i] & ~MSB));
+    SA[i] = (pre_tie || suc_tie ?
+                Non_Unique_Rank_Marker::mark_non_unique(SA[i]) :
+                Non_Unique_Rank_Marker::mark_unique(SA[i]));
 
     __syncthreads();
     if(threadIdx.x == 0 && !sorted)
@@ -321,9 +318,8 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
 // Refines the primary-keys of the sorted array `K` (of size `n`) based on its
 // key groups' ranks `key_group_rank` and its primary-key groups' ranks
 // `primary_key_group_rank`. `SA` is the corresponding partial SA of the
-// partition with the MSBs of the suffix indices having unique ranks set to `1`,
-// while the rest ones' are set to `0`. These bit-markers are propagated here to
-// the primary-keys.
+// partition with the suffixes having non-unique ranks marked. These markers are
+// propagated here to the primary-keys.
 // Grid organization: one thread per sort-key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
@@ -337,24 +333,26 @@ void refine_primary_keys_kernel(Sort_Key* const __restrict__ K, const idx_t n,
         return;
 
     idx_t refined_primary = K[i].primary + (key_group_rank[i] - primary_key_group_rank[i]);
-    K[i].primary = ((SA[i] & MSB) ? (refined_primary | MSB) : refined_primary);
+    K[i].primary = (Non_Unique_Rank_Marker::is_non_unique(SA[i]) ?
+                    Non_Unique_Rank_Marker::mark_non_unique(refined_primary) :
+                    Non_Unique_Rank_Marker::mark_unique(refined_primary));
 }
 
 
-// Resets the MSB-markers of the `n` sort-keys `K` and the corresponding suffix
-// indices `SA` to `0`.
+// Resets the non-uniqueness markers of the `n` sort-keys `K` and the
+// corresponding suffixes `SA`.
 // Grid organization: one thread per sort-key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void reset_uniqueness_markers_kernel(Sort_Key* const __restrict__ K, idx_t* const __restrict__ SA, const idx_t n)
+void reset_non_uniqueness_markers_kernel(Sort_Key* const __restrict__ K, idx_t* const __restrict__ SA, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    K[i].primary &= ~MSB;
-    SA[i] &= ~MSB;
+    K[i].primary = Non_Unique_Rank_Marker::mark_unique(K[i].primary);
+    SA[i] = Non_Unique_Rank_Marker::mark_unique(SA[i]);
 }
 
 }

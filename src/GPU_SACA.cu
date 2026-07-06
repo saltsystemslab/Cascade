@@ -685,6 +685,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
 
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+
         rank_key_groups_and_primary_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (K, part_sz, key_group_rank, primary_key_group_rank, SA, is_unsorted_d + p_id);
         CUDA_CHECK(cudaGetLastError());
@@ -709,7 +710,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
             (K, part_sz, key_group_rank, primary_key_group_rank, SA);
         CUDA_CHECK(cudaGetLastError());
 
-        reset_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+        reset_non_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (K, SA, part_sz);
         CUDA_CHECK(cudaGetLastError());
     }
