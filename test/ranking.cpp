@@ -16,7 +16,7 @@ bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
 
     const auto* const rank = part.key();
     if(rank[0].primary != 0)
-        return false;
+        return false;   // TODO: this is incorrect when partition-compaction will be complete.
 
     bool valid = true;
 
@@ -34,7 +34,7 @@ bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
 
         // Ranking-check
         const bool eq_keys = (key[i].primary == key[i - 1].primary && key[i].secondary == key[i - 1].secondary);
-        const auto exp_rank = eq_keys ? rank[i - 1].primary : i;
+        const auto exp_rank = eq_keys ? rank[i - 1].primary : i;    // TODO: this is incorrect when partition-compaction will be complete.
         if(rank[i].primary != exp_rank)
             valid = false;
     }

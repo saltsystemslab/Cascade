@@ -598,8 +598,8 @@ void GPU_SACA<T_sym_>::sort_and_init_rank(const p_id_t p_id)
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
         Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
-        uint64_t* const key_group_rank_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][1 - sort_op_selector]);    // Ranks of the distinct key groups.
-        uint64_t* const key_rank_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][sort_op_selector]);  // Ranks of the distinct keys.
+        idx_t* const key_group_rank_u64 = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
+        idx_t* const key_rank_u64 = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // Ranks of the distinct keys.
 
 #ifdef TESTS    // Save the sorted keys for validation-testing, as they will be rewritten to with ranks.
         CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -608,7 +608,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank(const p_id_t p_id)
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
-        initial_rank_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+        initialize_key_group_ranks_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (K, part_sz, key_group_rank_u64);
         CUDA_CHECK(cudaGetLastError());
 
@@ -631,9 +631,9 @@ void GPU_SACA<T_sym_>::sort_and_init_rank(const p_id_t p_id)
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
+void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
 {
-    PROFILE_SCOPE_FMT("sort_and_rank_p%d", static_cast<int>(p_id));
+    PROFILE_SCOPE_FMT("sort_and_re_rank_and_filter_p%d", static_cast<int>(p_id));
 
     const std::size_t buf_id = p_id % STREAM_C; // Which set of buffers (and stream) to use for this partition.
     const auto part_sz = P_sz[p_id];    // Size of this partition.
@@ -662,12 +662,12 @@ void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
     }
 
 
-    // Rank the sort-output.
+    // Re-rank and filter the sort-output.
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
         Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
-        uint64_t* const off_u64 = reinterpret_cast<uint64_t*>(key_buf[buf_id][1 - sort_op_selector]);   // Offsets of distinct keys.
-        uint64_t* const rank_u64 = reinterpret_cast<uint64_t*>(K);  // Output ranks of the keys.
+        idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Distinct sort-key groups' ranks.
+        idx_t* const primary_key_group_rank = key_group_rank + part_sz; // Distinct primary-key groups' ranks.
 
 #ifdef TESTS    // Save the sorted keys for validation-testing, as they will be rewritten to with ranks.
         CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -675,17 +675,29 @@ void GPU_SACA<T_sym_>::sort_and_rank(const p_id_t p_id)
 
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
-        flag_distinct_key_offsets_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, off_u64, part_sz, is_unsorted_d + p_id);
+        rank_key_groups_and_primary_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (K, part_sz, key_group_rank, primary_key_group_rank, is_unsorted_d + p_id);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::InclusiveScan(
             workspace, workspace_sz,
-            off_u64, rank_u64,
+            key_group_rank, key_group_rank,
             cub::Max(),
-            2 * part_sz,
+            part_sz,
             stream[buf_id]
         ));
+
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+            workspace, workspace_sz,
+            primary_key_group_rank, primary_key_group_rank,
+            cub::Max(),
+            part_sz,
+            stream[buf_id]
+        ));
+
+        refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (K, part_sz, key_group_rank, primary_key_group_rank);
+        CUDA_CHECK(cudaGetLastError());
     }
 
 
@@ -764,7 +776,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 if(is_sorted[p_id]) // Skip partitions already fully-sorted.
                     continue;
 
-                sort_and_rank(p_id);
+                sort_and_re_rank_and_filter(p_id);
             }
         }
 
