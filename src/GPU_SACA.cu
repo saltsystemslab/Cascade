@@ -699,6 +699,10 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
         refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (K, part_sz, key_group_rank, primary_key_group_rank, SA);
         CUDA_CHECK(cudaGetLastError());
+
+        reset_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (K, SA, part_sz);
+        CUDA_CHECK(cudaGetLastError());
     }
 
 

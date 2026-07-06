@@ -321,7 +321,10 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
 // key groups' ranks `key_group_rank` and its primary-key groups' ranks
 // `primary_key_group_rank`. `SA` is the corresponding partial SA of the
 // partition with the MSBs of the suffix indices having unique ranks set to `1`,
-// while the rest ones' are set to `0`. These bit-markers are reset to `0` here.
+// while the rest ones' are set to `0`. These bit-markers are propagated here to
+// the primary-keys.
+// Grid organization: one thread per sort-key / suffix.
+// Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
 void refine_primary_keys_kernel(Sort_Key* const __restrict__ K, const idx_t n,
@@ -332,7 +335,24 @@ void refine_primary_keys_kernel(Sort_Key* const __restrict__ K, const idx_t n,
     if(i >= n)
         return;
 
-    K[i].primary += (key_group_rank[i] - primary_key_group_rank[i]);
+    idx_t refined_primary = K[i].primary + (key_group_rank[i] - primary_key_group_rank[i]);
+    K[i].primary = ((SA[i] & MSB) ? (refined_primary | MSB) : refined_primary);
+}
+
+
+// Resets the MSB-markers of the `n` sort-keys `K` and the corresponding suffix
+// indices `SA` to `0`.
+// Grid organization: one thread per sort-key / suffix.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void reset_uniqueness_markers_kernel(Sort_Key* const __restrict__ K, idx_t* const __restrict__ SA, const idx_t n)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+    K[i].primary &= ~MSB;
     SA[i] &= ~MSB;
 }
 
