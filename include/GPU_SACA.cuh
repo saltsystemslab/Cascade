@@ -267,13 +267,15 @@ void initialize_key_group_ranks_kernel( const Sort_Key* const __restrict__ K, co
 // Ranks the distinct sort-key groups and primary-key groups from the sorted
 // array `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
 // respectively. The first entry of a group is ranked by its offset into `K`,
-// whereas the rest of the entries in the group are ranked `0`.
+// whereas the rest of the entries in the group are ranked `0`. `is_unique_rank`
+// entries are filled with `1` for unique sort-keys, and with `0` otherwise.
 // Grid organization: one thread per sort-key.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
 void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __restrict__ K, const idx_t n,
                                                     idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
+                                                    uint32_t* const __restrict__ is_unique_rank,
                                                     int* const __restrict__ is_unsorted)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -303,6 +305,10 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
         if(key_tie)
             sorted = 0;
     }
+
+    const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
+    const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
+    is_unique_rank[i] = (!pre_tie && !suc_tie);
 
     __syncthreads();
     if(threadIdx.x == 0 && !sorted)
