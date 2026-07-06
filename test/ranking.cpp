@@ -7,7 +7,7 @@
 namespace gpu_saca::test
 {
 
-bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
+bool validate_local_ranking(const Partition& part, const Sort_Key* const key, const idx_t* const suf)
 {
     const auto sz = part.size();
     if(sz == 0)
@@ -44,12 +44,12 @@ bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
 }
 
 
-bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* const key)
+bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* const key, const idx_t* const suf)
 {
     idx_t p_off = 0;
     for(p_id_t p_id = 0; p_id < P.size(); ++p_id)
     {
-        if(!validate_local_ranking(P[p_id], key + p_off))
+        if(!validate_local_ranking(P[p_id], key + p_off, suf + p_off))
             return false;
 
         p_off += P[p_id].size();

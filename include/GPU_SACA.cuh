@@ -78,7 +78,8 @@ private:
     // }
 
 #ifdef TESTS
-    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those.
+    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the order of the sorted keys of all partitions, before the new ranks overwrite those.
+    idx_t* sorted_suf = nullptr;    // Single host-pinned buffer to save the order of the suffix indices corresponding to sorted keys of all partitions, before they get shuffled.
 #endif
 
     // Selects the set of pivots for the partitioning of the suffixes.
