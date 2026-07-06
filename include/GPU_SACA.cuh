@@ -267,15 +267,16 @@ void initialize_key_group_ranks_kernel( const Sort_Key* const __restrict__ K, co
 // Ranks the distinct sort-key groups and primary-key groups from the sorted
 // array `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
 // respectively. The first entry of a group is ranked by its offset into `K`,
-// whereas the rest of the entries in the group are ranked `0`. `is_unique_rank`
-// entries are filled with `1` for unique sort-keys, and with `0` otherwise.
-// Grid organization: one thread per sort-key.
+// whereas the rest of the entries in the group are ranked `0`. `SA` is the
+// corresponding partial SA of the partition, and the MSBs of the suffix indices
+// with unique sort-keys are set to `1`, and to `0` otherwise.
+// Grid organization: one thread per sort-key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
 void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __restrict__ K, const idx_t n,
                                                     idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                    uint32_t* const __restrict__ is_unique_rank,
+                                                    idx_t* const __restrict__ SA,
                                                     int* const __restrict__ is_unsorted)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -308,7 +309,7 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
 
     const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
     const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
-    is_unique_rank[i] = (!pre_tie && !suc_tie);
+    SA[i] = (!pre_tie && !suc_tie ? (SA[i] | MSB) : (SA[i] & ~MSB));
 
     __syncthreads();
     if(threadIdx.x == 0 && !sorted)
@@ -318,17 +319,21 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
 
 // Refines the primary-keys of the sorted array `K` (of size `n`) based on its
 // key groups' ranks `key_group_rank` and its primary-key groups' ranks
-// `primary_key_group_rank`.
+// `primary_key_group_rank`. `SA` is the corresponding partial SA of the
+// partition with the MSBs of the suffix indices having unique ranks set to `1`,
+// while the rest ones' are set to `0`. These bit-markers are reset to `0` here.
 template <idx_t BLOCK_SZ>
 __global__
 void refine_primary_keys_kernel(Sort_Key* const __restrict__ K, const idx_t n,
-                                const idx_t* const __restrict__ key_group_rank, const idx_t* const __restrict__ primary_key_group_rank)
+                                const idx_t* const __restrict__ key_group_rank, const idx_t* const __restrict__ primary_key_group_rank,
+                                idx_t* const __restrict__ SA)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
     K[i].primary += (key_group_rank[i] - primary_key_group_rank[i]);
+    SA[i] &= ~MSB;
 }
 
 }

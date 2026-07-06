@@ -668,7 +668,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
         Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
         idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Distinct sort-key groups' ranks.
         idx_t* const primary_key_group_rank = key_group_rank + part_sz; // Distinct primary-key groups' ranks.
-        uint32_t* const is_unique_rank = reinterpret_cast<uint32_t*>(suf_buf[buf_id][1 - sort_op_selector]);    // Indicators of rank-uniqueness.
+        idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
 
 #ifdef TESTS    // Save the sorted keys for validation-testing, as they will be rewritten to with ranks.
         CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -677,7 +677,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
         rank_key_groups_and_primary_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, part_sz, key_group_rank, primary_key_group_rank, is_unique_rank, is_unsorted_d + p_id);
+            (K, part_sz, key_group_rank, primary_key_group_rank, SA, is_unsorted_d + p_id);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -697,7 +697,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
         ));
 
         refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, part_sz, key_group_rank, primary_key_group_rank);
+            (K, part_sz, key_group_rank, primary_key_group_rank, SA);
         CUDA_CHECK(cudaGetLastError());
     }
 
