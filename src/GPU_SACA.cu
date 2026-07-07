@@ -22,6 +22,7 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <cassert>
 
 
 namespace gpu_saca
@@ -530,12 +531,14 @@ void GPU_SACA<T_sym_>::initial_rank()
     // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
+
+        unsorted = 0;
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
             if(P_sz[p_id] == 0) // Skip empty partitions.
                 continue;
 
-            sort_and_init_rank(p_id);
+            sort_and_init_rank_and_filter(p_id);
         }
     }
 
@@ -546,6 +549,13 @@ void GPU_SACA<T_sym_>::initial_rank()
         for(std::size_t s = 0; s < STREAM_C; ++s)
             CUDA_CHECK(cudaStreamSynchronize(stream[s]));
     }
+
+
+#ifdef STATS
+    constexpr idx_t ell = 16 / sizeof(T_sym_);
+    std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << "NaN" << "."
+                << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
+#endif
 
 
 #ifdef TESTS
@@ -566,9 +576,9 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::sort_and_init_rank(const p_id_t p_id)
+void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 {
-    PROFILE_SCOPE_FMT("sort_and_init_rank_p%d", static_cast<int>(p_id));
+    PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter%d", static_cast<int>(p_id));
 
     const std::size_t buf_id = p_id % STREAM_C; // Which set of buffers (and stream) to use for this partition.
     const auto part_sz = P_sz[p_id];    // Size of this partition.
@@ -597,35 +607,68 @@ void GPU_SACA<T_sym_>::sort_and_init_rank(const p_id_t p_id)
     }
 
 
-    // Rank the sort-output.
+    // Rank and filter the sort-output.
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
         Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
         idx_t* const key_group_rank_u64 = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
         idx_t* const key_rank_u64 = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // Ranks of the distinct keys.
+        idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
 
 #ifdef TESTS    // Save the sorted keys and the corresponding suffixes for validation-testing, as they will be rewritten to with ranks and then shuffled.
         {
-            const idx_t* const S = suf_buf[buf_id][sort_op_selector];
             CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(sorted_suf + P_off[p_id], S, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(sorted_suf + P_off[p_id], SA, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
 #endif
 
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
-        initialize_key_group_ranks_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, part_sz, key_group_rank_u64);
-        CUDA_CHECK(cudaGetLastError());
+        // Track groups with distinct sort-keys and rank by the groups' offsets.
+        {
+            initialize_key_group_ranks_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (K, part_sz, key_group_rank_u64);
+            CUDA_CHECK(cudaGetLastError());
 
-        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-            workspace, workspace_sz,
-            key_group_rank_u64, key_rank_u64,
-            cub::Max(),
-            2 * part_sz,
-            stream[buf_id]
-        ));
+            CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+                workspace, workspace_sz,
+                key_group_rank_u64, key_rank_u64,
+                cub::Max(),
+                2 * part_sz,
+                stream[buf_id]
+            ));
+        }
+
+
+        // Group non-unique rank sort-keys and suffixes to the head and the rest to the tail of the partition.
+        {
+            mark_non_unique_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (K, SA, part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            const auto key_split = thrust::partition(   thrust::device.on(stream[buf_id]),
+                                                        K, K + part_sz,
+                                                        Non_Unique_Rank_Marker{});
+            CUDA_CHECK(cudaGetLastError());
+
+            const auto suf_split = thrust::partition(   thrust::device.on(stream[buf_id]),
+                                                        SA, SA + part_sz,
+                                                        Non_Unique_Rank_Marker{});
+            CUDA_CHECK(cudaGetLastError());
+
+            assert(key_split - K == suf_split - SA);
+            (void)suf_split;
+            unsorted += (key_split - K);    // TODO: check if this accidentally introduces some serialization.
+        }
+
+
+        // Reset all (non)-uniqueness markers.
+        {
+            reset_non_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (K, SA, part_sz);
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
 
 
@@ -731,19 +774,18 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
                                                         Non_Unique_Rank_Marker{});
             CUDA_CHECK(cudaGetLastError());
 
-            // TODO: this handling doesn't go with the flow of the code. Rethink.
-            if(key_split - K != suf_split - SA)
-            {
-                std::cerr << "Fatal error at splitting non-unique/unique keys and suffixes. Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            unsorted += (key_split - K);
+            assert(key_split - K == suf_split - SA);
+            (void)suf_split;
+            unsorted += (key_split - K);    // TODO: check if this accidentally introduces some serialization.
         }
 
-        reset_non_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, SA, part_sz);
-        CUDA_CHECK(cudaGetLastError());
+
+        // Reset all (non)-uniqueness markers.
+        {
+            reset_non_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (K, SA, part_sz);
+            CUDA_CHECK(cudaGetLastError());
+        }
     }
 
 
@@ -790,7 +832,7 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
-    const idx_t ell = 16 / sizeof(T_sym_);
+    constexpr idx_t ell = 16 / sizeof(T_sym_);
     for(idx_t k = ell; k < n_; k *= 2)
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));

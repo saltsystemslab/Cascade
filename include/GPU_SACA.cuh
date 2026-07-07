@@ -115,11 +115,13 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
-    // Sorts and initially ranks the `p_id`'th partition at the device.
-    void sort_and_init_rank(p_id_t p_id);
+    // Sorts and initially ranks the `p_id`'th partition, and filters the
+    // entries in the partition with unique ranks by grouping them into the tail
+    // of the partition.
+    void sort_and_init_rank_and_filter(p_id_t p_id);
 
     // Sorts the `p_id`'th partition, re-ranks it based on the sorted order, and
-    // filters the suffixes in the partition with unique ranks by grouping them
+    // filters the entries in the partition with unique ranks by grouping them
     // into the tail of the partition.
     void sort_and_re_rank_and_filter(p_id_t p_id);
 
@@ -260,6 +262,29 @@ void initialize_key_group_ranks_kernel( const Sort_Key* const __restrict__ K, co
         rank_u64[0] = 0;    // First group always starts at offset `0`.
     else
         rank_u64[2 * i] = (K[i].primary != K[i - 1].primary || K[i].secondary != K[i - 1].secondary ? i : 0);
+}
+
+
+// Marks the non-unique sort-keys from sorted `K` and their corresponding
+// suffixes from `SA` (both of size `n`).
+// Grid organization: one thread per sort-key / suffix.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void mark_non_unique_keys_kernel(Sort_Key* const __restrict__ K, idx_t* const __restrict__ SA, const idx_t n)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+    const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
+    const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
+    K[i].primary = (pre_tie || suc_tie ?
+                        Non_Unique_Rank_Marker::mark_non_unique(K[i].primary) :
+                        Non_Unique_Rank_Marker::mark_unique(K[i].primary));
+    SA[i] = (pre_tie || suc_tie ?
+                Non_Unique_Rank_Marker::mark_non_unique(SA[i]) :
+                Non_Unique_Rank_Marker::mark_unique(SA[i]));
 }
 
 
