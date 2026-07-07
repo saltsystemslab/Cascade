@@ -12,6 +12,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <atomic>
 #include <vector>
 #include <limits>
 
@@ -55,6 +56,8 @@ private:
     int* is_unsorted_d;         // Device-side marker for whether a partition is still unsorted or not.
 
     idx_t* rho; // Global rank of the suffixes.
+
+    std::atomic<idx_t> unsorted; // Count of suffixes that have not yet received their final rank.
 
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.

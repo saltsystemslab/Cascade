@@ -10,6 +10,7 @@
 
 #include "omp.h"
 #include "cub/cub.cuh"
+#include "thrust/partition.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -686,29 +687,59 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
-        rank_key_groups_and_primary_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, part_sz, key_group_rank, primary_key_group_rank, SA, is_unsorted_d + p_id);
-        CUDA_CHECK(cudaGetLastError());
+        // Track groups with distinct sort-keys and distinct primary-keys, and mark non-unique suffixes.
+        {
+            rank_key_groups_and_primary_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (K, part_sz, key_group_rank, primary_key_group_rank, SA, is_unsorted_d + p_id);
+            CUDA_CHECK(cudaGetLastError());
 
-        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-            workspace, workspace_sz,
-            key_group_rank, key_group_rank,
-            cub::Max(),
-            part_sz,
-            stream[buf_id]
-        ));
+            CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+                workspace, workspace_sz,
+                key_group_rank, key_group_rank,
+                cub::Max(),
+                part_sz,
+                stream[buf_id]
+            ));
 
-        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-            workspace, workspace_sz,
-            primary_key_group_rank, primary_key_group_rank,
-            cub::Max(),
-            part_sz,
-            stream[buf_id]
-        ));
+            CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+                workspace, workspace_sz,
+                primary_key_group_rank, primary_key_group_rank,
+                cub::Max(),
+                part_sz,
+                stream[buf_id]
+            ));
+        }
 
-        refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K, part_sz, key_group_rank, primary_key_group_rank, SA);
-        CUDA_CHECK(cudaGetLastError());
+
+        // Refine rankings to finer resolution based on the in-primary-key-group offsets of different sort-key groups, and mark non-unique sort-keys.
+        {
+            refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (K, part_sz, key_group_rank, primary_key_group_rank, SA);
+            CUDA_CHECK(cudaGetLastError());
+        }
+
+
+        // Group non-unique rank sort-keys and suffixes to the head and the rest to the tail of the partition.
+        {
+            const auto key_split = thrust::partition(   thrust::device.on(stream[buf_id]),
+                                                        K, K + part_sz,
+                                                        Non_Unique_Rank_Marker{});
+            CUDA_CHECK(cudaGetLastError());
+
+            const auto suf_split = thrust::partition(   thrust::device.on(stream[buf_id]),
+                                                        SA, SA + part_sz,
+                                                        Non_Unique_Rank_Marker{});
+            CUDA_CHECK(cudaGetLastError());
+
+            // TODO: this handling doesn't go with the flow of the code. Rethink.
+            if(key_split - K != suf_split - SA)
+            {
+                std::cerr << "Fatal error at splitting non-unique/unique keys and suffixes. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+
+            unsorted += (key_split - K);
+        }
 
         reset_non_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (K, SA, part_sz);
@@ -786,6 +817,8 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Sort-and-rank each partition.
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
+
+            unsorted = 0;
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
             {
                 if(is_sorted[p_id]) // Skip partitions already fully-sorted.
@@ -803,7 +836,8 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         }
 
 #ifdef STATS
-        std::cerr << "Number of partitions fully-sorted by context-size " << k << ": " << sorted_part << ".\n";
+        std::cerr   << "Number of partitions fully-sorted by context-size " << k << ": " << sorted_part << "."
+                    << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
 #endif
 
         if(sorted_part == p_)   // All partitions have already been sorted by the earlier prefix-contexts.
