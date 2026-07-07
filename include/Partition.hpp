@@ -18,7 +18,8 @@ private:
 
     idx_t* suf_;    // The suffixes in this partition.
     Sort_Key* key_; // The sort-keys of the suffixes in the partition.
-    const idx_t sz_;    // Size of the partition.
+    const idx_t cap_;   // Capacity of the partition.
+    idx_t sz_;  // Current size of the partition.
 
 public:
 
@@ -44,7 +45,10 @@ public:
     // Returns pointer to the (immutable) sort-key data of the partition.
     auto key() const { return key_; }
 
-    // Returns the size of the partition.
+    // Returns the capacity of the partition.
+    auto capacity() const { return cap_; }
+
+    // Returns the current size of the partition.
     auto size() const { return sz_; }
 
     // Returns the `i`'th suffix in the partition.
