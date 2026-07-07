@@ -843,15 +843,21 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
     SA = rho;
     rho = nullptr;
 
-    // Copy over the sorted partitions to their appropriate offsets.
-    #pragma omp parallel for schedule(static)
+    // Place the partitions at their appropriate offsets and shuffle the in-
+    // partition suffixes per their local-rank.
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
         const auto& part = P_[p_id];
-        const auto sz    = P_sz[p_id];
-        const auto off   = P_off[p_id];
+        const auto sz = P_sz[p_id];
+        const auto off = P_off[p_id];
 
-        std::memcpy(SA + off, part.suf(), sz * sizeof(idx_t));
+        #pragma omp parallel for schedule(static)
+        for(idx_t j = 0; j < sz; ++j)
+        {
+            const auto suf = part.suf(j);
+            const auto r = part.key(j).primary;
+            SA[off + r] = suf;
+        }
     }
 }
 
