@@ -276,15 +276,16 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 {
-    cub::DoubleBuffer<Sort_Key> keys;
-    cub::DoubleBuffer<idx_t> vals;
+    cub::DoubleBuffer<Sort_Key> keys_dummy(nullptr, nullptr);
+    cub::DoubleBuffer<idx_t> vals_dummy(nullptr, nullptr);
 
     std::size_t sort_workspace_sz = 0;
     CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
         nullptr, sort_workspace_sz,
-        keys, vals,
+        keys_dummy, vals_dummy,
         part_sz,
-        Sort_Key_Decomposer{}
+        Sort_Key_Decomposer{},
+        0, 128
     ));
 
     std::size_t scan_workspace_sz = 0;
@@ -295,7 +296,18 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
         2 * part_sz
     ));
 
-    return std::max(sort_workspace_sz, scan_workspace_sz);
+    std::size_t part_workspace_sz = 0;
+    auto in_zip  = thrust::make_zip_iterator(thrust::make_tuple(static_cast<Sort_Key*>(nullptr), static_cast<idx_t*>(nullptr)));
+    auto zip_out = thrust::make_zip_iterator(thrust::make_tuple(static_cast<Sort_Key*>(nullptr), static_cast<idx_t*>(nullptr)));
+    CUDA_CHECK(cub::DevicePartition::Flagged(
+        nullptr, part_workspace_sz,
+        in_zip, static_cast<uint8_t*>(nullptr),
+        zip_out,
+        static_cast<idx_t*>(nullptr),
+        part_sz
+    ));
+
+    return std::max({sort_workspace_sz, scan_workspace_sz, part_workspace_sz});
 }
 
 
