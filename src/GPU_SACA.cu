@@ -89,7 +89,10 @@ GPU_SACA<T_sym_>::~GPU_SACA()
         }
 
         CUDA_CHECK(cudaFree(workspace_buf[b]));
+        CUDA_CHECK(cudaFree(activeness_buf[b]));
     }
+
+    CUDA_CHECK(cudaFree(active_set_sz_d));
 
 #ifdef TESTS
     CUDA_CHECK(deallocate_host(sorted_key));
@@ -219,7 +222,8 @@ void GPU_SACA<T_sym_>::select_pivots()
 template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
-    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Sort_Key) + sizeof(idx_t));   // Device-space requirement for a suffix in its partition: it occupies space in two buffers for the radix-sort.
+    // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sort, plus one flag byte to mark its activeness in subsequent steps.
+    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Sort_Key) + sizeof(idx_t)) + sizeof(uint8_t);
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
@@ -298,43 +302,24 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 template <typename T_sym_>
 bool GPU_SACA<T_sym_>::allocate_device_space()
 {
-    // Each suffix in each stream needs: 1. `DoubleBuffer` keys, input and output (2 x `Sort_key`);
-    //      2. `DoubleBuffer` values, input and output (2 x `idx_t`).
+    // Each suffix in each stream needs:
+    //      1. `cub::DoubleBuffer` keys, input and output (2 x `Sort_key`);
+    //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
+    //      3. activeness-flag, output (1 x `uint8_t`).
     // `cub` itself requires a workspace for sort and scan.
-    // Memory constraint: STREAM_C x (2 x P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+    // Memory constraint: STREAM_C x (P_sz_max x (2 x (sizeof(Sort_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
     const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
 
     // Compute required workspaces-sizes for the sort and the scan.
-    {
-        cub::DoubleBuffer<Sort_Key> keys;
-        cub::DoubleBuffer<idx_t> vals;
-        std::size_t sort_workspace_sz = 0;
-        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            nullptr, sort_workspace_sz,
-            keys, vals,
-            P_sz_max,
-            Sort_Key_Decomposer{}
-        ));
-
-        std::size_t scan_workspace_sz = 0;
-        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-            nullptr, scan_workspace_sz,
-            static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
-            cub::Max(),
-            2 * P_sz_max
-        ));
-
-        workspace_sz = std::max(sort_workspace_sz, scan_workspace_sz);
-    }
-
+    workspace_sz = cub_workspace_size(P_sz_max);
 
     // Check if the device has enough space for the buffers.
     {
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = 2 * P_sz_max * (sizeof(Sort_Key) + sizeof(idx_t)) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (sizeof(Sort_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -355,9 +340,11 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
             }
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
+            CUDA_CHECK(cudaMalloc(&activeness_buf[b], P_sz_max * sizeof(uint8_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&is_unsorted_d, p_ * sizeof(int)));
+        CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
     }
 
     return true;
@@ -504,6 +491,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         P_sz.resize(p_);
         CUDA_CHECK(cudaMemcpy(P_sz.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(P_sz_d));
+
+        active_set_sz.insert(active_set_sz.end(), P_sz.cbegin(), P_sz.cend());  // Fill up the initial active-set sizes of the partitions.
 
         P_off.resize(p_);
         P_off[0] = 0;

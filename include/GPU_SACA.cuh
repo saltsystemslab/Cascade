@@ -57,6 +57,7 @@ private:
 
     idx_t* rho; // Global rank of the suffixes.
 
+    std::vector<idx_t> active_set_sz;   // Sizes of the current active-sets of the partitions.
     std::atomic<idx_t> unsorted; // Count of suffixes that have not yet received their final rank.
 
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
@@ -77,6 +78,9 @@ private:
         idx_t* suf_buf[STREAM_C][2];    // Input and output buffers for suffixes, per stream.
         void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;       // Size of the `cub` workspace.
+
+        uint8_t* activeness_buf[STREAM_C];  // Activeness-marker buffers for suffixes, per stream.
+        idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
     // }
 
 #ifdef TESTS
