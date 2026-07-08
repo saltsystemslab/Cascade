@@ -7,7 +7,6 @@
 #include "Prefix_Key.cuh"
 #include "Partition.hpp"
 #include "Sort_Key.hpp"
-#include "Non_Unique_Rank_Marker.cuh"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -240,6 +239,7 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 
 // Initializes the ranks of the distinct sort-key groups from the sorted array
 // `K` (of size `n`) into the 64-bit rank array `rank_u64` (of size `2 * n`).
+// Also computes the sort-keys' activeness-flags (for future) into `is_active`.
 // The first key of a group is ranked by its offset into `K`, whereas the rest
 // of the keys in the group are ranked `0`. `K` and `rank_u64` will be byte-
 // aligned: the `i`'th sort-key from `K` has its rank at the `2 * i`'th index of
@@ -249,7 +249,8 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 template <idx_t BLOCK_SZ>
 __global__
 void initialize_key_group_ranks_kernel( const Sort_Key* const __restrict__ K, const idx_t n,
-                                        idx_t* const __restrict__ rank_u64)
+                                        idx_t* const __restrict__ rank_u64,
+                                        uint8_t* const __restrict__ is_active)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -260,45 +261,25 @@ void initialize_key_group_ranks_kernel( const Sort_Key* const __restrict__ K, co
         rank_u64[0] = 0;    // First group always starts at offset `0`.
     else
         rank_u64[2 * i] = (K[i].primary != K[i - 1].primary || K[i].secondary != K[i - 1].secondary ? i : 0);
-}
-
-
-// Marks the non-unique sort-keys from sorted `K` and their corresponding
-// suffixes from `SA` (both of size `n`).
-// Grid organization: one thread per sort-key / suffix.
-// Shared memory layout: no usage.
-template <idx_t BLOCK_SZ>
-__global__
-void mark_non_unique_keys_kernel(Sort_Key* const __restrict__ K, idx_t* const __restrict__ SA, const idx_t n)
-{
-    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
-    if(i >= n)
-        return;
 
     const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
     const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
-    K[i].primary = (pre_tie || suc_tie ?
-                        Non_Unique_Rank_Marker::mark_non_unique(K[i].primary) :
-                        Non_Unique_Rank_Marker::mark_unique(K[i].primary));
-    SA[i] = (pre_tie || suc_tie ?
-                Non_Unique_Rank_Marker::mark_non_unique(SA[i]) :
-                Non_Unique_Rank_Marker::mark_unique(SA[i]));
+    is_active[i] = (pre_tie || suc_tie);
 }
 
 
 // Ranks the distinct sort-key groups and primary-key groups from the sorted
 // array `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
-// respectively. The first entry of a group is ranked by its offset into `K`,
-// whereas the rest of the entries in the group are ranked `0`. `SA` is the
-// corresponding partial SA of the partition, and the suffixes with non-unique
-// sort-keys are marked here.
+// respectively. Also computes the sort-keys' activeness-flags (for future) into
+// `is_active`. The first entry of a group is ranked by its offset into `K`,
+// whereas the rest of the entries in the group are ranked `0`.
 // Grid organization: one thread per sort-key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
 void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __restrict__ K, const idx_t n,
                                                     idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                    idx_t* const __restrict__ SA)
+                                                    uint8_t* const __restrict__ is_active)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -320,50 +301,25 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
 
     const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
     const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
-    SA[i] = (pre_tie || suc_tie ?
-                Non_Unique_Rank_Marker::mark_non_unique(SA[i]) :
-                Non_Unique_Rank_Marker::mark_unique(SA[i]));
+    is_active[i] = (pre_tie || suc_tie);
 }
 
 
 // Refines the primary-keys of the sorted array `K` (of size `n`) based on its
 // key groups' ranks `key_group_rank` and its primary-key groups' ranks
-// `primary_key_group_rank`. `SA` is the corresponding partial SA of the
-// partition with the suffixes having non-unique ranks marked. These markers are
-// propagated here to the primary-keys.
+// `primary_key_group_rank`.
 // Grid organization: one thread per sort-key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
 void refine_primary_keys_kernel(Sort_Key* const __restrict__ K, const idx_t n,
-                                const idx_t* const __restrict__ key_group_rank, const idx_t* const __restrict__ primary_key_group_rank,
-                                idx_t* const __restrict__ SA)
+                                const idx_t* const __restrict__ key_group_rank, const idx_t* const __restrict__ primary_key_group_rank)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    idx_t refined_primary = K[i].primary + (key_group_rank[i] - primary_key_group_rank[i]);
-    K[i].primary = (Non_Unique_Rank_Marker::is_non_unique(SA[i]) ?
-                    Non_Unique_Rank_Marker::mark_non_unique(refined_primary) :
-                    Non_Unique_Rank_Marker::mark_unique(refined_primary));
-}
-
-
-// Resets the non-uniqueness markers of the `n` sort-keys `K` and the
-// corresponding suffixes `SA`.
-// Grid organization: one thread per sort-key / suffix.
-// Shared memory layout: no usage.
-template <idx_t BLOCK_SZ>
-__global__
-void reset_non_uniqueness_markers_kernel(Sort_Key* const __restrict__ K, idx_t* const __restrict__ SA, const idx_t n)
-{
-    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
-    if(i >= n)
-        return;
-
-    K[i].primary = Non_Unique_Rank_Marker::mark_unique(K[i].primary);
-    SA[i] = Non_Unique_Rank_Marker::mark_unique(SA[i]);
+    K[i].primary += (key_group_rank[i] - primary_key_group_rank[i]);
 }
 
 }

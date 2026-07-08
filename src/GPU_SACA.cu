@@ -7,6 +7,7 @@
 #include "env.hpp"
 #include "tests.hpp"
 #include "profile.hpp"
+#include "Non_Unique_Rank_Marker.cuh"   // TODO: temporary.
 
 #include "omp.h"
 #include "cub/cub.cuh"
@@ -617,7 +618,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
         // Track groups with distinct sort-keys and rank by the groups' offsets.
         {
             initialize_key_group_ranks_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, key_group_rank_u64);
+                (K, part_sz, key_group_rank_u64, nullptr);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -632,10 +633,6 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 
         // Group non-unique rank sort-keys and suffixes to the head and the rest to the tail of the partition.
         {
-            mark_non_unique_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, SA, part_sz);
-            CUDA_CHECK(cudaGetLastError());
-
             const auto key_split = thrust::partition(   thrust::device.on(stream[buf_id]),
                                                         K, K + part_sz,
                                                         Non_Unique_Rank_Marker{});
@@ -649,14 +646,6 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
             assert(key_split - K == suf_split - SA);
             (void)suf_split;
             unsorted += (key_split - K);    // TODO: check if this accidentally introduces some serialization.
-        }
-
-
-        // Reset all (non)-uniqueness markers.
-        {
-            reset_non_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, SA, part_sz);
-            CUDA_CHECK(cudaGetLastError());
         }
     }
 
@@ -722,7 +711,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
         // Track groups with distinct sort-keys and distinct primary-keys, and mark non-unique suffixes.
         {
             rank_key_groups_and_primary_key_groups_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, key_group_rank, primary_key_group_rank, SA);
+                (K, part_sz, key_group_rank, primary_key_group_rank, static_cast<uint8_t*>(nullptr));
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -746,7 +735,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
         // Refine rankings to finer resolution based on the in-primary-key-group offsets of different sort-key groups, and mark non-unique sort-keys.
         {
             refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, key_group_rank, primary_key_group_rank, SA);
+                (K, part_sz, key_group_rank, primary_key_group_rank);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -766,14 +755,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
             assert(key_split - K == suf_split - SA);
             (void)suf_split;
             unsorted += (key_split - K);    // TODO: check if this accidentally introduces some serialization.
-        }
-
-
-        // Reset all (non)-uniqueness markers.
-        {
-            reset_non_uniqueness_markers_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, SA, part_sz);
-            CUDA_CHECK(cudaGetLastError());
         }
     }
 
