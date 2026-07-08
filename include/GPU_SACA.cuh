@@ -52,9 +52,6 @@ private:
     std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
 
-    std::vector<int> is_sorted; // Whether a partition has been fully-sorted or not.
-    int* is_unsorted_d;         // Device-side marker for whether a partition is still unsorted or not.
-
     idx_t* rho; // Global rank of the suffixes.
 
     std::vector<idx_t> active_set_sz;   // Sizes of the current active-sets of the partitions.
@@ -128,9 +125,6 @@ private:
     // filters the entries in the partition with unique ranks by grouping them
     // into the tail of the partition.
     void sort_and_re_rank_and_filter(p_id_t p_id);
-
-    // Copies the partitions' sortedness flags from the device to the host.
-    void collect_sortedness_flags();
 
     // Updates the global ranks of the suffixes based on the current status of
     // the partitions.
@@ -304,19 +298,11 @@ template <idx_t BLOCK_SZ>
 __global__
 void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __restrict__ K, const idx_t n,
                                                     idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                    idx_t* const __restrict__ SA,
-                                                    int* const __restrict__ is_unsorted)
+                                                    idx_t* const __restrict__ SA)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
-
-    // Shared memory pattern: one `int` indicator of sorted-ness.
-    __shared__ int sorted;  // Whether this block has already been fully-sorted or not.
-    if(threadIdx.x == 0)
-        sorted = 1;
-
-    __syncthreads();
 
     if(i == 0)
     {
@@ -330,9 +316,6 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
         const bool primary_key_tie = (K[i].primary == K[i - 1].primary);
         key_group_rank[i] = (!key_tie ? i : 0);
         primary_key_group_rank[i] = (!primary_key_tie ? i : 0);
-
-        if(key_tie)
-            sorted = 0;
     }
 
     const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
@@ -340,10 +323,6 @@ void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __rest
     SA[i] = (pre_tie || suc_tie ?
                 Non_Unique_Rank_Marker::mark_non_unique(SA[i]) :
                 Non_Unique_Rank_Marker::mark_unique(SA[i]));
-
-    __syncthreads();
-    if(threadIdx.x == 0 && !sorted)
-        *is_unsorted = 1;
 }
 
 
