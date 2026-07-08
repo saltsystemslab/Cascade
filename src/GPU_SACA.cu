@@ -7,11 +7,10 @@
 #include "env.hpp"
 #include "tests.hpp"
 #include "profile.hpp"
-#include "Non_Unique_Rank_Marker.cuh"   // TODO: temporary.
 
 #include "omp.h"
 #include "cub/cub.cuh"
-#include "thrust/partition.h"
+#include "thrust/iterator/zip_iterator.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -633,19 +632,6 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 
         // Group non-unique rank sort-keys and suffixes to the head and the rest to the tail of the partition.
         {
-            const auto key_split = thrust::partition(   thrust::device.on(stream[buf_id]),
-                                                        K, K + part_sz,
-                                                        Non_Unique_Rank_Marker{});
-            CUDA_CHECK(cudaGetLastError());
-
-            const auto suf_split = thrust::partition(   thrust::device.on(stream[buf_id]),
-                                                        SA, SA + part_sz,
-                                                        Non_Unique_Rank_Marker{});
-            CUDA_CHECK(cudaGetLastError());
-
-            assert(key_split - K == suf_split - SA);
-            (void)suf_split;
-            unsorted += (key_split - K);    // TODO: check if this accidentally introduces some serialization.
         }
     }
 
@@ -742,19 +728,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
 
         // Group non-unique rank sort-keys and suffixes to the head and the rest to the tail of the partition.
         {
-            const auto key_split = thrust::partition(   thrust::device.on(stream[buf_id]),
-                                                        K, K + part_sz,
-                                                        Non_Unique_Rank_Marker{});
-            CUDA_CHECK(cudaGetLastError());
-
-            const auto suf_split = thrust::partition(   thrust::device.on(stream[buf_id]),
-                                                        SA, SA + part_sz,
-                                                        Non_Unique_Rank_Marker{});
-            CUDA_CHECK(cudaGetLastError());
-
-            assert(key_split - K == suf_split - SA);
-            (void)suf_split;
-            unsorted += (key_split - K);    // TODO: check if this accidentally introduces some serialization.
         }
     }
 
