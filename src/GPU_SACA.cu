@@ -545,13 +545,6 @@ void GPU_SACA<T_sym_>::initial_rank()
     }
 
 
-#ifdef STATS
-    constexpr idx_t ell = 16 / sizeof(T_sym_);
-    std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << "NaN" << "."
-                << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
-#endif
-
-
 #ifdef TESTS
     std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
 #endif
@@ -561,10 +554,24 @@ void GPU_SACA<T_sym_>::initial_rank()
     { PROFILE_SCOPE("update_global_ranks");     update_global_ranks();}
 
     // Resize the partitions to their active-set size.
+    // NB: this compaction must land *after* the preceding global rankings have been updated.
     {
         PROFILE_SCOPE("collect_active_set_sizes");
         CUDA_CHECK(cudaMemcpy(P_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
     }
+
+
+#ifdef STATS
+    {
+        constexpr idx_t ell = 16 / sizeof(T_sym_);
+        p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `ell`).
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+            sorted_part += (P_sz[p_id] == 0);
+
+        std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
+                    << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
+    }
+#endif
 }
 
 
