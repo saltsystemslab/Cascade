@@ -909,7 +909,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
         const auto& part = P_[p_id];
-        const auto sz = P_sz[p_id];
+        const auto sz = part.capacity();
         const auto off = P_off[p_id];
 
         #pragma omp parallel for schedule(static)
