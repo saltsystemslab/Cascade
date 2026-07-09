@@ -526,7 +526,6 @@ void GPU_SACA<T_sym_>::initial_rank()
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
 
-        unsorted = 0;
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
             if(P_sz[p_id] == 0) // Skip empty partitions.
@@ -564,9 +563,11 @@ void GPU_SACA<T_sym_>::initial_rank()
 #ifdef STATS
     {
         constexpr idx_t ell = 16 / sizeof(T_sym_);
-        p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `ell`).
+        p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `ell`).
+        idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            sorted_part += (P_sz[p_id] == 0);
+            sorted_part += (P_sz[p_id] == 0),
+            unsorted += P_sz[p_id];
 
         std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
@@ -831,8 +832,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Sort-and-rank each partition.
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
-
-            unsorted = 0;
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
             {
                 if(P_sz[p_id] == 0) // Skip partitions with empty active-set.
@@ -865,10 +864,13 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         }
 
 
+        // Check for early-exit.
         {
-            p_id_t sorted_part = 0; // Number of partitions that are already fully-sorted (by prefix-context size `2k`).
+            p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `2k`).
+            idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                sorted_part += (P_sz[p_id] == 0);
+                sorted_part += (P_sz[p_id] == 0),
+                unsorted += P_sz[p_id];
 #ifdef STATS
             std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << "."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
