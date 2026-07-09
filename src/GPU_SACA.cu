@@ -582,7 +582,7 @@ void GPU_SACA<T_sym_>::initial_rank()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 {
-    PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter%d", static_cast<int>(p_id));
+    PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter_p%d", static_cast<int>(p_id));
 
     const std::size_t buf_id = p_id % STREAM_C; // Which set of buffers (and stream) to use for this partition.
     const auto part_sz = P_sz[p_id];    // Size of this partition.
