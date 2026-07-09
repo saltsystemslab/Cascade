@@ -87,7 +87,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
         }
 
         CUDA_CHECK(cudaFree(workspace_buf[b]));
-        CUDA_CHECK(cudaFree(activeness_buf[b]));
+        CUDA_CHECK(cudaFree(is_active_buf[b]));
     }
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
@@ -350,7 +350,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
             }
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
-            CUDA_CHECK(cudaMalloc(&activeness_buf[b], P_sz_max * sizeof(uint8_t)));
+            CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
@@ -501,8 +501,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         CUDA_CHECK(cudaMemcpy(P_sz.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(P_sz_d));
 
-        active_set_sz.insert(active_set_sz.end(), P_sz.cbegin(), P_sz.cend());  // Fill up the initial active-set sizes of the partitions.
-
         P_off.resize(p_);
         P_off[0] = 0;
         for(p_id_t p_id = 1; p_id < p_; ++p_id)
@@ -524,7 +522,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
-    // Move partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and move the output to host.
+    // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
 
@@ -561,6 +559,12 @@ void GPU_SACA<T_sym_>::initial_rank()
 
     // Compute the initial global ranking.
     { PROFILE_SCOPE("update_global_ranks");     update_global_ranks();}
+
+    // Resize the partitions to their active-set size.
+    {
+        PROFILE_SCOPE("collect_active_set_sizes");
+        CUDA_CHECK(cudaMemcpy(P_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
+    }
 }
 
 
@@ -575,15 +579,16 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
     cub::DoubleBuffer<Sort_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);    // Input and output buffers for the sort-keys of suffixes at the device.
     cub::DoubleBuffer<idx_t>    suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);    // Input and output buffers for the suffixes at the device.
     auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
+    auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
 
-    // Asynchronously transfer this partition to the device.
+    // Asynchronously upload this partition to the device.
     {
         CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], P_[p_id].key(), part_sz * sizeof(Sort_Key), cudaMemcpyHostToDevice, stream[buf_id]));
         CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], P_[p_id].suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
     }
 
 
-    // Sort the partition.
+    // Sort the partition by the initial packed prefixes.
     {
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
             workspace, workspace_sz,
@@ -599,13 +604,13 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
     // Rank and filter the sort-output.
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
-        Sort_Key* const K = key_buf[buf_id][sort_op_selector];  // The sort-output.
+        const Sort_Key* const K         = key_buf[buf_id][sort_op_selector];    // The sort-output.
         idx_t* const key_group_rank_u64 = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
-        idx_t* const key_rank_u64 = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // Ranks of the distinct keys.
-        idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
+        idx_t* const key_rank_u64       = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);  // Ranks of the distinct keys.
 
 #ifdef TESTS    // Save the sorted keys and the corresponding suffixes for validation-testing, as they will be rewritten to with ranks and then shuffled.
         {
+            const idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
             CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(sorted_suf + P_off[p_id], SA, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
@@ -614,10 +619,10 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
-        // Track groups with distinct sort-keys and rank by the groups' offsets.
+        // Track groups with distinct sort-keys and rank by the groups' offsets, and mark non-unique keys.
         {
-            initialize_key_group_ranks_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, key_group_rank_u64, nullptr);
+            initialize_key_group_ranks_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (K, part_sz, key_group_rank_u64, is_active);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -632,14 +637,30 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 
         // Group non-unique rank sort-keys and suffixes to the head and the rest to the tail of the partition.
         {
+            const Sort_Key* const K_in  = key_buf[buf_id][sort_op_selector];
+            const idx_t* const SA_in    = suf_buf[buf_id][sort_op_selector];
+            Sort_Key* const K_out       = key_buf[buf_id][1 - sort_op_selector];
+            idx_t* const SA_out         = suf_buf[buf_id][1 - sort_op_selector];
+
+            CUDA_CHECK(cub::DevicePartition::Flagged(
+                workspace, workspace_sz,
+                thrust::make_zip_iterator(thrust::make_tuple(K_in, SA_in)),
+                is_active,
+                thrust::make_zip_iterator(thrust::make_tuple(K_out, SA_out)),
+                active_set_sz_d + p_id,
+                part_sz,
+                stream[buf_id]
+            ));
         }
     }
 
 
-    // Asynchronously copy the updated partition to host.
+    // Asynchronously download the updated partition to host.
     {
-        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), key_buf[buf_id][sort_op_selector], part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].suf(), suf.Current(), part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        const Sort_Key* const K_out   = key_buf[buf_id][1 - sort_op_selector];
+        const idx_t* const SA_out     = suf_buf[buf_id][1 - sort_op_selector];
+        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), K_out, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].suf(), SA_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 

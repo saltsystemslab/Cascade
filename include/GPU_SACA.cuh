@@ -48,12 +48,11 @@ private:
     p_id_t* P_id;   // Partition-IDs of the suffixes.
 
     std::vector<Partition> P_;  // The suffix partitions.
-    std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
+    std::vector<idx_t> P_sz;    // Sizes of the suffix partitions; tracks the active-set sizes of the partitions instead of the full size.
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
 
     idx_t* rho; // Global rank of the suffixes.
 
-    std::vector<idx_t> active_set_sz;   // Sizes of the current active-sets of the partitions.
     std::atomic<idx_t> unsorted; // Count of suffixes that have not yet received their final rank.
 
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
@@ -75,7 +74,7 @@ private:
         void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;       // Size of the `cub` workspace.
 
-        uint8_t* activeness_buf[STREAM_C];  // Activeness-marker buffers for suffixes, per stream.
+        uint8_t* is_active_buf[STREAM_C];   // Activeness-marker buffers for suffixes, per stream.
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
     // }
 
@@ -248,9 +247,9 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void initialize_key_group_ranks_kernel( const Sort_Key* const __restrict__ K, const idx_t n,
-                                        idx_t* const __restrict__ rank_u64,
-                                        uint8_t* const __restrict__ is_active)
+void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Sort_Key* const __restrict__ K, const idx_t n,
+                                                                idx_t* const __restrict__ rank_u64,
+                                                                uint8_t* const __restrict__ is_active)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
