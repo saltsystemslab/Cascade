@@ -234,17 +234,17 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);   // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
     while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.
     {
-        const auto workspace_sz = cub_workspace_size(p_sz_max);
-        if(STREAM_C * (p_sz_max * bytes_per_suf + workspace_sz) <= budget)
+        const auto req_workspace_sz = cub_workspace_size(p_sz_max);
+        if(STREAM_C * (p_sz_max * bytes_per_suf + req_workspace_sz) <= budget)
             break;
 
-        if(STREAM_C * workspace_sz >= budget)
+        if(STREAM_C * req_workspace_sz >= budget)
         {
             std::cerr << "Device memory cannot even accommodate the CUB workspaces. Aborting.\n";
             std::exit(EXIT_FAILURE);
         }
 
-        const idx_t next_p_sz_max = (budget - STREAM_C * workspace_sz) / (STREAM_C * bytes_per_suf);
+        const idx_t next_p_sz_max = (budget - STREAM_C * req_workspace_sz) / (STREAM_C * bytes_per_suf);
         if(next_p_sz_max >= p_sz_max)   // Converged to a fixed-point without being able to compute a suitable `p_sz_max`.
         {
             std::cerr << "Unable to determine a suitable partition-size upper bound. Aborting.\n";
@@ -621,6 +621,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 
 #ifdef TESTS    // Save the sorted keys and the corresponding suffixes for validation-testing, as they will be rewritten to with ranks and then shuffled.
         {
+            // TODO: validator broken post-compaction; will be redesigned.
             const idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
             CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(sorted_suf + P_off[p_id], SA, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -718,6 +719,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
 
 #ifdef TESTS    // Save the sorted keys and the corresponding suffixes for validation-testing, as they will be rewritten to with ranks and then shuffled.
         {
+            // TODO: validator broken post-compaction; will be redesigned.
             const idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
             CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Sort_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(sorted_suf + P_off[p_id], SA, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));

@@ -104,10 +104,6 @@ private:
     // to them during partitioning.
     void initial_rank();
 
-    // Computes the sizes of the suffix partitions based on the quantized `K`-
-    // gram histogram `H` and the selected pivots.
-    // void compute_partition_sizes(const std::vector<freq_cnt_t>& H);
-
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
