@@ -58,7 +58,10 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
             suf_buf[b][r] = nullptr;
 
         workspace_buf[b] = nullptr;
+        is_active_buf[b] = nullptr;
     }
+
+    active_set_sz_d = nullptr;
 
 #ifdef TESTS
     CUDA_CHECK(pinned_allocate_host(sorted_key, n_));
