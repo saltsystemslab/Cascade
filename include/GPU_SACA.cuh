@@ -276,9 +276,9 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Sort_Key* 
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void rank_key_groups_and_primary_key_groups_kernel( const Sort_Key* const __restrict__ K, const idx_t n,
-                                                    idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                    uint8_t* const __restrict__ is_active)
+void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const Sort_Key* const __restrict__ K, const idx_t n,
+                                                                            idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
+                                                                            uint8_t* const __restrict__ is_active)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
