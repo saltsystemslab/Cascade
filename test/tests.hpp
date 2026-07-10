@@ -23,13 +23,15 @@ namespace gpu_saca::test
 template <typename T_sym_>
 bool validate_partition_IDs(const T_sym_* T, idx_t n, const std::vector<Prefix_Key>& X, const p_id_t* P_id);
 
-// Returns `true` iff the keys in `key`, corresponding to the partition `part`,
-// are sorted, and `part` is properly ranked based on the sorted keys.
-bool validate_local_ranking(const Partition& part, const Sort_Key* key);
+// Returns `true` iff the keys in `key` and their corresponding suffixes in
+// `suf`, corresponding to the partition `part`, are sorted, and `part` is
+// properly ranked based on the sorted keys.
+bool validate_local_ranking(const Partition& part, const Sort_Key* key, const idx_t* suf);
 
 // Returns `true` iff all the partitions in `P` are properly sorted-and-ranked,
-// with their keys being packed flat at `key` after the device-side sort.
-bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* key);
+// with their keys packed flat at `key` and the corresponding suffixes packed
+// flat at `suf`, after the device-side sort.
+bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* key, const idx_t* suf);
 
 // Returns the symbol `tau` such that roughly half of the symbol occurrences in
 // the text `T`, of size `n`, fall into `[min, tau]` and the rest into

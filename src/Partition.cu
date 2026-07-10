@@ -8,13 +8,13 @@
 namespace gpu_saca
 {
 
-Partition::Partition(const idx_t sz):
+Partition::Partition(const idx_t cap):
       suf_(nullptr)
     , key_(nullptr)
-    , sz_(sz)
+    , cap_(cap)
 {
-    CUDA_CHECK(pinned_allocate_host(suf_, sz_));
-    CUDA_CHECK(pinned_allocate_host(key_, sz_));
+    CUDA_CHECK(pinned_allocate_host(suf_, cap_));
+    CUDA_CHECK(pinned_allocate_host(key_, cap_));
 }
 
 

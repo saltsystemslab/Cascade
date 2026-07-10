@@ -7,16 +7,16 @@
 namespace gpu_saca::test
 {
 
-bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
+bool validate_local_ranking(const Partition& part, const Sort_Key* const key, const idx_t* const suf)
 {
-    const auto sz = part.size();
+    const auto sz = part.capacity();
     if(sz == 0)
         return true;
 
 
     const auto* const rank = part.key();
     if(rank[0].primary != 0)
-        return false;
+        return false;   // TODO: this is incorrect when partition-compaction will be complete.
 
     bool valid = true;
 
@@ -34,7 +34,7 @@ bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
 
         // Ranking-check
         const bool eq_keys = (key[i].primary == key[i - 1].primary && key[i].secondary == key[i - 1].secondary);
-        const auto exp_rank = eq_keys ? rank[i - 1].primary : i;
+        const auto exp_rank = eq_keys ? rank[i - 1].primary : i;    // TODO: this is incorrect when partition-compaction will be complete.
         if(rank[i].primary != exp_rank)
             valid = false;
     }
@@ -44,15 +44,15 @@ bool validate_local_ranking(const Partition& part, const Sort_Key* const key)
 }
 
 
-bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* const key)
+bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* const key, const idx_t* const suf)
 {
     idx_t p_off = 0;
     for(p_id_t p_id = 0; p_id < P.size(); ++p_id)
     {
-        if(!validate_local_ranking(P[p_id], key + p_off))
+        if(!validate_local_ranking(P[p_id], key + p_off, suf + p_off))
             return false;
 
-        p_off += P[p_id].size();
+        p_off += P[p_id].capacity();
     }
 
     return true;
