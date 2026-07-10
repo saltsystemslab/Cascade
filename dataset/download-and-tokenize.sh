@@ -105,6 +105,15 @@ case "$DATASET" in
   *) echo "unknown dataset: $DATASET" >&2; exit 1 ;;
 esac
 
+# Download-only mode: stop here so the tokenize step can run separately as a
+# scheduler-friendly job array (see submit-tokenize.sh). Fetch is network-bound,
+# so this runs fine on a login node or a 1-CPU allocation.
+if [ -n "${SKIP_TOKENIZE:-}" ]; then
+    echo "SKIP_TOKENIZE set -> fetched into $TOK_INPUT (glob: $TOK_GLOB); skipping tokenize."
+    echo "next: INPUT_DIR=$TOK_INPUT OUT=$OUT_BIN GLOB='$TOK_GLOB' ./submit-tokenize.sh"
+    exit 0
+fi
+
 # ------------------------------- TOKENIZE -----------------------------------
 python3 "$TOK_SCRIPT" \
     --input-dir "$TOK_INPUT" \
