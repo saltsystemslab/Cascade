@@ -2,30 +2,34 @@
 # Raw-text -> single token-array pipeline for infini-gram corpora.
 #
 # Per dataset:  (1) fetch a subset of raw JSONL,
-#               (2) tokenize to ONE uint16-LE array via tokenize_corpus.py,
+#               (2) tokenize to ONE uint16-LE array via tokenize-corpus.py,
 #               (3) verify token / separator counts.
 #
-# Usage:   ./download-and-tokenize.sh {c4|pile|redpajama|dolma}
+# Usage:   ROOT=/scratch/$USER/corpora ./download-and-tokenize.sh {c4|pile|redpajama|dolma}
 # Tune via env vars, e.g.:
-#   INCLUDE="en/c4-train.00*-of-01024.json.gz" TOKENIZER=allenai/OLMo-7B \
-#       WORKERS=64 ./download-and-tokenize.sh c4
+#   ROOT=/scratch/$USER/corpora INCLUDE="en/c4-train.00*-of-01024.json.gz" \
+#       TOKENIZER=allenai/OLMo-7B WORKERS=64 ./download-and-tokenize.sh c4
 #
 # Prereqs:  pip install -U "huggingface_hub[hf_xet]" transformers tokenizers \
 #                          numpy zstandard sentencepiece
 #           (sentencepiece only needed for the Llama-2 tokenizer)
 set -euo pipefail
 
+# Absolute dir of this script, so its sibling tokenizer is found regardless of
+# the caller's $PWD (both files live together in the repo's dataset/ dir).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # ------------------------------- CONFIG -------------------------------------
 if [ $# -lt 1 ]; then
-    echo "usage: run_pipeline.sh {c4|pile|redpajama|dolma}" >&2
+    echo "usage: ROOT=<dir> ./download-and-tokenize.sh {c4|pile|redpajama|dolma}" >&2
     exit 1
 fi
 DATASET="$1"
-ROOT="${ROOT:-$PWD/corpora}"                  # working root
-TOKENIZER="${TOKENIZER:-allenai/OLMo-7B}"     # keep ONE tokenizer across corpora
-WORKERS="${WORKERS:-$(nproc)}"
-DL_PROC="${DL_PROC:-8}"                        # parallel wget streams (URL-list datasets)
-TOK_SCRIPT="${TOK_SCRIPT:-$PWD/tokenize-corpus.py}"
+ROOT="${ROOT:?set ROOT to a working dir for raw data + the token array (no default)}"
+TOKENIZER="${TOKENIZER:-allenai/OLMo-7B}"     # HF tokenizer; keep ONE across corpora
+WORKERS="${WORKERS:-$(nproc)}"                # tokenizer worker procs (CPU-bound; ~1/core)
+DL_PROC="${DL_PROC:-8}"                        # parallel download streams (network-bound)
+TOK_SCRIPT="${TOK_SCRIPT:-$SCRIPT_DIR/tokenize-corpus.py}"   # sibling tokenizer script
 
 export HF_XET_HIGH_PERFORMANCE=1              # faster Xet downloads (replaces hf_transfer)
 
@@ -55,7 +59,7 @@ case "$DATASET" in
 
   redpajama)
     # RedPajama-V1 raw text is served from data.together.xyz.
-    # Multi-file subsets parallelize across cores in tokenize_corpus.py:
+    # Multi-file subsets parallelize across cores in tokenize-corpus.py:
     #   arxiv ~28B (~56 GB) | github ~59B (~118 GB) | c4 ~175B | common_crawl ~878B
     # AVOID as-is: wikipedia (~24B) and stackexchange (~20B) are each a SINGLE
     # monolithic .jsonl -> one worker, single-core tokenize. Pre-split first
@@ -67,7 +71,11 @@ case "$DATASET" in
         head -n "$NFILES" "$RAW_DIR/urls.txt" > "$RAW_DIR/urls.head"
         mv "$RAW_DIR/urls.head" "$RAW_DIR/urls.txt"
     fi
-    xargs -n1 -P"$DL_PROC" -I{} wget -q -c -P "$RAW_DIR" "{}" < "$RAW_DIR/urls.txt"
+    TOTAL=$(wc -l < "$RAW_DIR/urls.txt")
+    echo ">> fetching $TOTAL files ($SUBSET) into $RAW_DIR, $DL_PROC parallel streams"
+    xargs -P"$DL_PROC" -I{} sh -c \
+        'wget -q -c -P "$1" "$2" && echo "${2##*/}"' _ "$RAW_DIR" {} < "$RAW_DIR/urls.txt" \
+        | awk -v t="$TOTAL" '{printf ">>   [%d/%d] %s\n", NR, t, $0; fflush()}'
     TOK_INPUT="$RAW_DIR"; TOK_GLOB="*.jsonl*"
     ;;
 
@@ -76,8 +84,13 @@ case "$DATASET" in
     VER="${VER:-v1_7}"; NFILES="${NFILES:-20}"
     hf download allenai/dolma "urls/${VER}.txt" --repo-type dataset --local-dir "$RAW_DIR"
     mkdir -p "$RAW_DIR/data"
-    head -n "$NFILES" "$RAW_DIR/urls/${VER}.txt" \
-        | xargs -n1 -P"$DL_PROC" -I{} wget -q -c -P "$RAW_DIR/data" "{}"
+    SEL="$RAW_DIR/dl_urls.txt"
+    head -n "$NFILES" "$RAW_DIR/urls/${VER}.txt" > "$SEL"
+    TOTAL=$(wc -l < "$SEL")
+    echo ">> fetching $TOTAL files (dolma $VER) into $RAW_DIR/data, $DL_PROC parallel streams"
+    xargs -P"$DL_PROC" -I{} sh -c \
+        'wget -q -c -P "$1" "$2" && echo "${2##*/}"' _ "$RAW_DIR/data" {} < "$SEL" \
+        | awk -v t="$TOTAL" '{printf ">>   [%d/%d] %s\n", NR, t, $0; fflush()}'
     TOK_INPUT="$RAW_DIR/data"; TOK_GLOB="*.json.gz"
     ;;
 
