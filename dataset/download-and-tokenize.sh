@@ -33,8 +33,16 @@ TOK_SCRIPT="${TOK_SCRIPT:-$SCRIPT_DIR/tokenize-corpus.py}"   # sibling tokenizer
 
 export HF_XET_HIGH_PERFORMANCE=1              # faster Xet downloads (replaces hf_transfer)
 
-RAW_DIR="$ROOT/$DATASET/raw"
-OUT_BIN="$ROOT/$DATASET/${DATASET}.tokenized.bin"
+# Per-corpus label; redpajama is further split by subset so arxiv/github/etc.
+# get isolated raw dirs and output arrays instead of clobbering each other.
+LABEL="$DATASET"
+if [ "$DATASET" = redpajama ]; then
+    SUBSET="${SUBSET:-arxiv}"                  # RedPajama-V1 subset (see redpajama branch)
+    LABEL="$DATASET-$SUBSET"
+fi
+
+RAW_DIR="$ROOT/$LABEL/raw"
+OUT_BIN="$ROOT/$LABEL/${LABEL}.tokenized.bin"
 mkdir -p "$RAW_DIR" "$(dirname "$OUT_BIN")"
 
 # ------------------------------- FETCH --------------------------------------
@@ -64,7 +72,7 @@ case "$DATASET" in
     # AVOID as-is: wikipedia (~24B) and stackexchange (~20B) are each a SINGLE
     # monolithic .jsonl -> one worker, single-core tokenize. Pre-split first
     # (e.g. `split -d -n l/64 file.jsonl part_`) if you need them. book: defunct.
-    SUBSET="${SUBSET:-arxiv}"; NFILES="${NFILES:-all}"
+    SUBSET="${SUBSET:-arxiv}"; NFILES="${NFILES:-all}"   # SUBSET resolved in CONFIG; kept for clarity
     curl -s https://data.together.xyz/redpajama-data-1T/v1.0.0/urls.txt \
         | grep "/$SUBSET/" > "$RAW_DIR/urls.txt"
     if [ "$NFILES" != "all" ]; then
