@@ -8,7 +8,7 @@
 # Usage:   ROOT=/scratch/$USER/corpora ./download-and-tokenize.sh {c4|pile|redpajama|dolma}
 # Tune via env vars, e.g.:
 #   ROOT=/scratch/$USER/corpora INCLUDE="en/c4-train.00*-of-01024.json.gz" \
-#       TOKENIZER=allenai/OLMo-7B WORKERS=64 ./download-and-tokenize.sh c4
+#       TOKENIZER=allenai/OLMo-7B-hf WORKERS=64 ./download-and-tokenize.sh c4
 #
 # Prereqs:  pip install -U "huggingface_hub[hf_xet]" transformers tokenizers \
 #                          numpy zstandard sentencepiece
@@ -26,7 +26,7 @@ if [ $# -lt 1 ]; then
 fi
 DATASET="$1"
 ROOT="${ROOT:?set ROOT to a working dir for raw data + the token array (no default)}"
-TOKENIZER="${TOKENIZER:-allenai/OLMo-7B}"     # HF tokenizer; keep ONE across corpora
+TOKENIZER="${TOKENIZER:-allenai/OLMo-7B-hf}"  # HF tokenizer; keep ONE across corpora (-hf: no trust_remote_code, no torch)
 WORKERS="${WORKERS:-$(nproc)}"                # tokenizer worker procs (CPU-bound; ~1/core)
 DL_PROC="${DL_PROC:-8}"                        # parallel download streams (network-bound)
 TOK_SCRIPT="${TOK_SCRIPT:-$SCRIPT_DIR/tokenize-corpus.py}"   # sibling tokenizer script
