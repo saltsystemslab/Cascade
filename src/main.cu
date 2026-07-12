@@ -49,7 +49,7 @@ int main(int argc, char** argv)
         const auto t_1 = caps_sa::timer::now();
         std::cerr << "Time taken: " << caps_sa::timer::duration(t_1 - t_0) << "s.\n";
 
-#ifdef TESTS
+#if defined(TESTS) || defined(VALIDATE)
         std::cerr << "Suffix array validation: " << (gpu_saca::test::is_correct_SA(SA, T, n) ? "Passes" : "Fails") << ".\n";
 #endif
     }
