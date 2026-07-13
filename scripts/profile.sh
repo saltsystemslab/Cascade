@@ -18,5 +18,5 @@ nsys profile \
     --output="${output}" \
     --force-overwrite=true \
     --cudabacktrace=true \
-    ./build/src/caps_sa_gpu "${input}"
+    /home/$USER/GPU-Suffix-Array/build/src/caps_sa_gpu "${input}"
 #
