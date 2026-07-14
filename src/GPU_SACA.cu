@@ -1,6 +1,6 @@
 
 #include "GPU_SACA.cuh"
-#include "Suffix_Buffer.hpp"
+#include "Suffix_Buffer.cuh"
 #include "Sort_Key.cuh"
 #include "utility.hpp"
 #include "utility.cuh"
