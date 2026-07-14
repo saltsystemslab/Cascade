@@ -67,6 +67,16 @@ public:
 };
 
 
+namespace math
+{
+    // Returns the number of bits required to represent `x`, i.e. `ceil(log_2(x))`.
+    inline uint64_t bits_for(const uint64_t x)
+    {
+        return x <= 1 ? 0 : 64 - __builtin_clzll(x - 1);
+    }
+}
+
+
 // Returns the `N` symbols situated at the text `T` as a 64-bit word. The
 // endian-ness of the word matches the lexicographical order of the text—the
 // symbol at index `idx` corresponds to the most significant bits of the word.

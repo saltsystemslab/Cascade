@@ -36,6 +36,8 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
       n_(n)
     , T_h_(T)
     , p_(0)
+    , secondary_bits_(util::math::bits_for(n_))
+    , key_bits_(0)
     , P_id(nullptr)
     , rho(nullptr)
     , null_d(nullptr)
@@ -254,6 +256,14 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
         p_sz_max = next_p_sz_max;
     }
 
+    // Cap partition-sizes so the 64-bit packed (primary, secondary) key of suffixes does not overflow.
+    {
+        const idx_t p_sz_max_from_packing = (secondary_bits_ == 0 ? std::numeric_limits<idx_t>::max() :
+                                                (secondary_bits_ == 64 ? 1 :
+                                                    static_cast<idx_t>((idx_t(1) << (64 - secondary_bits_)) / PART_SZ_IMBALANCE_SLACK)));
+        p_sz_max = std::min(p_sz_max, p_sz_max_from_packing);
+    }
+
     const idx_t p_min_from_budget = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
     idx_t p_min = p_min_from_budget;
 
@@ -266,6 +276,14 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
             else
                 p_min = *p_target;
         }
+    }
+
+    // The (primary, secondary) key packing scheme, or very large `n`, can demand more partitions than constant-memory allow pivots.
+    if(p_min > MAX_PIVOT_COUNT + 1)
+    {
+        std::cerr   << "Current partitioning policy requires at least " << p_min << " partitions for the " << n_ << "-length text. "
+                    << "But constant-memory can hold at most " << MAX_PIVOT_COUNT << " pivots. Aborting.\n";
+        std::exit(EXIT_FAILURE);
     }
 
     const auto p_sz_bound = (n_ + p_min - 1) / p_min;   // Maximum supported size of a partition based on the minimum partition-count.
@@ -515,6 +533,16 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 #endif
     }
 
+    // Determine bit-width of primary-keys of suffixes.
+    {
+        const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+        key_bits_ = secondary_bits_ + util::math::bits_for(P_sz_max);
+        if(key_bits_ > 64)
+        {
+            std::cerr << "Packed (primary, secondary) key needs " << key_bits_ << ". The skew in partitioning is adversarial. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+    }
 
 #ifdef TESTS
     std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
