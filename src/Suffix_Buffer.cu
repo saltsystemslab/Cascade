@@ -9,7 +9,7 @@
 namespace gpu_saca
 {
 
-Suffix_Buffer::Suffix_Buffer(idx_t* const suf_sink, Sort_Key* const key_sink):
+Suffix_Buffer::Suffix_Buffer(idx_t* const suf_sink, Prefix_Key* const key_sink):
       w_suf_buf(omp_get_max_threads())
     , w_key_buf(omp_get_max_threads())
     , suf_sink_(suf_sink)
@@ -41,7 +41,7 @@ void Suffix_Buffer::flush()
         const auto sz = suf_buf.size();
         assert(key_buf.size() == sz);
         std::memcpy(reinterpret_cast<void*>(suf_sink_ + flushed_), reinterpret_cast<void*>(suf_buf.data()), sz * sizeof(idx_t));
-        std::memcpy(reinterpret_cast<void*>(key_sink_ + flushed_), reinterpret_cast<void*>(key_buf.data()), sz * sizeof(Sort_Key));
+        std::memcpy(reinterpret_cast<void*>(key_sink_ + flushed_), reinterpret_cast<void*>(key_buf.data()), sz * sizeof(Prefix_Key));
         flushed_ += sz;
 
         suf_buf.clear();
