@@ -51,9 +51,8 @@ public:
     Suffix_Buffer(Suffix_Buffer&& rhs);
     Suffix_Buffer& operator=(Suffix_Buffer&&) = delete;
 
-    // Adds a suffix to the buffer with index `suf`, primary key `p_key`, and
-    // secondary key `s_key`.
-    void add(idx_t suf, idx_t p_key, idx_t s_key);
+    // Adds a suffix to the buffer with index `suf` and prefix-key `p_key`.
+    void add(idx_t suf, const Prefix_Key& p_key);
 
     // Flushes the buffer to the sink. There must be no concurrent pending add
     // invocations.
@@ -64,14 +63,14 @@ public:
 };
 
 
-inline void Suffix_Buffer::add(const idx_t suf, const idx_t p_key, const idx_t s_key)
+inline void Suffix_Buffer::add(const idx_t suf, const Prefix_Key& p_key)
 {
     const auto w_id = omp_get_thread_num();
     auto& suf_buf = w_suf_buf[w_id].unwrap();
     auto& key_buf = w_key_buf[w_id].unwrap();
 
     suf_buf.push_back(suf);
-    key_buf.push_back({p_key, s_key});
+    key_buf.push_back(p_key);
     assert(suf_buf.size() <= w_buf_cap), assert(key_buf.size() <= w_buf_cap), assert(suf_buf.size() == key_buf.size());
 
     if(suf_buf.size() == w_buf_cap)
