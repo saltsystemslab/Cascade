@@ -6,7 +6,6 @@
 #include "types.hpp"
 #include "Prefix_Key.cuh"
 #include "Partition.hpp"
-#include "Sort_Key.hpp"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -71,10 +70,10 @@ private:
     // {
         T_sym_* null_d; // Buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 
-        Sort_Key* key_buf[STREAM_C][2]; // Input and output buffers for sort-keys of suffixes, per stream.
-        idx_t* suf_buf[STREAM_C][2];    // Input and output buffers for suffixes, per stream.
-        void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort and scan, per stream.
-        std::size_t workspace_sz;       // Size of the `cub` workspace.
+        Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for sort-keys of suffixes, per stream; typed to the largest-width type used in sort (which is in initial-ranking).
+        idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
+        void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
+        std::size_t workspace_sz;           // Size of the `cub` workspace.
 
         uint8_t* is_active_buf[STREAM_C];   // Activeness-marker buffers for suffixes, per stream.
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.

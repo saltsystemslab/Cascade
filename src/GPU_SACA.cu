@@ -1,7 +1,6 @@
 
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.cuh"
-#include "Sort_Key.cuh"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "env.hpp"
@@ -229,7 +228,7 @@ template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
     // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sort, plus one flag byte to mark its activeness in subsequent steps.
-    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Sort_Key) + sizeof(idx_t)) + sizeof(uint8_t);
+    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t);   // 2 x (key + suffix) ping-pong + activeness flag.
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
@@ -298,38 +297,55 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 {
-    cub::DoubleBuffer<Sort_Key> keys_dummy(nullptr, nullptr);
     cub::DoubleBuffer<idx_t> vals_dummy(nullptr, nullptr);
 
-    std::size_t sort_workspace_sz = 0;
-    CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-        nullptr, sort_workspace_sz,
-        keys_dummy, vals_dummy,
-        part_sz,
-        Sort_Key_Decomposer{},
-        0, 128
-    ));
+    std::size_t init_rank_workspace_sz = 0;
+    {
+        cub::DoubleBuffer<Prefix_Key> keys_dummy(nullptr, nullptr);
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+            nullptr, init_rank_workspace_sz,
+            keys_dummy, vals_dummy,
+            part_sz,
+            Prefix_Key_Decomposer{},
+            0, Prefix_Key::PREFIX_WORDS * 64
+        ));
+    }
+
+    std::size_t_t exponentiation_workspace_size = 0;
+    {
+        cub::DoubleBuffer<idx_t> keys_dummy(nullptr, nullptr);
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+            nullptr, exponentiation_workspace_size,
+            keys_dummy, vals_dummy,
+            part_sz,
+            0, 64
+        ));
+    }
 
     std::size_t scan_workspace_sz = 0;
-    CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-        nullptr, scan_workspace_sz,
-        static_cast<uint64_t*>(nullptr), static_cast<uint64_t*>(nullptr),
-        cub::Max(),
-        2 * part_sz // For the initial-ranking
-    ));
+    {
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+            nullptr, scan_workspace_sz,
+            static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr),
+            cub::Max(),
+            part_sz
+        ));
+    }
 
-    std::size_t part_workspace_sz = 0;
-    auto in_zip  = thrust::make_zip_iterator(thrust::make_tuple(static_cast<Sort_Key*>(nullptr), static_cast<idx_t*>(nullptr)));
-    auto zip_out = thrust::make_zip_iterator(thrust::make_tuple(static_cast<Sort_Key*>(nullptr), static_cast<idx_t*>(nullptr)));
-    CUDA_CHECK(cub::DevicePartition::Flagged(
-        nullptr, part_workspace_sz,
-        in_zip, static_cast<uint8_t*>(nullptr),
-        zip_out,
-        static_cast<idx_t*>(nullptr),
-        part_sz
-    ));
+    std::size_t compaction_workspace_sz = 0;
+    {
+        auto in_zip  = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr)));
+        auto zip_out = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr)));
+        CUDA_CHECK(cub::DevicePartition::Flagged(
+            nullptr, compaction_workspace_sz,
+            in_zip, static_cast<uint8_t*>(nullptr),
+            zip_out,
+            static_cast<idx_t*>(nullptr),
+            part_sz
+        ));
+    }
 
-    return std::max({sort_workspace_sz, scan_workspace_sz, part_workspace_sz});
+    return std::max({init_rank_workspace_sz, sort_workspace_sz, scan_workspace_sz, compaction_workspace_sz});
 }
 
 
@@ -337,11 +353,11 @@ template <typename T_sym_>
 bool GPU_SACA<T_sym_>::allocate_device_space()
 {
     // Each suffix in each stream needs:
-    //      1. `cub::DoubleBuffer` keys, input and output (2 x `Sort_key`);
+    //      1. `cub::DoubleBuffer` keys, input and output (2 x `Prefix_Key`);
     //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
     //      3. activeness-flag, output (1 x `uint8_t`).
     // `cub` itself requires a workspace for sort and scan.
-    // Memory constraint: STREAM_C x (P_sz_max x (2 x (sizeof(Sort_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+    // Memory constraint: STREAM_C x (P_sz_max x (2 x (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
     const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
 
@@ -353,7 +369,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (sizeof(Sort_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -369,7 +385,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         {
             for(std::size_t r = 0; r < 2; ++r)  // For each buffer in the radix-sort ping-pong
             {
-                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Sort_Key)));
+                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Prefix_Key)));
                 CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
             }
 
