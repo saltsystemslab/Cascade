@@ -858,7 +858,7 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 
     #pragma omp parallel for schedule(static)
     for(idx_t j = 0; j < sz; ++j)
-        rho[part.suf(j)] = rank_off + part.key(j).primary;
+        rho[part.suf(j)] = rank_off + part.key(j);
 }
 
 
@@ -970,7 +970,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
         for(idx_t j = 0; j < sz; ++j)
         {
             const auto suf = part.suf(j);
-            const auto r = part.key(j).primary;
+            const auto r = part.key(j);
             SA[off + r] = suf;
         }
     }
