@@ -20,8 +20,14 @@ namespace gpu_saca
 // Fixed-width, MSB-first packed prefix of some suffix.
 struct Prefix_Key
 {
-    static constexpr idx_t PREFIX_WORDS = 2;    // Number of 64-bit words per prefix key. It defines the context-size for the initial-ranking phase:
-                                                // `PREFIX_WORDS * 8 / sizeof(T_sym)`, the `\ell` knob.
+    // Number of 64-bit words per prefix key. It defines the context-size for the initial-ranking phase:
+    // `PREFIX_WORDS * 8 / sizeof(T_sym)`, the `\ell` knob.
+#ifndef ELL
+    static constexpr idx_t PREFIX_WORDS = 2;
+#else
+    static constexpr idx_t PREFIX_WORDS = ELL;
+#endif
+
     static_assert(PREFIX_WORDS >= 2, "PREFIX_WORDS must be at least 2; device buffer reuses Prefix_Key space for two separate idx_t.");
     // NB: revisit this hard bound if/when we want to sweep `\ell` to measure convergence stats.
 
