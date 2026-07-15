@@ -55,6 +55,8 @@ private:
 
     idx_t* rho; // Global rank of the suffixes.
 
+    Prefix_Key* prefix; // Pinned host arena of suffixes' prefixes, used to seed the ranks in exponentiation.
+
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 

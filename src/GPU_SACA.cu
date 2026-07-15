@@ -40,6 +40,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , key_bits_(0)
     , P_id(nullptr)
     , rho(nullptr)
+    , prefix(nullptr)
     , null_d(nullptr)
     , workspace_sz(0)
 {
@@ -79,6 +80,8 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
     util::deallocate(P_id);
     util::deallocate(rho);
+
+    CUDA_CHECK(deallocate_host(prefix));
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamDestroy(stream[s]));
@@ -398,9 +401,11 @@ void GPU_SACA<T_sym_>::partition()
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_.emplace_back(P_sz[p_id]);
 
+            CUDA_CHECK(pinned_allocate_host(prefix, n_));
+
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(Suffix_Buffer{P_[p_id].suf(), P_[p_id].key()});
+                P_buf.emplace_back(Suffix_Buffer{P_[p_id].suf(), prefix + P_off[p_id]});
         }
 
 
@@ -409,7 +414,7 @@ void GPU_SACA<T_sym_>::partition()
             PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
-                P_buf[P_id[i]].unwrap().add(i, util::pack_word(T_h_ + i), util::pack_word(T_h_ + i + 8 / sizeof(T_sym_)));
+                P_buf[P_id[i]].unwrap().add(i, Prefix_Key::pack_prefix(T_h_ + i));
 
             #pragma omp parallel for schedule(static)
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
