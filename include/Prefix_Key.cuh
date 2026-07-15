@@ -54,13 +54,13 @@ struct Prefix_Key_Decomposer
 {
     template <std::size_t... Idx>
     CUDA_SPECIFIER
-    auto tie_words(const Prefix_Key& key, std::index_sequence<Idx...>) const
+    auto tie_words(Prefix_Key& key, std::index_sequence<Idx...>) const
     {
         return cuda::std::tie(key.word[Idx]...);
     }
 
     CUDA_SPECIFIER
-    auto operator()(const Prefix_Key& key) const
+    auto operator()(Prefix_Key& key) const
     {
         return tie_words(key, std::make_index_sequence<Prefix_Key::PREFIX_WORDS>{});
     }

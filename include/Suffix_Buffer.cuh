@@ -4,7 +4,7 @@
 
 
 
-#include "Prefix_Key.hpp"
+#include "Prefix_Key.cuh"
 #include "Spin_Lock.hpp"
 #include "types.hpp"
 #include "utility.hpp"

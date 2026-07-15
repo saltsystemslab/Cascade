@@ -311,7 +311,7 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
         ));
     }
 
-    std::size_t_t exponentiation_workspace_size = 0;
+    std::size_t exponentiation_workspace_size = 0;
     {
         cub::DoubleBuffer<idx_t> keys_dummy(nullptr, nullptr);
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
@@ -345,7 +345,7 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
         ));
     }
 
-    return std::max({init_rank_workspace_sz, sort_workspace_sz, scan_workspace_sz, compaction_workspace_sz});
+    return std::max({init_rank_workspace_sz, exponentiation_workspace_size, scan_workspace_sz, compaction_workspace_sz});
 }
 
 
@@ -698,7 +698,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 
         // Group non-unique rank keys and suffixes to the head and the rest to the tail of the partition.
         {
-            const idx_t* const K_in     = key_buf[buf_id][sort_op_selector];    assert(K_in == key_rank);
+            const idx_t* const K_in     = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);  assert(K_in == key_rank);
             const idx_t* const SA_in    = suf_buf[buf_id][sort_op_selector];
             idx_t* const K_out          = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
             idx_t* const SA_out         = suf_buf[buf_id][1 - sort_op_selector];

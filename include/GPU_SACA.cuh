@@ -70,7 +70,7 @@ private:
     // {
         T_sym_* null_d; // Buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 
-        Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for sort-keys of suffixes, per stream; typed to the largest-width type used in sort (which is in initial-ranking).
+        Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the largest-width type used in sort (which is in initial-ranking).
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
         void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;           // Size of the `cub` workspace.
