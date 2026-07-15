@@ -233,33 +233,26 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 }
 
 
-// Initializes the ranks of the distinct sort-key groups from the sorted array
-// `K` (of size `n`) into the 64-bit rank array `rank_u64` (of size `2 * n`).
-// Also computes the sort-keys' activeness-flags (for future) into `is_active`.
-// The first key of a group is ranked by its offset into `K`, whereas the rest
-// of the keys in the group are ranked `0`. `K` and `rank_u64` will be byte-
-// aligned: the `i`'th sort-key from `K` has its rank at the `2 * i`'th index of
-// `rank_u64`—thus the odd indices in `rank_u64` will be 0-holes.
-// Grid organization: one thread per sort-key.
+// Initializes the ranks of the distinct prefix-key groups from the sorted array
+// `K` (of size `n`) into `rank`, and marks the keys' activeness-flags into
+// `is_active`. The first key of a group is ranked by its offset into `K`; the
+// rest in the group are ranked `0`.
+// Grid organization: one thread per key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Sort_Key* const __restrict__ K, const idx_t n,
-                                                                idx_t* const __restrict__ rank_u64,
+void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key* const __restrict__ K, const idx_t n,
+                                                                idx_t* const __restrict__ rank,
                                                                 uint8_t* const __restrict__ is_active)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    rank_u64[2 * i + 1] = 0;    // Hole in the flag array corresponding to the `i`'th sort-key.
-    if(i == 0)
-        rank_u64[0] = 0;    // First group always starts at offset `0`.
-    else
-        rank_u64[2 * i] = (K[i].primary != K[i - 1].primary || K[i].secondary != K[i - 1].secondary ? i : 0);
+    rank[i] = (i == 0 ? 0 : (K[i] != K[i - 1] ? i : 0));
 
-    const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
-    const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
+    const bool pre_tie = (i == 0        ? false : K[i] == K[i - 1]);
+    const bool suc_tie = (i == n - 1    ? false : K[i] == K[i + 1]);
     is_active[i] = (pre_tie || suc_tie);
 }
 
