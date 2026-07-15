@@ -257,16 +257,18 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 }
 
 
-// Ranks the distinct sort-key groups and primary-key groups from the sorted
-// array `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
-// respectively. Also computes the sort-keys' activeness-flags (for future) into
-// `is_active`. The first entry of a group is ranked by its offset into `K`,
-// whereas the rest of the entries in the group are ranked `0`.
-// Grid organization: one thread per sort-key / suffix.
+// Ranks the distinct key groups and primary-key groups from the sorted array
+// `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
+// respectively, and marks the keys' activeness-flags into `is_active`. The low
+// `secondary_bits` bits of a key are its secondary, and the rest are primary.
+// The first entry of a group is ranked by its offset into `K`, whereas the rest
+// of the entries in the group are ranked `0`.
+// Grid organization: one thread per key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const Sort_Key* const __restrict__ K, const idx_t n,
+void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t n,
+                                                                            const idx_t secondary_bits,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
                                                                             uint8_t* const __restrict__ is_active)
 {
@@ -282,33 +284,34 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
     }
     else
     {
-        const bool key_tie = (K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
-        const bool primary_key_tie = (K[i].primary == K[i - 1].primary);
+        const bool key_tie = (K[i] == K[i - 1]);
+        const bool primary_key_tie = ((K[i] >> secondary_bits) == (K[i - 1] >> secondary_bits));
         key_group_rank[i] = (!key_tie ? i : 0);
         primary_key_group_rank[i] = (!primary_key_tie ? i : 0);
     }
 
-    const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
-    const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
+    const bool pre_tie = (i == 0        ? false : K[i] == K[i - 1]);
+    const bool suc_tie = (i == n - 1    ? false : K[i] == K[i + 1]);
     is_active[i] = (pre_tie || suc_tie);
 }
 
 
 // Refines the primary-keys of the sorted array `K` (of size `n`) based on its
 // key groups' ranks `key_group_rank` and its primary-key groups' ranks
-// `primary_key_group_rank`.
-// Grid organization: one thread per sort-key / suffix.
+// `primary_key_group_rank`, and writes back the refined *unpacked* primary-key.
+// Grid organization: one thread per key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void refine_primary_keys_kernel(Sort_Key* const __restrict__ K, const idx_t n,
+void refine_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n,
+                                const idx_t secondary_bits,
                                 const idx_t* const __restrict__ key_group_rank, const idx_t* const __restrict__ primary_key_group_rank)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    K[i].primary += (key_group_rank[i] - primary_key_group_rank[i]);
+    K[i] = (K[i] >> secondary_bits) + (key_group_rank[i] - primary_key_group_rank[i]);
 }
 
 }
