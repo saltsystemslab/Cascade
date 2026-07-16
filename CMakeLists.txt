@@ -87,6 +87,10 @@ if(TESTS)
     add_compile_definitions(TESTS)
 endif()
 
+if(VALIDATE)
+    add_compile_definitions(VALIDATE)
+endif()
+
 if(STATS)
     add_compile_definitions(STATS)
 endif()

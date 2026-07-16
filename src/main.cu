@@ -1,5 +1,4 @@
 
-#include "Suffix_Array.hpp"
 #include "GPU_SACA.cuh"
 #include "types.hpp"
 #include "utility.hpp"
@@ -18,14 +17,7 @@
 int main(int argc, char** argv)
 {
     (void)argc, (void)argv;
-/*
-    caps_sa::Parser input(argv[1]);
-    input.read_next_seq();
 
-    auto const T = input.seq();
-    auto const n = input.seq_len();
-
-*/
     // using T_sym_ = uint8_t;
     using T_sym_ = uint16_t;
     constexpr auto null_count = sizeof(gpu_saca::Prefix_Key) / sizeof(T_sym_);
@@ -57,31 +49,13 @@ int main(int argc, char** argv)
         const auto t_1 = caps_sa::timer::now();
         std::cerr << "Time taken: " << caps_sa::timer::duration(t_1 - t_0) << "s.\n";
 
-#ifdef TESTS
+#if defined(TESTS) || defined(VALIDATE)
         std::cerr << "Suffix array validation: " << (gpu_saca::test::is_correct_SA(SA, T, n) ? "Passes" : "Fails") << ".\n";
 #endif
     }
 
 
     gpu_saca::util::deallocate(T);
-
-/*
-    {
-        std::vector<std::size_t> SA(n + 1);
-        // caps_sa::build_SA_naive(T, n, SA);
-        // caps_sa::build_SA_prefix_doubling(T, n, SA);
-
-        caps_sa::Suffix_Array Suf_Arr(T, n);
-
-        const auto t_0 = caps_sa::now();
-        Suf_Arr.build_SA(SA.data());
-        const auto t_1 = caps_sa::now();
-
-        std::cerr << "Built the SA using `cu-caps-sa`. Time taken: " << caps_sa::duration(t_1 - t_0) << " seconds.\n";
-
-        std::cerr << "Suffix array is " << (Suf_Arr.validate() ? "correct" : "wrong") << "\n";
-    }
-*/
 
 
     return 0;

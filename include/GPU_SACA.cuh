@@ -24,8 +24,6 @@ extern __constant__ Prefix_Key pivots_d[];
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
-// TODO:
-//      1. Tune the number of partitions.
 template <typename T_sym_>
 class GPU_SACA
 {
@@ -49,11 +47,8 @@ private:
     p_id_t* P_id;   // Partition-IDs of the suffixes.
 
     std::vector<Partition> P_;  // The suffix partitions.
-    std::vector<idx_t> P_sz;    // Sizes of the suffix partitions.
+    std::vector<idx_t> P_sz;    // Sizes of the suffix partitions; tracks the active-set sizes of the partitions instead of the full size.
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
-
-    std::vector<int> is_sorted; // Whether a partition has been fully-sorted or not.
-    int* is_unsorted_d;         // Device-side marker for whether a partition is still unsorted or not.
 
     idx_t* rho; // Global rank of the suffixes.
 
@@ -75,10 +70,14 @@ private:
         idx_t* suf_buf[STREAM_C][2];    // Input and output buffers for suffixes, per stream.
         void* workspace_buf[STREAM_C];  // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;       // Size of the `cub` workspace.
+
+        uint8_t* is_active_buf[STREAM_C];   // Activeness-marker buffers for suffixes, per stream.
+        idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
     // }
 
 #ifdef TESTS
-    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the sorted keys of all partitions before the ranks overwrite those.
+    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the order of the sorted keys of all partitions, before the new ranks overwrite those.
+    idx_t* sorted_suf = nullptr;    // Single host-pinned buffer to save the order of the suffix indices corresponding to sorted keys of all partitions, before they get shuffled.
 #endif
 
     // Selects the set of pivots for the partitioning of the suffixes.
@@ -105,18 +104,18 @@ private:
     // to them during partitioning.
     void initial_rank();
 
-    // Computes the sizes of the suffix partitions based on the quantized `K`-
-    // gram histogram `H` and the selected pivots.
-    // void compute_partition_sizes(const std::vector<freq_cnt_t>& H);
-
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
-    // Sorts and ranks the `p_id`'th partition at the device.
-    void sort_and_rank(p_id_t p_id);
+    // Sorts and initially ranks the `p_id`'th partition, and filters the
+    // entries in the partition with unique ranks by grouping them into the tail
+    // of the partition.
+    void sort_and_init_rank_and_filter(p_id_t p_id);
 
-    // Copies the partitions' sortedness flags from the device to the host.
-    void collect_sortedness_flags();
+    // Sorts the `p_id`'th partition, re-ranks it based on the sorted order, and
+    // filters the entries in the partition with unique ranks by grouping them
+    // into the tail of the partition.
+    void sort_and_re_rank_and_filter(p_id_t p_id);
 
     // Updates the global ranks of the suffixes based on the current status of
     // the partitions.
@@ -143,10 +142,6 @@ public:
     GPU_SACA(const T_sym_* T, idx_t n);
 
     ~GPU_SACA();
-
-    // Returns `1` if `x` is in the upper half of `T_sym_`'s range, `0` otherwise.
-    __device__ __host__
-    static uint8_t quantize(T_sym_ x);
 
     // Builds the suffix array into `SA`.
     void build_SA(idx_t*& SA);
@@ -234,43 +229,89 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 }
 
 
-// Flags the distinct sort-keys from the sorted `Sort_Key` array of size `n`,
-// with their offsets, into the 64-bit array `off_u64` of size `2 * n`. `K` and
-// `off_u64` will be byte-aligned: the `i`'th sort-key from `K` has its offset
-// at the `2 * i`'th index of `off_u64`—thus the odd indices in `off_u64` will
-// be 0-holes.
+// Initializes the ranks of the distinct sort-key groups from the sorted array
+// `K` (of size `n`) into the 64-bit rank array `rank_u64` (of size `2 * n`).
+// Also computes the sort-keys' activeness-flags (for future) into `is_active`.
+// The first key of a group is ranked by its offset into `K`, whereas the rest
+// of the keys in the group are ranked `0`. `K` and `rank_u64` will be byte-
+// aligned: the `i`'th sort-key from `K` has its rank at the `2 * i`'th index of
+// `rank_u64`—thus the odd indices in `rank_u64` will be 0-holes.
 // Grid organization: one thread per sort-key.
-// Shared memory layout: no dynamic memory usage.
-template <std::size_t BLOCK_SZ>
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
 __global__
-void flag_distinct_key_offsets_kernel(  const Sort_Key* const __restrict__ K,
-                                        uint64_t* const __restrict__ off_u64, const idx_t n, int* const __restrict__ is_unsorted)
+void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Sort_Key* const __restrict__ K, const idx_t n,
+                                                                idx_t* const __restrict__ rank_u64,
+                                                                uint8_t* const __restrict__ is_active)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    // Shared memory pattern: one `int` indicator of sorted-ness.
-    __shared__ int sorted;  // Whether this block has already been fully-sorted or not.
-    if(threadIdx.x == 0)
-        sorted = 1;
-
-    __syncthreads();
-
-    off_u64[2 * i + 1] = 0; // Hole in the flag array corresponding to the `i`'th sort-key.
+    rank_u64[2 * i + 1] = 0;    // Hole in the flag array corresponding to the `i`'th sort-key.
     if(i == 0)
-        off_u64[0] = 0; // First group always starts at offset `0`.
+        rank_u64[0] = 0;    // First group always starts at offset `0`.
+    else
+        rank_u64[2 * i] = (K[i].primary != K[i - 1].primary || K[i].secondary != K[i - 1].secondary ? i : 0);
+
+    const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
+    const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
+    is_active[i] = (pre_tie || suc_tie);
+}
+
+
+// Ranks the distinct sort-key groups and primary-key groups from the sorted
+// array `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
+// respectively. Also computes the sort-keys' activeness-flags (for future) into
+// `is_active`. The first entry of a group is ranked by its offset into `K`,
+// whereas the rest of the entries in the group are ranked `0`.
+// Grid organization: one thread per sort-key / suffix.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const Sort_Key* const __restrict__ K, const idx_t n,
+                                                                            idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
+                                                                            uint8_t* const __restrict__ is_active)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+    if(i == 0)
+    {
+        // First group always starts at offset `0`.
+        key_group_rank[0] = 0;
+        primary_key_group_rank[0] = 0;
+    }
     else
     {
-        const bool tie = (K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
-        off_u64[2 * i] = !tie ? i : 0;
-        if(tie)
-            sorted = 0;
+        const bool key_tie = (K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
+        const bool primary_key_tie = (K[i].primary == K[i - 1].primary);
+        key_group_rank[i] = (!key_tie ? i : 0);
+        primary_key_group_rank[i] = (!primary_key_tie ? i : 0);
     }
 
-    __syncthreads();
-    if(threadIdx.x == 0 && !sorted)
-        *is_unsorted = 1;
+    const bool pre_tie = (i == 0        ? false : K[i].primary == K[i - 1].primary && K[i].secondary == K[i - 1].secondary);
+    const bool suc_tie = (i == n - 1    ? false : K[i].primary == K[i + 1].primary && K[i].secondary == K[i + 1].secondary);
+    is_active[i] = (pre_tie || suc_tie);
+}
+
+
+// Refines the primary-keys of the sorted array `K` (of size `n`) based on its
+// key groups' ranks `key_group_rank` and its primary-key groups' ranks
+// `primary_key_group_rank`.
+// Grid organization: one thread per sort-key / suffix.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void refine_primary_keys_kernel(Sort_Key* const __restrict__ K, const idx_t n,
+                                const idx_t* const __restrict__ key_group_rank, const idx_t* const __restrict__ primary_key_group_rank)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+    K[i].primary += (key_group_rank[i] - primary_key_group_rank[i]);
 }
 
 }
