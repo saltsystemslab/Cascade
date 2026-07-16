@@ -26,7 +26,7 @@ while(0)
 
 
 
-namespace gpu_saca
+namespace gpu_saca  // TODO: why are all the following in the parent namespace?
 {
     constexpr std::size_t CONST_MEM_SZ = 64 * 1024; // 64-KB of constant memory across all CUDA compute capabilities.
 

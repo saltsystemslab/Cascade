@@ -83,6 +83,10 @@ list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 add_compile_definitions(PROJECT_VERSION=${CMAKE_PROJECT_VERSION})
 add_compile_definitions(CMAKE_EXPORT_COMPILE_COMMANDS)  # For better `clangd` scanning.
 
+if(ELL)
+    add_compile_definitions(ELL=${ELL})
+endif()
+
 if(TESTS)
     add_compile_definitions(TESTS)
 endif()

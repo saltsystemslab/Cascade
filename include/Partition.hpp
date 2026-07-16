@@ -4,7 +4,6 @@
 
 
 
-#include "Sort_Key.hpp"
 #include "types.hpp"
 
 
@@ -17,7 +16,7 @@ class Partition
 private:
 
     idx_t* suf_;    // The suffixes in this partition.
-    Sort_Key* key_; // The sort-keys of the suffixes in the partition.
+    idx_t* key_;    // The packed (primary, secondary) keys of the suffixes in the partition.
     const idx_t cap_;   // Capacity of the partition.
 
 public:

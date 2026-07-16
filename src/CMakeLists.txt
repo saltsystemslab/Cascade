@@ -12,7 +12,7 @@ set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 set(PROJECT_SRC
         GPU_SACA.cu
         Partition.cu
-        Suffix_Buffer.cpp
+        Suffix_Buffer.cu
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.
