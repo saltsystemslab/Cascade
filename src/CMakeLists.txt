@@ -13,6 +13,8 @@ set(PROJECT_SRC
         GPU_SACA.cu
         Partition.cu
         Suffix_Buffer.cu
+        Staging_Slab.cu
+        RAM_Backend.cu
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.

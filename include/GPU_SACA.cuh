@@ -6,6 +6,7 @@
 #include "types.hpp"
 #include "Prefix_Key.cuh"
 #include "Partition.hpp"
+#include "Partition_Backend.cuh"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -58,6 +59,9 @@ private:
 
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
+
+    Staging_Slab slab_[STREAM_C];   // Pinned staging slabs, bridging partition-backend to device.
+    std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
 
     // Sampling parameters.
     // {

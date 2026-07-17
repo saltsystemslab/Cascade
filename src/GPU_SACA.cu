@@ -16,6 +16,7 @@
 #include <limits>
 #include <vector>
 #include <cstring>
+#include <memory>
 #include <cstdlib>
 #include <random>
 #include <cmath>
@@ -141,6 +142,15 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
             std::cerr << "Too low device memory available for the process. Aborting.\n";
             std::exit(EXIT_FAILURE);
         }
+    }
+
+    // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
+    {
+        backend_ = std::make_unique<RAM_Backend>(P_, prefix, P_off);
+
+        const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+        for(std::size_t b = 0; b < STREAM_C; ++b)
+            slab_[b].allocate(P_sz_max);
     }
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
