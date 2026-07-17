@@ -1,6 +1,6 @@
 
 #include "Partition.hpp"
-#include "utility.cuh"
+#include "utility.hpp"
 
 #include "omp.h"
 
@@ -13,15 +13,15 @@ Partition::Partition(const idx_t cap):
     , key_(nullptr)
     , cap_(cap)
 {
-    CUDA_CHECK(pinned_allocate_host(suf_, cap_));
-    CUDA_CHECK(pinned_allocate_host(key_, cap_));
+    suf_ = util::allocate<idx_t>(cap_);
+    key_ = util::allocate<idx_t>(cap_);
 }
 
 
 Partition::~Partition()
 {
-    CUDA_CHECK(deallocate_host(suf_));
-    CUDA_CHECK(deallocate_host(key_));
+    util::deallocate(suf_);
+    util::deallocate(key_);
 }
 
 }

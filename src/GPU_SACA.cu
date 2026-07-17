@@ -80,7 +80,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     util::deallocate(P_id);
     util::deallocate(rho);
 
-    CUDA_CHECK(deallocate_host(prefix));
+    util::deallocate(prefix);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamDestroy(stream[s]));
@@ -417,7 +417,7 @@ void GPU_SACA<T_sym_>::partition()
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_.emplace_back(P_sz[p_id]);
 
-            CUDA_CHECK(pinned_allocate_host(prefix, n_));
+            prefix = util::allocate<Prefix_Key>(n_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
