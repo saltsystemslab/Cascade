@@ -144,6 +144,11 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
         }
     }
 
+    {
+        PROFILE_SCOPE("setup_staging");
+        setup_staging();
+    }
+
     // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
     {
         backend_ = std::make_unique<RAM_Backend>(P_, prefix, P_off);
@@ -407,6 +412,25 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     }
 
     return true;
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::setup_staging()
+{
+    chunk_cap_ = *std::max_element(P_sz.cbegin(), P_sz.cend()); // TODO: one chunk covering an entire partition for now. Shrink.
+    slab_c_ = STREAM_C + 2; // TODO: tune.
+    reader_c_ = 2;  // TODO: tune.
+    writer_c_ = 1;  // TODO: tune.
+
+    S.resize(slab_c_);
+    for(auto& s : S)
+    {
+        s.allocate(chunk_cap_);
+        F.enqueue(&s);
+    }
+
+    part_assembly = std::make_unique<Partition_Assembly[]>(p_);
 }
 
 

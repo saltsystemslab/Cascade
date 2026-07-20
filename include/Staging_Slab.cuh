@@ -11,14 +11,18 @@
 namespace gpu_saca
 {
 
-// Staging slab to hold a partition's data (keys and suffixes), bridging the
-// partition storage backend and the device through host-pinned space.
+// Staging slab to hold a chunk of a partition's data (keys and suffixes),
+// bridging the partition storage backend and the device through host-pinned
+// space.
 struct Staging_Slab
 {
 private:
 
-    Prefix_Key* key_;   // Keys of the partition; typed to the largest-width type used in sort (which is in initial-ranking).
-    idx_t* suf_;    // Suffixes of the partition.
+    Prefix_Key* key_;   // Keys of the partition-chunk; typed to the largest-width type used in sort (which is in initial-ranking).
+    idx_t* suf_;    // Suffixes of the partition-chunk.
+    p_id_t p_id;    // ID of the partition this slab's content belongs to.
+    idx_t off;  // Offset of the content of this slab within the corresponding partition.
+    idx_t sz;   // Number of elements in the slab.
 
 public:
 

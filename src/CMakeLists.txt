@@ -32,6 +32,6 @@ add_executable(test test.cu)
 
 target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${TESTS_INCLUDE})
+target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 target_include_directories(libcubwt_driver PRIVATE ${INCLUDE_DIR})
 target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})

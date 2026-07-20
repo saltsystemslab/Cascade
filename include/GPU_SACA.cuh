@@ -8,7 +8,10 @@
 #include "Partition.hpp"
 #include "Partition_Backend.cuh"
 #include "Staging_Slab.cuh"
+#include "Read_Task.cuh"
 #include "utility.cuh"
+
+#include "concurrentqueue/blockingconcurrentqueue.h"
 
 #include <cstdint>
 #include <cstddef>
@@ -64,6 +67,22 @@ private:
     Staging_Slab slab_[STREAM_C];   // Pinned staging slabs, bridging partition-backend to device.
     std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
 
+    // Data structures to for the chunked staging of data between the partition-backend and the device buffers.
+    // {
+        idx_t chunk_cap_;   // Chunk granularity (keys / suffixes per slab).
+        idx_t slab_c_;  // |S|: slab pool size.
+        idx_t reader_c_;    // |r|: reader-threads count.
+        idx_t writer_c_;    // |w|: writer-threads count.
+
+        std::vector<Staging_Slab> S;    // The slab pool.
+        std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
+
+        moodycamel::BlockingConcurrentQueue<Read_Task> RT;  // Chunk-read tasks.
+        moodycamel::BlockingConcurrentQueue<Staging_Slab*> F;   // Free slabs.
+        moodycamel::BlockingConcurrentQueue<Partition_Assembly*> R; // Slabs with chunks read from partition-backend, ready to be uploaded to device.
+        moodycamel::BlockingConcurrentQueue<Staging_Slab*> W;   // Slabs with chunks downloaded from device, ready to be written to partition-backend.
+    // }
+
     // Sampling parameters.
     // {
         static constexpr idx_t OVERSAMPLING_FACTOR = 32;    // Oversampling-factor.
@@ -105,6 +124,10 @@ private:
     // Allocates spaces for the required device data structures; returns `true`
     // iff the device had enough space for such.
     bool allocate_device_space();
+
+    // Sets up the staging slabs and their readers-writers, for chunked staging
+    // of data between the partition-backend and the device buffers.
+    void setup_staging();
 
     // Partitions the suffixes based on the selected pivots.
     void partition();
