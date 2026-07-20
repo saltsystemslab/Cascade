@@ -7,6 +7,7 @@
 #include "Prefix_Key.cuh"
 #include "Partition.hpp"
 #include "Partition_Backend.cuh"
+#include "Staging_Slab.cuh"
 #include "utility.cuh"
 
 #include <cstdint>
@@ -117,13 +118,17 @@ private:
 
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
-    // of the partition.
-    void sort_and_init_rank_and_filter(p_id_t p_id);
+    // of the partition. Staging slab `slab` contains the partition content
+    // before and after, and the `buf_id`'th device-buffer set is used for
+    // device operations.
+    void sort_and_init_rank_and_filter(p_id_t p_id, Staging_Slab& slab, idx_t buf_id);
 
     // Sorts the `p_id`'th partition, re-ranks it based on the sorted order, and
     // filters the entries in the partition with unique ranks by grouping them
-    // into the tail of the partition.
-    void sort_and_re_rank_and_filter(p_id_t p_id);
+    // into the tail of the partition. Staging slab `slab` contains the
+    // partition content before and after, and the `buf_id`'th device-buffer set
+    // is used for device operations.
+    void sort_and_re_rank_and_filter(p_id_t p_id, Staging_Slab& slab, idx_t buf_id);
 
     // Updates the global ranks of the suffixes based on the current status of
     // the partitions.

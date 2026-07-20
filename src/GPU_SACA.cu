@@ -588,23 +588,40 @@ void GPU_SACA<T_sym_>::initial_rank()
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
 
+        p_id_t slab_part_id[STREAM_C];  // ID of the partition currently staged in each slab.
+        bool slab_used[STREAM_C]{}; // Whether a slab holds an in-flight partition.
+        idx_t b = 0;    // Round-robin slab / stream index.
+
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
             if(P_sz[p_id] == 0) // Skip empty partitions.
                 continue;
 
-            sort_and_init_rank_and_filter(p_id);
+            if(slab_used[b])    // Reclaim slab `b` and drain it to the backend.
+            {
+                CUDA_CHECK(cudaStreamSynchronize(stream[b]));
+                backend_->write(slab_part_id[b], P_sz[slab_part_id[b]], slab_[b]);
+            }
+
+            // Stage partition `p_id` into slab `b` and dispatch.
+            {
+                backend_->read_prefixes(p_id, P_sz[p_id], slab_[b]);
+                sort_and_init_rank_and_filter(p_id, slab_[b], b);
+                slab_part_id[b] = p_id, slab_used[b] = true;
+
+                b = (b + 1) % STREAM_C;
+            }
         }
+
+
+        // Drain the last partition staged in each slab.
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            if(slab_used[s_id])
+            {
+                CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                backend_->write(slab_part_id[s_id], P_sz[slab_part_id[s_id]], slab_[s_id]);
+            }
     }
-
-
-    // Wait for the streams to finish.
-    {
-        PROFILE_SCOPE("stream_sync");
-        for(std::size_t s = 0; s < STREAM_C; ++s)
-            CUDA_CHECK(cudaStreamSynchronize(stream[s]));
-    }
-
 
 #ifdef TESTS
     std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
@@ -639,11 +656,10 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
+void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Staging_Slab& slab, const idx_t buf_id)
 {
     PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter_p%d", static_cast<int>(p_id));
 
-    const std::size_t buf_id = p_id % STREAM_C; // Which set of buffers (and stream) to use for this partition.
     const auto part_sz = P_sz[p_id];    // Size of this partition.
 
     cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);  // Input and output buffers for the prefix-keys of suffixes at the device.
@@ -653,8 +669,8 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
 
     // Asynchronously upload this partition's suffixes and their prefix-keys to the device.
     {
-        CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], prefix + P_off[p_id], part_sz * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], P_[p_id].suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], slab.key(), part_sz * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], slab.suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
     }
 
 
@@ -730,18 +746,17 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id)
     {
         const idx_t* const K_out    = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
         const idx_t* const SA_out   = suf_buf[buf_id][1 - sort_op_selector];
-        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), K_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].suf(), SA_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(slab.key()), K_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(slab.suf(), SA_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
+void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Staging_Slab& slab, const idx_t buf_id)
 {
     PROFILE_SCOPE_FMT("sort_and_re_rank_and_filter_p%d", static_cast<int>(p_id));
 
-    const std::size_t buf_id = p_id % STREAM_C; // Which set of buffers (and stream) to use for this partition.
     const auto part_sz = P_sz[p_id];    // Size of this partition.
 
     cub::DoubleBuffer<idx_t> key(reinterpret_cast<idx_t*>(key_buf[buf_id][0]), reinterpret_cast<idx_t*>(key_buf[buf_id][1]));   // Input and output buffers for the keys of suffixes at the device.
@@ -751,8 +766,8 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
 
     // Asynchronously upload this partition to the device.
     {
-        CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], P_[p_id].key(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], P_[p_id].suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], slab.key(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], slab.suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
     }
 
 
@@ -844,8 +859,8 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id)
     {
         const idx_t* const K_out    = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
         const idx_t* const SA_out   = suf_buf[buf_id][1 - sort_op_selector];
-        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].key(), K_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(P_[p_id].suf(), SA_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(slab.key()), K_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(slab.suf(), SA_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 
@@ -895,22 +910,41 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Sort-and-rank each partition.
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
+
+            p_id_t slab_part_id[STREAM_C];  // ID of the partition currently staged in each slab.
+            bool slab_used[STREAM_C]{}; // Whether a slab holds an in-flight partition.
+            idx_t b = 0;    // Round-robin slab / stream index.
+
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
             {
                 if(P_sz[p_id] == 0) // Skip partitions with empty active-set.
                     continue;
 
-                sort_and_re_rank_and_filter(p_id);
+                if(slab_used[b])    // Reclaim slab `b` and drain in to the backend.
+                {
+                    CUDA_CHECK(cudaStreamSynchronize(stream[b]));
+                    backend_->write(slab_part_id[b], P_sz[slab_part_id[b]], slab_[b]);
+                }
+
+                // Stage partition `p_id` into slab `b` and dispatch.
+                {
+                    backend_->read_keys(p_id, P_sz[p_id], slab_[b]);
+                    sort_and_re_rank_and_filter(p_id, slab_[b], b);
+                    slab_part_id[b] = p_id, slab_used[b] = true;
+
+                    b = (b + 1) % STREAM_C;
+                }
             }
-        }
 
-        // Wait for the streams to finish updating the local-ranks.
-        {
-            PROFILE_SCOPE("stream_sync");
-            for(std::size_t s = 0; s < STREAM_C; ++s)
-                CUDA_CHECK(cudaStreamSynchronize(stream[s]));
-        }
 
+            // Drain the last partition staged in each slab.
+            for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+                if(slab_used[s_id])
+                {
+                    CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                    backend_->write(slab_part_id[s_id], P_sz[slab_part_id[s_id]], slab_[s_id]);
+                }
+        }
 
 #ifdef TESTS
         std::cerr << "Rankings verification for prefix-context " << (2 * k) << ": " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
