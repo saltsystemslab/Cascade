@@ -25,4 +25,10 @@ void Staging_Slab::allocate(idx_t sz)
     CUDA_CHECK(pinned_allocate_host(suf_, sz));
 }
 
+
+void Staging_Slab::assign(const p_id_t p_id, const idx_t off, const idx_t sz)
+{
+    p_id_ = p_id, off_ = off, sz_ = sz;
+}
+
 }
