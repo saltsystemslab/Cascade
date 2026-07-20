@@ -40,6 +40,9 @@
 # debug information files
 *.dwo
 
+# third-party
+external/
+
 # scripts
 scripts/GPU/
 

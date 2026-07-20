@@ -133,10 +133,24 @@ set(EXT_INCLUDE ${CMAKE_SOURCE_DIR}/external/include/)
 
 file(MAKE_DIRECTORY ${EXT_LIB} ${EXT_INCLUDE})
 
-set(EXT_LIB ${CMAKE_SOURCE_DIR}/external/lib/)
-set(EXT_INCLUDE ${CMAKE_SOURCE_DIR}/external/include/)
 
-file(MAKE_DIRECTORY ${EXT_LIB} ${EXT_INCLUDE})
+# Prepare the `concurrentqueue` library. It provides fast multi-producer, multi-
+# consumer lock-free concurrent queues.
+set(CONCURRENTQUEUE_MIN_VERSION "1.0.5")
+message("Build system will fetch and install moodycamel::ConcurrentQueue.")
+ExternalProject_Add(prj_concurrentqueue
+    DOWNLOAD_DIR        ${CMAKE_SOURCE_DIR}/external
+    DOWNLOAD_COMMAND    wget -O concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}.tar.gz https://github.com/cameron314/concurrentqueue/archive/refs/tags/v${CONCURRENTQUEUE_MIN_VERSION}.tar.gz &&
+                        tar -xzf concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}.tar.gz &&
+                        rm concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}.tar.gz
+
+    SOURCE_DIR          ${CMAKE_SOURCE_DIR}/external/concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}
+    BUILD_IN_SOURCE     TRUE
+    INSTALL_DIR         ${CMAKE_SOURCE_DIR}/external
+    CONFIGURE_COMMAND   ""
+    BUILD_COMMAND       ""
+    INSTALL_COMMAND     sh -c "mkdir -p ${EXT_INCLUDE}/concurrentqueue && cp -rf concurrentqueue.h blockingconcurrentqueue.h lightweightsemaphore.h ${EXT_INCLUDE}/concurrentqueue/"
+)
 
 
 # The `Debug` configuration optimizes the program for debugging and enables full debug information.
