@@ -777,6 +777,39 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
 
 template <typename T_sym_>
+template <bool init_rank_>
+void GPU_SACA<T_sym_>::drive_pipeline()
+{
+    idx_t total_chunk = 0;  // Total count of chunks across all partitions.
+    p_id_t active_part_c = 0;   // Count of active partitions in the current iteration.
+
+    // Post read-tasks in partition order.
+    {
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        {
+            if(P_sz[p_id] == 0) // Skip partition with empty active-sets.
+                continue;
+
+            active_part_c++;
+            const idx_t part_chunk_c = (P_sz[p_id] + chunk_cap_ - 1) / chunk_cap_;  // Number of chunks / slabs required for this partition.
+            total_chunk += part_chunk_c;
+
+            // Prepare skeleton chain of chunks of this partition.
+            part_assembly[p_id].slab.assign(part_chunk_c, nullptr);
+            part_assembly[p_id].chunks_to_read.store(part_chunk_c, std::memory_order_relaxed);
+
+            for(idx_t c = 0; c < part_chunk_c; ++c) // Post a read-task for each chunk of this partition.
+            {
+                const auto chunk_off = c * chunk_cap_;
+                const auto chunk_sz = std::min(chunk_cap_, P_sz[p_id] - chunk_off);
+                RT.enqueue(Read_Task{p_id, c, chunk_off, chunk_sz});
+            }
+        }
+    }
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_Assembly& p_assembly, const idx_t buf_id)
 {
     PROFILE_SCOPE_FMT("sort_and_re_rank_and_filter_p%d", static_cast<int>(p_id));

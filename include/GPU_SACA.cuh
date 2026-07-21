@@ -152,6 +152,11 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
+    // Drives a complete pipeline for all the partitions: chunked reading from
+    // backend, sort-and-rank in the device, and chunked write-back to backend.
+    // `init_rank_` determines whether it's for the initial-ranking phase.
+    template <bool init_rank_> void drive_pipeline();
+
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
     // of the partition. The slab-assembly `p_assembly` contains the partition's
