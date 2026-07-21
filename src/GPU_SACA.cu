@@ -880,6 +880,16 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             CUDA_CHECK(cudaLaunchHostFunc(stream[s_id], on_partition_download, new Partition_Download_Callback_Args{this, p_assembly, s_id}));
         }
     }
+
+
+    // Wait for the pipeline to finish.
+    {
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+
+        for(auto& r : readers)  r.join();
+        for(auto& w : writers)  w.join();
+    }
 }
 
 
