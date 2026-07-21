@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <limits>
+#include <atomic>
 #include <vector>
 #include <cstring>
 #include <memory>
@@ -22,6 +23,8 @@
 #include <cmath>
 #include <algorithm>
 #include <iostream>
+#include <thread>
+#include <chrono>
 #include <cassert>
 
 
@@ -427,6 +430,9 @@ void GPU_SACA<T_sym_>::setup_staging()
         s.allocate(chunk_cap_);
         F.enqueue(&s);
     }
+
+    for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+        FS.enqueue(s_id);
 
     part_assembly = std::make_unique<Partition_Assembly[]>(p_);
 }
@@ -855,6 +861,24 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                     }
                 }
             );
+    }
+
+
+    // Current thread itself is the GPU-dispatcher thread. It dispatches device-tasks by repeatedly:
+    // pulling a complete assembly and a free device-stream, and then dispatching these to the device
+    // (with an attached callback to add processed slabs to write-queue and free the device-stream).
+    {
+        for(p_id_t dispatched = 0; dispatched < active_part_c; ++dispatched)
+        {
+            idx_t s_id;                     FS.wait_dequeue(s_id);      // Get a free device-stream.
+            Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
+            const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
+
+            if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
+            else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
+
+            CUDA_CHECK(cudaLaunchHostFunc(stream[s_id], on_partition_download, new Partition_Download_Callback_Args{this, p_assembly, s_id}));
+        }
     }
 }
 
