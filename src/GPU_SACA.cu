@@ -147,16 +147,11 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
         }
     }
 
-    {
-        PROFILE_SCOPE("setup_staging");
-        setup_staging();
-    }
-
     // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
     {
+        PROFILE_SCOPE("setup_staging");
         backend_ = std::make_unique<RAM_Backend>(P_, prefix, P_off);
-
-        const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+        setup_staging();
     }
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
