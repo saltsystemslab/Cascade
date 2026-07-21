@@ -414,10 +414,17 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::setup_staging()
 {
-    chunk_cap_ = *std::max_element(P_sz.cbegin(), P_sz.cend()); // TODO: one chunk covering an entire partition for now. Shrink.
+    const auto P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+    chunk_cap_ = P_sz_max;  // TODO: one chunk covering an entire partition for now. Shrink.
     slab_c_ = STREAM_C + 2; // TODO: tune.
     reader_c_ = 2;  // TODO: tune.
     writer_c_ = 1;  // TODO: tune.
+
+    if(slab_c_ < (P_sz_max + chunk_cap_ - 1) / chunk_cap_)
+    {
+        std::cerr << "Slab-pool size is too small to support chunked staging of the largest partition(s). Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 
     S.resize(slab_c_);
     for(auto& s : S)
@@ -436,7 +443,10 @@ void GPU_SACA<T_sym_>::setup_staging()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::partition()
 {
-    { PROFILE_SCOPE("compute_partition_IDs");   compute_partition_IDs(); }
+    {
+        PROFILE_SCOPE("compute_partition_IDs");
+        compute_partition_IDs();
+    }
 
     // Move the suffixes (with some associated prefixes) to their corresponding partitions.
     {
@@ -619,7 +629,9 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
     // Compute the initial global ranking.
-    { PROFILE_SCOPE("update_global_ranks");     update_global_ranks();}
+    {
+        PROFILE_SCOPE("update_global_ranks");
+        update_global_ranks();}
 
     // Resize the partitions to their active-set size.
     // NB: this compaction must land *after* the preceding global rankings have been updated.
@@ -1044,7 +1056,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 #endif
 
         // Update global-ranks based on the updated local-ranks.
-        { PROFILE_SCOPE("update_global_ranks"); update_global_ranks();}
+        {
+            PROFILE_SCOPE("update_global_ranks");
+            update_global_ranks();
+        }
 
         // Resize the partitions to their active-set size.
         // NB: this compaction must land *after* the preceding global rankings have been updated.
