@@ -1,11 +1,10 @@
 
-#ifndef READ_TASK_CUH
-#define READ_TASK_CUH
+#ifndef READ_TASK_HPP
+#define READ_TASK_HPP
 
 
 
 #include "types.hpp"
-#include "Staging_Slab.cuh"
 
 
 namespace gpu_saca

@@ -72,7 +72,7 @@ public:
 struct Partition_Assembly
 {
     std::vector<Staging_Slab*> slab;    // Collection of the slabs containing the partition's content.
-    std::atomic<idx_t> chunks_remain;   // Count of chunks still remaining to be read for the partition.
+    std::atomic<idx_t> chunks_to_read;  // Count of chunks still remaining to be read for the partition.
 };
 
 }

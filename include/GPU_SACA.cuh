@@ -8,7 +8,7 @@
 #include "Partition.hpp"
 #include "Partition_Backend.cuh"
 #include "Staging_Slab.cuh"
-#include "Read_Task.cuh"
+#include "Read_Task.hpp"
 #include "utility.cuh"
 
 #include "concurrentqueue/blockingconcurrentqueue.h"
