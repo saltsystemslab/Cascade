@@ -615,36 +615,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
-
-        p_id_t slab_part_id[STREAM_C];  // ID of the partition currently staged in each slab.
-        bool slab_used[STREAM_C]{}; // Whether a slab holds an in-flight partition.
-        idx_t b = 0;    // Round-robin slab / stream index.
-
-        for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        {
-            if(P_sz[p_id] == 0) // Skip empty partitions.
-                continue;
-
-            if(slab_used[b])    // Reclaim slab `b` and drain it to the backend.
-            {
-                CUDA_CHECK(cudaStreamSynchronize(stream[b]));
-            }
-
-            // Stage partition `p_id` into slab `b` and dispatch.
-            {
-                slab_part_id[b] = p_id, slab_used[b] = true;
-
-                b = (b + 1) % STREAM_C;
-            }
-        }
-
-
-        // Drain the last partition staged in each slab.
-        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
-            if(slab_used[s_id])
-            {
-                CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-            }
+        drive_pipeline<true>();
     }
 
 #ifdef TESTS
@@ -1073,33 +1044,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Sort-and-rank each partition.
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
-
-            bool slab_used[STREAM_C]{}; // Whether a slab holds an in-flight partition.
-            idx_t b = 0;    // Round-robin slab / stream index.
-
-            for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            {
-                if(P_sz[p_id] == 0) // Skip partitions with empty active-set.
-                    continue;
-
-                if(slab_used[b])    // Reclaim slab `b` and drain in to the backend.
-                {
-                    CUDA_CHECK(cudaStreamSynchronize(stream[b]));
-                }
-
-                // Stage partition `p_id` into slab `b` and dispatch.
-                {
-                    b = (b + 1) % STREAM_C;
-                }
-            }
-
-
-            // Drain the last partition staged in each slab.
-            for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
-                if(slab_used[s_id])
-                {
-                    CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-                }
+            drive_pipeline<false>();
         }
 
 #ifdef TESTS
