@@ -20,17 +20,16 @@ class Partition_Backend
 {
 public:
 
-    // Reads the suffixes and their initial prefixes from the `p_id`'th
-    // partition (of size `sz`) into `slab`.
-    virtual void read_prefixes(p_id_t p_id, idx_t sz, Staging_Slab& s) const = 0;
+    // Reads into `slab` the suffixes and their initial prefixes from the chunk
+    // of the partition currently tagged in `slab`.
+    virtual void read_prefixes(Staging_Slab& s) const = 0;
 
-    // Reads the suffixes and their ranks from the `p_id`'th partition (of size
-    // `sz`) into `slab`.
-    virtual void read_keys(p_id_t p_id, idx_t sz, Staging_Slab& s) const = 0;
+    // Reads into `slab` the suffixes and their ranks from the chunk of the
+    // partition currently in `slab`.
+    virtual void read_keys(Staging_Slab& s) const = 0;
 
-    // Writes the suffixes and their ranks of the `p_id`'th partition (of size
-    // `sz`) from `slab` to the backend.
-    virtual void write(p_id_t p_id, idx_t sz, const Staging_Slab& s) = 0;
+    // Writes the chunk currently in `slab` into the backend.
+    virtual void write(const Staging_Slab& s) = 0;
 };
 
 
@@ -47,11 +46,11 @@ public:
 
     RAM_Backend(std::vector<Partition>& P, const Prefix_Key* const prefix, const std::vector<idx_t>& P_off);
 
-    void read_prefixes(p_id_t p_id, idx_t sz, Staging_Slab& s) const override;
+    void read_prefixes(Staging_Slab& s) const override;
 
-    void read_keys(p_id_t p_id, idx_t sz, Staging_Slab& s) const override;
+    void read_keys(Staging_Slab& s) const override;
 
-    void write(p_id_t p_id, idx_t sz, const Staging_Slab& s) override;
+    void write(const Staging_Slab& s) override;
 };
 
 }

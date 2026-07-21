@@ -624,12 +624,12 @@ void GPU_SACA<T_sym_>::initial_rank()
             if(slab_used[b])    // Reclaim slab `b` and drain it to the backend.
             {
                 CUDA_CHECK(cudaStreamSynchronize(stream[b]));
-                backend_->write(slab_part_id[b], P_sz[slab_part_id[b]], slab_[b]);
+                backend_->write(slab_[b]);
             }
 
             // Stage partition `p_id` into slab `b` and dispatch.
             {
-                backend_->read_prefixes(p_id, P_sz[p_id], slab_[b]);
+                backend_->read_prefixes(slab_[b]);
                 sort_and_init_rank_and_filter(p_id, slab_[b], b);
                 slab_part_id[b] = p_id, slab_used[b] = true;
 
@@ -643,7 +643,7 @@ void GPU_SACA<T_sym_>::initial_rank()
             if(slab_used[s_id])
             {
                 CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-                backend_->write(slab_part_id[s_id], P_sz[slab_part_id[s_id]], slab_[s_id]);
+                backend_->write(slab_[s_id]);
             }
     }
 
@@ -947,12 +947,12 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 if(slab_used[b])    // Reclaim slab `b` and drain in to the backend.
                 {
                     CUDA_CHECK(cudaStreamSynchronize(stream[b]));
-                    backend_->write(slab_part_id[b], P_sz[slab_part_id[b]], slab_[b]);
+                    backend_->write(slab_[b]);
                 }
 
                 // Stage partition `p_id` into slab `b` and dispatch.
                 {
-                    backend_->read_keys(p_id, P_sz[p_id], slab_[b]);
+                    backend_->read_keys(slab_[b]);
                     sort_and_re_rank_and_filter(p_id, slab_[b], b);
                     slab_part_id[b] = p_id, slab_used[b] = true;
 
@@ -966,7 +966,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 if(slab_used[s_id])
                 {
                     CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-                    backend_->write(slab_part_id[s_id], P_sz[slab_part_id[s_id]], slab_[s_id]);
+                    backend_->write(slab_[s_id]);
                 }
         }
 
