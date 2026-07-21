@@ -809,7 +809,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
 
     std::vector<std::thread> readers;   // Readers-pool.
-    // Launch readers thread-pool to complete the posted read-tasks.
+    // Launch readers thread-pool to read chunks from the partition-backend to staging slabs.
     {
         std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
         for(idx_t r = 0; r < reader_c_; ++r)
@@ -829,6 +829,29 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
                         if(p_assembly.chunks_to_read.fetch_sub(1, std::memory_order_acq_rel) == 1)  // Last chunk read off for this partition; chunked-assembly is ready for the device.
                             R.enqueue(&p_assembly);
+                    }
+                }
+            );
+    }
+
+
+    std::vector<std::thread> writers;   // Writers-pool.
+    // Launch writers thread-pool to drain the processed chunks to the partition-backend from staging slabs.
+    {
+        std::atomic<int64_t> dl_remain(total_chunk);    // Count of chunks left to download from the device.
+        for(idx_t w = 0; w < writer_c_; ++w)
+            writers.emplace_back(
+                [&]
+                {
+                    while(dl_remain.load(std::memory_order_relaxed) > 0)
+                    {
+                        Staging_Slab* s;
+                        if(W.wait_dequeue_timed(s, std::chrono::microseconds(500))) // Get a processed slab.
+                        {
+                            backend_->write(*s);    // Drain the slab.
+                            F.enqueue(s);   // This slab is free now.
+                            dl_remain.fetch_sub(1, std::memory_order_relaxed);
+                        }
                     }
                 }
             );
