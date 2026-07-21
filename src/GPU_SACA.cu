@@ -806,6 +806,33 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             }
         }
     }
+
+
+    std::vector<std::thread> readers;   // Readers-pool.
+    // Launch readers thread-pool to complete the posted read-tasks.
+    {
+        std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
+        for(idx_t r = 0; r < reader_c_; ++r)
+            readers.emplace_back(
+                [&]
+                {
+                    while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)
+                    {
+                        Read_Task rt;       RT.wait_dequeue(rt);    // Get a read-task.
+                        Staging_Slab* s;    F.wait_dequeue(s);      // Get a free slab for the chunk.
+
+                        s->assign(rt.p_id, rt.off, rt.sz);
+                        if constexpr(init_rank_)    backend_->read_prefixes(*s);
+                        else                        backend_->read_keys(*s);
+
+                        auto& p_assembly = part_assembly[rt.p_id];
+                        p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
+                        if(p_assembly.chunks_to_read.fetch_sub(1, std::memory_order_acq_rel) == 1)  // Last chunk read off for this partition; chunked-assembly is ready for the device.
+                            R.enqueue(&p_assembly);
+                    }
+                }
+            );
+    }
 }
 
 
