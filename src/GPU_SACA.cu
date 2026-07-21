@@ -788,7 +788,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             readers.emplace_back(
                 [&]
                 {
-                    while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)
+                    while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
                         Read_Task rt;       RT.wait_dequeue(rt);    // Get a read-task.
                         Staging_Slab* s;    F.wait_dequeue(s);      // Get a free slab for the chunk.
@@ -815,15 +815,12 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             writers.emplace_back(
                 [&]
                 {
-                    while(dl_remain.load(std::memory_order_relaxed) > 0)
+                    while(dl_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
                         Staging_Slab* s;
-                        if(W.wait_dequeue_timed(s, std::chrono::microseconds(500))) // Get a processed slab.
-                        {
-                            backend_->write(*s);    // Drain the slab.
-                            F.enqueue(s);   // This slab is free now.
-                            dl_remain.fetch_sub(1, std::memory_order_relaxed);
-                        }
+                        W.wait_dequeue(s);  // Get a processed slab.
+                        backend_->write(*s);    // Drain the slab.
+                        F.enqueue(s);   // This slab is free now.
                     }
                 }
             );
