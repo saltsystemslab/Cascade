@@ -781,9 +781,9 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
 
     std::vector<std::thread> readers;   // Readers-pool.
+    std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
     // Launch readers thread-pool to read chunks from the partition-backend to staging slabs.
     {
-        std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
         for(idx_t r = 0; r < reader_c_; ++r)
             readers.emplace_back(
                 [&]
@@ -808,9 +808,9 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
 
     std::vector<std::thread> writers;   // Writers-pool.
+    std::atomic<int64_t> dl_remain(total_chunk);    // Count of chunks left to download from the device.
     // Launch writers thread-pool to drain the processed chunks to the partition-backend from staging slabs.
     {
-        std::atomic<int64_t> dl_remain(total_chunk);    // Count of chunks left to download from the device.
         for(idx_t w = 0; w < writer_c_; ++w)
             writers.emplace_back(
                 [&]
