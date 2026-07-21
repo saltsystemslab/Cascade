@@ -154,8 +154,6 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
         backend_ = std::make_unique<RAM_Backend>(P_, prefix, P_off);
 
         const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
-        for(std::size_t b = 0; b < STREAM_C; ++b)
-            slab_[b].allocate(P_sz_max);
     }
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
@@ -624,13 +622,10 @@ void GPU_SACA<T_sym_>::initial_rank()
             if(slab_used[b])    // Reclaim slab `b` and drain it to the backend.
             {
                 CUDA_CHECK(cudaStreamSynchronize(stream[b]));
-                backend_->write(slab_[b]);
             }
 
             // Stage partition `p_id` into slab `b` and dispatch.
             {
-                backend_->read_prefixes(slab_[b]);
-                sort_and_init_rank_and_filter(p_id, slab_[b], b);
                 slab_part_id[b] = p_id, slab_used[b] = true;
 
                 b = (b + 1) % STREAM_C;
@@ -643,7 +638,6 @@ void GPU_SACA<T_sym_>::initial_rank()
             if(slab_used[s_id])
             {
                 CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-                backend_->write(slab_[s_id]);
             }
     }
 
@@ -947,13 +941,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 if(slab_used[b])    // Reclaim slab `b` and drain in to the backend.
                 {
                     CUDA_CHECK(cudaStreamSynchronize(stream[b]));
-                    backend_->write(slab_[b]);
                 }
 
                 // Stage partition `p_id` into slab `b` and dispatch.
                 {
-                    backend_->read_keys(slab_[b]);
-                    sort_and_re_rank_and_filter(p_id, slab_[b], b);
                     slab_part_id[b] = p_id, slab_used[b] = true;
 
                     b = (b + 1) % STREAM_C;
@@ -966,7 +957,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 if(slab_used[s_id])
                 {
                     CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-                    backend_->write(slab_[s_id]);
                 }
         }
 

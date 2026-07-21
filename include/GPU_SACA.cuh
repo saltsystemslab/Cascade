@@ -15,8 +15,8 @@
 
 #include <cstdint>
 #include <cstddef>
-#include <vector>
 #include <limits>
+#include <vector>
 
 
 // TODO: name algorithm.
@@ -64,7 +64,6 @@ private:
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
-    Staging_Slab slab_[STREAM_C];   // Pinned staging slabs, bridging partition-backend to device.
     std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
 
     // Data structures to for the chunked staging of data between the partition-backend and the device buffers.
@@ -74,7 +73,7 @@ private:
         idx_t reader_c_;    // |r|: reader-threads count.
         idx_t writer_c_;    // |w|: writer-threads count.
 
-        std::vector<Staging_Slab> S;    // The slab pool.
+        std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
 
         moodycamel::BlockingConcurrentQueue<Read_Task> RT;  // Chunk-read tasks.
