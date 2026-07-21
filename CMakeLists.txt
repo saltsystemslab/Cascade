@@ -184,6 +184,8 @@ set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
 # Define dependencies between the targets.
+add_dependencies(${PROJECT_NAME} core)
+add_dependencies(core prj_concurrentqueue)
 
 
 # Set the compile flags for the targets.
