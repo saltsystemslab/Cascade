@@ -674,7 +674,7 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Staging_Slab& slab, const idx_t buf_id)
+void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partition_Assembly& p_assembly, const idx_t buf_id)
 {
     PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter_p%d", static_cast<int>(p_id));
 
@@ -685,10 +685,13 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Staging_
     auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
     auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
 
-    // Asynchronously upload this partition's suffixes and their prefix-keys to the device.
+    // Asynchronously upload this partition's chunks of suffixes and their prefix-keys to the device.
     {
-        CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], slab.key(), part_sz * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], slab.suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        for(auto* s : p_assembly.slab)
+        {
+            CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0] + s->off(), s->key(), s->size() * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0] + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        }
     }
 
 
@@ -760,18 +763,21 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Staging_
     }
 
 
-    // Asynchronously download the ranked-and-compacted partition to host.
+    // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         const idx_t* const K_out    = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
         const idx_t* const SA_out   = suf_buf[buf_id][1 - sort_op_selector];
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(slab.key()), K_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(slab.suf(), SA_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        for(auto* s : p_assembly.slab)
+        {
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        }
     }
 }
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Staging_Slab& slab, const idx_t buf_id)
+void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_Assembly& p_assembly, const idx_t buf_id)
 {
     PROFILE_SCOPE_FMT("sort_and_re_rank_and_filter_p%d", static_cast<int>(p_id));
 
@@ -782,10 +788,13 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Staging_Sl
     auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
     auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
 
-    // Asynchronously upload this partition to the device.
+    // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
     {
-        CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0], slab.key(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0], slab.suf(), part_sz * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        for(auto* s : p_assembly.slab)
+        {
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(key_buf[buf_id][0]) + s->off(), s->key(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0] + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        }
     }
 
 
@@ -873,12 +882,15 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Staging_Sl
     }
 
 
-    // Asynchronously download the updated partition to host.
+    // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         const idx_t* const K_out    = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
         const idx_t* const SA_out   = suf_buf[buf_id][1 - sort_op_selector];
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(slab.key()), K_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        CUDA_CHECK(cudaMemcpyAsync(slab.suf(), SA_out, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        for(auto* s : p_assembly.slab)
+        {
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        }
     }
 }
 
@@ -929,7 +941,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
 
-            p_id_t slab_part_id[STREAM_C];  // ID of the partition currently staged in each slab.
             bool slab_used[STREAM_C]{}; // Whether a slab holds an in-flight partition.
             idx_t b = 0;    // Round-robin slab / stream index.
 
@@ -945,8 +956,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
                 // Stage partition `p_id` into slab `b` and dispatch.
                 {
-                    slab_part_id[b] = p_id, slab_used[b] = true;
-
                     b = (b + 1) % STREAM_C;
                 }
             }

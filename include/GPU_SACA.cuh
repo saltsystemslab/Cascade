@@ -74,7 +74,6 @@ private:
         idx_t writer_c_;    // |w|: writer-threads count.
 
         std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
-        std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
 
         template <typename T> using blocking_q_t = moodycamel::BlockingConcurrentQueue<T>;
         blocking_q_t<Read_Task> RT; // Chunk-read tasks.
@@ -83,11 +82,13 @@ private:
         blocking_q_t<idx_t> FS; // IDs of the free device-streams.
         blocking_q_t<Staging_Slab*> W;  // Slabs with chunks downloaded from device, ready to be written to partition-backend.
 
+        std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
+
         struct Partition_Download_Callback_Args // Argument bundle for the host-callback at download of a partition's chunks from the device.
         {
             GPU_SACA* const self;
-            Partition_Assembly* const part_assembly;
-            const idx_t b;
+            Partition_Assembly* const p_assembly;
+            const idx_t buf_id;
         };
 
         // Host-callback once a partition's chunks get downloaded back from the
@@ -153,17 +154,17 @@ private:
 
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
-    // of the partition. Staging slab `slab` contains the partition content
-    // before and after, and the `buf_id`'th device-buffer set is used for
-    // device operations.
-    void sort_and_init_rank_and_filter(p_id_t p_id, Staging_Slab& slab, idx_t buf_id);
+    // of the partition. The slab-assembly `p_assembly` contains the partition's
+    // content before and after, and the `buf_id`'th device-buffer set is used
+    // for device operations.
+    void sort_and_init_rank_and_filter(p_id_t p_id, Partition_Assembly& p_assembly, idx_t buf_id);
 
     // Sorts the `p_id`'th partition, re-ranks it based on the sorted order, and
     // filters the entries in the partition with unique ranks by grouping them
-    // into the tail of the partition. Staging slab `slab` contains the
-    // partition content before and after, and the `buf_id`'th device-buffer set
-    // is used for device operations.
-    void sort_and_re_rank_and_filter(p_id_t p_id, Staging_Slab& slab, idx_t buf_id);
+    // into the tail of the partition. The slab-assembly `p_assembly` contains
+    // the partition's content before and after, and the `buf_id`'th device-
+    // buffer set is used for device operations.
+    void sort_and_re_rank_and_filter(p_id_t p_id, Partition_Assembly& p_assembly, idx_t buf_id);
 
     // Updates the global ranks of the suffixes based on the current status of
     // the partitions.
