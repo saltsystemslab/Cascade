@@ -7,6 +7,9 @@
 #include "types.hpp"
 #include "Prefix_Key.cuh"
 
+#include <atomic>
+#include <vector>
+
 
 namespace gpu_saca
 {
@@ -62,6 +65,14 @@ public:
     // Tags the slab with the partition-chunk it's carrying (from partition-ID
     // `p_id`, at its offset `off`, with `sz`-many elements).
     void assign(p_id_t p_id, idx_t off, idx_t sz);
+};
+
+
+// Assembly / chain of slabs making up partition.
+struct Partition_Assembly
+{
+    std::vector<Staging_Slab*> slab;    // Collection of the slabs containing the partition's content.
+    std::atomic<idx_t> chunks_remain;   // Count of chunks still remaining to be read for the partition.
 };
 
 }

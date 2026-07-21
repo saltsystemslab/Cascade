@@ -87,8 +87,8 @@ private:
         struct Partition_Download_Callback_Args // Argument bundle for the host-callback at download of a partition's chunks from the device.
         {
             GPU_SACA* const self;
-            Partition_Assembly* const p_assembly;
-            const idx_t buf_id;
+            Partition_Assembly* const p_assembly;   // Assembly / chain of slabs making up the corresponding partition.
+            const idx_t s_id;   // ID of the CUDA stream processing the partition.
         };
 
         // Host-callback once a partition's chunks get downloaded back from the

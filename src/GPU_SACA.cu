@@ -896,6 +896,22 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
 
 template <typename T_sym_>
+void CUDART_CB GPU_SACA<T_sym_>::on_partition_download(void* const arg)
+{
+    auto* const cb_arg = static_cast<Partition_Download_Callback_Args*>(arg);
+    auto* const self = cb_arg->self;
+    auto* const p_assembly = cb_arg->p_assembly;
+    const auto s_id = cb_arg->s_id;
+
+    for(auto* s : p_assembly->slab) // The processed slabs move to the write queue.
+        self->W.enqueue(s);
+
+    self->FS.enqueue(s_id);   // This stream is now free to process a new partition.
+    delete cb_arg;
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::update_global_ranks()
 {
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
