@@ -5,7 +5,7 @@ report=${2}
 #
 cmd="nsys stats --report nvtx_sum ${perf_log}"
 {
-    echo "${cmd}" >> "${report}"
+    echo "${cmd}"
     eval "$cmd"
 
     cmd="nsys stats --report cuda_gpu_kern_sum ${perf_log}"
