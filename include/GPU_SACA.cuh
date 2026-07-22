@@ -70,8 +70,8 @@ private:
     // {
         // ~2M elements per chunk / slab: memory usage: 2M x (sizeof(Prefix_Key) + 8) (~48 MB at `ell = 2`).
         static constexpr idx_t CHUNK_CAP = (idx_t(1) << 21);
-        static constexpr idx_t PREFETCH_DEPTH = 2;  // Complete partitions to stage ahead for the device-dispatcher.
-        static constexpr idx_t WRITEBACK_DEPTH = 1; // Complete partitions to stage ahead to return to the backend.
+        static constexpr idx_t PREFETCH_DEPTH = 0;  // Complete partitions to stage ahead for the device-dispatcher.
+        static constexpr idx_t WRITEBACK_DEPTH = 0; // Complete partitions to stage ahead to return to the backend.
 
         idx_t chunk_cap_;   // Chunk granularity (keys / suffixes per slab).
         idx_t slab_c_;  // |S|: slab pool size.

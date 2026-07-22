@@ -416,8 +416,8 @@ void GPU_SACA<T_sym_>::setup_staging()
 {
     const auto P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
     chunk_cap_ = std::min<idx_t>(CHUNK_CAP, P_sz_max);
-    reader_c_ = 2;  // TODO: tune.
-    writer_c_ = 1;  // TODO: tune.
+    reader_c_ = 8;  // TODO: tune.
+    writer_c_ = 8;  // TODO: tune.
 
     const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
     slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
