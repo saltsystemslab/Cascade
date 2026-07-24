@@ -7,7 +7,8 @@
 # array + dependent concat.
 #
 #   Phase 1 (array):  each task tokenizes its stride of files into $OUT.parts/
-#                     (MODE unset; uses SLURM_ARRAY_TASK_ID / _COUNT)
+#                     (MODE unset; strides by SLURM_ARRAY_TASK_ID over N tasks,
+#                      N passed in by submit-tokenize.sh)
 #   Phase 2 (concat): MODE=concat, no array; stitches parts into $OUT
 #
 # Env: INPUT_DIR, OUT (required); TOKENIZER, GLOB (optional).

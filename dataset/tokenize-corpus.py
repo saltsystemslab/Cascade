@@ -175,7 +175,9 @@ def main():
     ap.add_argument("--input-dir", required=True)
     ap.add_argument("--output", required=True,
                     help="final token array path; parts live in OUTPUT.parts/")
-    ap.add_argument("--tokenizer", default="meta-llama/Llama-2-7b-hf")
+    ap.add_argument("--tokenizer", default="allenai/OLMo-7B-hf",
+                    help="HF tokenizer; keep ONE across corpora so arrays stay "
+                         "comparable (-hf: no trust_remote_code, no torch)")
     ap.add_argument("--text-field", default="text")
     ap.add_argument("--workers", type=int, default=os.cpu_count())
     ap.add_argument("--batch-size", type=int, default=1000,
