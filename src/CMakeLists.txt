@@ -15,6 +15,7 @@ set(PROJECT_SRC
         Suffix_Buffer.cu
         Staging_Slab.cu
         RAM_Backend.cu
+        Direct_File.cpp
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.
