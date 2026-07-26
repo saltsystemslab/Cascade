@@ -25,19 +25,19 @@ public:
 
     enum class Mode { read, write, read_write, };
 
-
-private:
-
     // `O_DIRECT` alignment granularity. 4 KBs of alignment covers common NVMe
     // logical-block size.
-    static constexpr std::size_t DISK_BLK = 4096;
+    static constexpr std::size_t DISK_BLOCK = 4096;
+
+    // Returns `sz` rounded up to the closest multiple of `DISK_BLOCK`.
+    static std::size_t block_up(const std::size_t sz) { return (sz + DISK_BLOCK - 1) & ~(DISK_BLOCK - 1); }
+
+
+private:
 
     int fd_;    // Open file-descriptor.
     std::string path_;  // Filesystem path of the file.
 
-
-    // Returns `sz` rounded up to the closest multiple of `DISK_BLK`.
-    static std::size_t block_up(const std::size_t sz) { return (sz + DISK_BLK - 1) & ~(DISK_BLK - 1); }
 
     // Returns `true` iff the address `ptr` is disk-block aligned.
     static bool is_block_aligned(const void* ptr);

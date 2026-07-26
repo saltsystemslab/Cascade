@@ -16,6 +16,7 @@ set(PROJECT_SRC
         Staging_Slab.cu
         RAM_Backend.cu
         Direct_File.cpp
+        Spill_Store.cpp
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.

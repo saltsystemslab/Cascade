@@ -15,13 +15,13 @@ namespace gpu_saca
 
 bool Direct_File::is_block_aligned(const void* const ptr)
 {
-    return (reinterpret_cast<std::uintptr_t>(ptr) & (DISK_BLK - 1)) == 0;
+    return (reinterpret_cast<std::uintptr_t>(ptr) & (DISK_BLOCK - 1)) == 0;
 }
 
 
 bool Direct_File::is_block_aligned(const std::size_t sz)
 {
-    return (sz & (DISK_BLK - 1)) == 0;
+    return (sz & (DISK_BLOCK - 1)) == 0;
 }
 
 
