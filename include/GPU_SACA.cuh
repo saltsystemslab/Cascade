@@ -54,7 +54,7 @@ private:
     p_id_t* P_id;   // Partition-IDs of the suffixes.
 
     std::vector<Partition> P_;  // The suffix partitions.
-    std::vector<idx_t> P_sz;    // Sizes of the suffix partitions; tracks the active-set sizes of the partitions instead of the full size.
+    std::vector<idx_t> Active_sz;   // Active-set sizes of the suffix partitions.
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
 
     idx_t* rho; // Global rank of the suffixes.

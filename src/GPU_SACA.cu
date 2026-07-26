@@ -370,6 +370,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     // `cub` itself requires a workspace for sort and scan.
     // Memory constraint: STREAM_C x (P_sz_max x (2 x (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
+    const auto& P_sz = Active_sz;
     const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
 
     // Compute required workspaces-sizes for the sort and the scan.
@@ -414,6 +415,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::setup_staging()
 {
+    const auto& P_sz = Active_sz;
     const auto P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
     chunk_cap_ = std::min<idx_t>(CHUNK_CAP, P_sz_max);
     reader_c_ = 8;  // TODO: tune.
@@ -454,6 +456,7 @@ void GPU_SACA<T_sym_>::partition()
         // Allocate the partitions with required capacities, and create concurrent buffer for each.
         {
             PROFILE_SCOPE("allocate_partition_buffers");
+            const auto& P_sz = Active_sz;
             P_.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_.emplace_back(P_sz[p_id]);
@@ -580,6 +583,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     // Move the partition-sizes to the host.
     {
+        auto& P_sz = Active_sz;
         P_sz.resize(p_);
         CUDA_CHECK(cudaMemcpy(P_sz.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(P_sz_d));
@@ -597,6 +601,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     // Determine bit-width of primary-keys of suffixes.
     {
+        const auto& P_sz = Active_sz;
         const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
         key_bits_ = secondary_bits_ + util::math::bits_for(P_sz_max);
         if(key_bits_ > 64)
@@ -635,7 +640,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     // NB: this compaction must land *after* the preceding global rankings have been updated.
     {
         PROFILE_SCOPE("collect_active_set_sizes");
-        CUDA_CHECK(cudaMemcpy(P_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
     }
 
 
@@ -645,8 +650,8 @@ void GPU_SACA<T_sym_>::initial_rank()
         p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `ell`).
         idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            sorted_part += (P_sz[p_id] == 0),
-            unsorted += P_sz[p_id];
+            sorted_part += (Active_sz[p_id] == 0),
+            unsorted += Active_sz[p_id];
 
         std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
@@ -660,7 +665,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 {
     PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter_p%d", static_cast<int>(p_id));
 
-    const auto part_sz = P_sz[p_id];    // Size of this partition.
+    const auto part_sz = Active_sz[p_id];    // Size of this partition.
 
     cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);  // Input and output buffers for the prefix-keys of suffixes at the device.
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);   // Input and output buffers for the suffixes at the device.
@@ -769,11 +774,11 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     {
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
-            if(P_sz[p_id] == 0) // Skip partition with empty active-sets.
+            if(Active_sz[p_id] == 0)    // Skip partitions with empty active-sets.
                 continue;
 
             active_part_c++;
-            const idx_t part_chunk_c = (P_sz[p_id] + chunk_cap_ - 1) / chunk_cap_;  // Number of chunks / slabs required for this partition.
+            const idx_t part_chunk_c = (Active_sz[p_id] + chunk_cap_ - 1) / chunk_cap_; // Number of chunks / slabs required for this partition.
             total_chunk += part_chunk_c;
 
             // Prepare skeleton chain of chunks of this partition.
@@ -783,7 +788,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             for(idx_t c = 0; c < part_chunk_c; ++c) // Post a read-task for each chunk of this partition.
             {
                 const auto chunk_off = c * chunk_cap_;
-                const auto chunk_sz = std::min(chunk_cap_, P_sz[p_id] - chunk_off);
+                const auto chunk_sz = std::min(chunk_cap_, Active_sz[p_id] - chunk_off);
                 RT.enqueue(Read_Task{p_id, c, chunk_off, chunk_sz});
             }
         }
@@ -871,7 +876,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 {
     PROFILE_SCOPE_FMT("sort_and_re_rank_and_filter_p%d", static_cast<int>(p_id));
 
-    const auto part_sz = P_sz[p_id];    // Size of this partition.
+    const auto part_sz = Active_sz[p_id];   // Size of the active-set of this partition.
 
     cub::DoubleBuffer<idx_t> key(reinterpret_cast<idx_t*>(key_buf[buf_id][0]), reinterpret_cast<idx_t*>(key_buf[buf_id][1]));   // Input and output buffers for the keys of suffixes at the device.
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);   // Input and output buffers for the suffixes at the device.
@@ -1005,7 +1010,7 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::update_global_ranks()
 {
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        if(P_sz[p_id] != 0) // Skip partition with empty active-sets.
+        if(Active_sz[p_id] != 0)    // Skip partitions with empty active-sets.
             update_global_rank(p_id);
 }
 
@@ -1014,7 +1019,7 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 {
     const auto& part = P_[p_id];
-    const auto sz = P_sz[p_id];
+    const auto sz = Active_sz[p_id];
     const auto rank_off = P_off[p_id];
 
     #pragma omp parallel for schedule(static)
@@ -1036,7 +1041,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             PROFILE_SCOPE("cpu_gather");
             for(p_id_t p_id = 0; p_id < p_; ++p_id) // TODO: do in parallel, with nested-parallelism inside partitions.
             {
-                if(P_sz[p_id] == 0) // Skip partitions with fully stable rankings.
+                if(Active_sz[p_id] == 0)    // Skip partitions with fully stable rankings.
                     continue;
 
                 exponentiate_prefix(p_id, k);
@@ -1063,7 +1068,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // NB: this compaction must land *after* the preceding global rankings have been updated.
         {
             PROFILE_SCOPE("collect_active_set_sizes");
-            CUDA_CHECK(cudaMemcpy(P_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
         }
 
 
@@ -1072,8 +1077,8 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `2k`).
             idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                sorted_part += (P_sz[p_id] == 0),
-                unsorted += P_sz[p_id];
+                sorted_part += (Active_sz[p_id] == 0),
+                unsorted += Active_sz[p_id];
 #ifdef STATS
             std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << "."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
@@ -1090,7 +1095,7 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix(const p_id_t p_id, const idx_t k)
 {
     auto& part = P_[p_id];
-    const idx_t sz = P_sz[p_id];
+    const idx_t sz = Active_sz[p_id];
 
     #pragma omp parallel for schedule(static)
     for(idx_t j = 0; j < sz; ++j)
