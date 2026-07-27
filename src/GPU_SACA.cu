@@ -11,12 +11,15 @@
 #include "cub/cub.cuh"
 #include "thrust/iterator/zip_iterator.h"
 
+#include <unistd.h>
+
 #include <cstdint>
 #include <cstddef>
 #include <limits>
 #include <atomic>
 #include <vector>
 #include <cstring>
+#include <sstream>
 #include <memory>
 #include <cstdlib>
 #include <random>
@@ -453,10 +456,28 @@ void GPU_SACA<T_sym_>::partition()
         PROFILE_SCOPE("scatter_to_partition");
         std::vector<util::Padded<Suffix_Buffer>> P_buf;
 
-        // Allocate the partitions with required capacities, and create concurrent buffer for each.
+        // Initialize the partitions' spill-stores and their prefix-key buffers.
         {
             PROFILE_SCOPE("allocate_partition_buffers");
             const auto& P_sz = Active_sz;
+
+            const auto scratch = env::get("GPU_SACA_SCRATCH");
+            if(!scratch)
+            {
+                std::cerr << "`GPU_SACA_SCRATCH` is not set; set it to colon-separated scratch roots for the disk-backend. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+
+            std::vector<std::string> roots;
+            {
+                std::stringstream ss(*scratch);
+                for(std::string r; std::getline(ss, r, ':');)
+                    if(!r.empty())
+                        roots.push_back(r);
+            }
+
+            spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
+
             P_.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_.emplace_back(P_sz[p_id]);
@@ -465,11 +486,15 @@ void GPU_SACA<T_sym_>::partition()
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(Suffix_Buffer{P_[p_id].suf(), prefix + P_off[p_id]});
+                P_buf.emplace_back(Suffix_Buffer{
+                    spill_->open(p_id, Spill_Role::suf, Direct_File::Mode::write),
+                    spill_->open(p_id, Spill_Role::prefix, Direct_File::Mode::write),
+                    P_sz[p_id]
+                });
         }
 
 
-        // Add suffix indices along with their 16-byte prefixes to their corresponding partitions (through the buffers).
+        // Add suffix indices along with their `ELL x 8`-byte prefixes to their corresponding partitions (through the buffers).
         {
             PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)

@@ -7,6 +7,7 @@
 #include "Prefix_Key.cuh"
 #include "Partition.hpp"
 #include "Partition_Backend.cuh"
+#include "Spill_Store.hpp"
 #include "Staging_Slab.cuh"
 #include "Read_Task.hpp"
 #include "utility.cuh"
@@ -65,6 +66,7 @@ private:
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
     std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
+    std::unique_ptr<Spill_Store> spill_;    // Partitions' on-disk spill-files manager.
 
     // Data structures to for the chunked staging of data between the partition-backend and the device buffers.
     // {
