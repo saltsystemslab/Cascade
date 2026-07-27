@@ -94,9 +94,14 @@ void Direct_File::read_at(void* const buf, const std::size_t bytes, const std::s
         exit("O_DIRECT read-buffer / file-block alignment");
 
     const auto to_read = block_up(bytes);
-    const auto read_bytes = ::pread(fd_, buf, to_read, off);
-    if(read_bytes < 0 || static_cast<std::size_t>(read_bytes) != to_read)
-        exit("pread(O_DIRECT)");
+    std::size_t read = 0;
+    while(read < to_read)   // `pread` reads at most ~2GB.
+    {
+        const auto read_bytes = ::pread(fd_, static_cast<char*>(buf) + read, to_read - read, off + read);
+        if(read_bytes < 0)  exit("pread(O_DIRECT)");
+        if(read_bytes == 0) exit("pread(O_DIRECT): unexpected EOF");    // `errno` may be stale for the EOF case, and thus `strerror(errno)` is not meaningful then.
+        read += read_bytes;
+    }
 }
 
 
@@ -106,9 +111,13 @@ void Direct_File::write_at(const void* const buf, const std::size_t bytes, const
         exit("O_DIRECT write-buffer / file-block alignment");
 
     const auto to_write = block_up(bytes);
-    const auto written_bytes = ::pwrite(fd_, buf, to_write, off);
-    if(written_bytes < 0 || static_cast<std::size_t>(written_bytes) != to_write)
-        exit("pwrite(O_DIRECT)");
+    std::size_t written = 0;
+    while(written < to_write)   // `pwrite` writes at most ~2GB.
+    {
+        const auto written_bytes = ::pwrite(fd_, static_cast<const char*>(buf) + written, to_write - written, off + written);
+        if(written_bytes <= 0)  exit("pwrite(O_DIRECT)");
+        written += written_bytes;
+    }
 }
 
 
