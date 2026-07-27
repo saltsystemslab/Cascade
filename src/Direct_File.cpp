@@ -1,6 +1,7 @@
 
 #include "Direct_File.hpp"
 
+#include <cstdint>
 #include <cstddef>
 #include <fcntl.h>
 #include <unistd.h>

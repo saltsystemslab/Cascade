@@ -5,11 +5,6 @@
 
 
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE // For `O_DIRECT` on glibc.
-#endif
-
-
 #include <cstddef>
 #include <string>
 
