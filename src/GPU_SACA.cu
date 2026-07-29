@@ -1,6 +1,7 @@
 
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.cuh"
+#include "Prefix_Key_Decomposer.cuh"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "env.hpp"

@@ -7,7 +7,7 @@
 #include "types.hpp"
 #include "Staging_Slab.cuh"
 #include "Partition.hpp"
-#include "Prefix_Key.cuh"
+#include "Prefix_Key.hpp"
 
 #include <vector>
 

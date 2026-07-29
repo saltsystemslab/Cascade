@@ -4,7 +4,7 @@
 
 
 #include "types.hpp"
-#include "Prefix_Key.cuh"
+#include "Prefix_Key.hpp"
 #include "Partition.hpp"
 #include "Partition_Backend.cuh"
 #include "Spill_Store.hpp"

@@ -5,7 +5,7 @@
 
 
 #include "types.hpp"
-#include "Prefix_Key.cuh"
+#include "Prefix_Key.hpp"
 
 #include <atomic>
 #include <vector>

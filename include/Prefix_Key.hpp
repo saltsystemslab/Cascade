@@ -8,10 +8,7 @@
 #include "types.hpp"
 #include "utility.hpp"
 
-#include "cuda/std/tuple"
-
 #include <cstddef>
-#include <utility>
 
 
 namespace gpu_saca
@@ -51,25 +48,6 @@ struct Prefix_Key
 
     CUDA_SPECIFIER
     bool operator!=(const Prefix_Key& rhs) const;
-};
-
-
-// Decomposer of a `Prefix_Key` into its constituent 64-bit words. `word[0]` is
-// treated as the most significant element.
-struct Prefix_Key_Decomposer
-{
-    template <std::size_t... Idx>
-    CUDA_SPECIFIER
-    auto tie_words(Prefix_Key& key, std::index_sequence<Idx...>) const
-    {
-        return cuda::std::tie(key.word[Idx]...);
-    }
-
-    CUDA_SPECIFIER
-    auto operator()(Prefix_Key& key) const
-    {
-        return tie_words(key, std::make_index_sequence<Prefix_Key::PREFIX_WORDS>{});
-    }
 };
 
 
