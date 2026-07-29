@@ -43,8 +43,9 @@
 # third-party
 external/
 
-# local-scripts
-scripts/GPU/
+# local content
+scripts/local/
+docs/
 
 # docker-build
 build/
