@@ -505,6 +505,7 @@ void GPU_SACA<T_sym_>::partition()
                 part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_sz[p_id]);
 
             std::cerr << "Partition-sizes match verification: " << (part_sz_match ? "Passes" : "Fails") << "\n";
+            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(T_h_, n_, P_id, P_sz, spill_) ? "Passes" : "Fails") << "\n";
         }
 #endif
     }

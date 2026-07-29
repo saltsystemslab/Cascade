@@ -64,12 +64,12 @@ public:
     void preallocate(std::size_t bytes);
 
     // Reads `bytes`-many bytes from the file-offset `off` into `buf`. `off` and
-    // `buf` must be `DISK_BLK`-aligned, and `buf` must have `block_up(bytes)`
+    // `buf` must be `DISK_BLOCK`-aligned, and `buf` must have `block_up(bytes)`
     // bytes of capacity, at least.
     void read_at(void* buf, std::size_t bytes, std::size_t off) const;
 
     // Writes `bytes`-many bytes from `buf` to the file-offset `off`. `off` and
-    // `buf` must be `DISK_BLK`-aligned, and `buf` must have `block_up(bytes)`
+    // `buf` must be `DISK_BLOCK`-aligned, and `buf` must have `block_up(bytes)`
     // bytes of capacity, at least.
     void write_at(const void* buf, std::size_t bytes, std::size_t off);
 
