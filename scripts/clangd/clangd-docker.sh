@@ -31,6 +31,18 @@ while [[ ! -f "$PROJECT_DIR/CMakeLists.txt" || ! -f "$PROJECT_DIR/build.sh" ]]; 
     PROJECT_DIR="$(dirname "$PROJECT_DIR")"
 done
 
+# Warn, don't fail, on the two conditions that leave clangd running but useless.
+# Without a compilation database clangd silently falls back to zero-flag parsing,
+# which looks like a broken language server rather than a missing build step.
+if [[ ! -f "$PROJECT_DIR/build/compile_commands.json" ]]; then
+    echo "clangd-docker.sh: no build/compile_commands.json under $PROJECT_DIR." >&2
+    echo "clangd-docker.sh: run ./build.sh once; code navigation is degraded until then." >&2
+fi
+
+if ! docker image inspect "$IMAGE_NAME" >/dev/null 2>&1; then
+    echo "clangd-docker.sh: image '$IMAGE_NAME' not found; run ./build.sh to build it." >&2
+fi
+
 exec docker run --rm -i \
     --platform "$PLATFORM" \
     --entrypoint /usr/bin/clangd \
