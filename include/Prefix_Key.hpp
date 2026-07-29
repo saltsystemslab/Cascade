@@ -52,6 +52,7 @@ struct Prefix_Key
 
 
 template <typename T_sym_>
+CUDA_SPECIFIER
 inline Prefix_Key Prefix_Key::pack_prefix(const T_sym_* const T)
 {
     constexpr idx_t sym_per_word = sizeof(idx_t) / sizeof(T_sym_);
@@ -65,6 +66,7 @@ inline Prefix_Key Prefix_Key::pack_prefix(const T_sym_* const T)
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator<(const Prefix_Key& rhs) const
 {
     #pragma unroll
@@ -76,6 +78,7 @@ inline bool Prefix_Key::operator<(const Prefix_Key& rhs) const
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator<=(const Prefix_Key& rhs) const
 {
     #pragma unroll
@@ -87,6 +90,7 @@ inline bool Prefix_Key::operator<=(const Prefix_Key& rhs) const
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator==(const Prefix_Key& rhs) const
 {
     #pragma unroll
@@ -98,6 +102,7 @@ inline bool Prefix_Key::operator==(const Prefix_Key& rhs) const
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator!=(const Prefix_Key& rhs) const
 {
     return !(*this == rhs);
