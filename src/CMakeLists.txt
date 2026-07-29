@@ -12,7 +12,7 @@ set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 set(PROJECT_SRC
         GPU_SACA.cu
         Partition.cu
-        Suffix_Buffer.cu
+        Suffix_Buffer.cpp
         Staging_Slab.cu
         RAM_Backend.cu
         Direct_File.cpp

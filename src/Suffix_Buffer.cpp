@@ -1,5 +1,5 @@
 
-#include "Suffix_Buffer.cuh"
+#include "Suffix_Buffer.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
