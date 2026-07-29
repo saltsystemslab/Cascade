@@ -411,7 +411,14 @@ void GPU_SACA<T_sym_>::setup_staging()
 {
     const auto& P_sz = Active_sz;
     const auto P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
-    chunk_cap_ = std::min<idx_t>(CHUNK_CAP, P_sz_max);
+    if(P_sz_max >= CHUNK_CAP)
+        chunk_cap_ = CHUNK_CAP;
+    else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
+    {
+        constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(idx_t);
+        chunk_cap_ = ((chunk_cap_ + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
+    }
+
     reader_c_ = 8;  // TODO: tune.
     writer_c_ = 8;  // TODO: tune.
 
