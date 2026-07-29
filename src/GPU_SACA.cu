@@ -71,11 +71,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     }
 
     active_set_sz_d = nullptr;
-
-#ifdef TESTS
-    CUDA_CHECK(pinned_allocate_host(sorted_key, n_));
-    CUDA_CHECK(pinned_allocate_host(sorted_suf, n_));
-#endif
 }
 
 
@@ -105,11 +100,6 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     }
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
-
-#ifdef TESTS
-    CUDA_CHECK(deallocate_host(sorted_key));
-    CUDA_CHECK(deallocate_host(sorted_suf));
-#endif
 }
 
 
@@ -508,6 +498,7 @@ void GPU_SACA<T_sym_>::partition()
 
 #ifdef TESTS
         {
+            const auto& P_sz = Active_sz;
             bool part_sz_match = true;
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_sz[p_id]);
@@ -652,7 +643,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     }
 
 #ifdef TESTS
-    std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
+    // std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
 #endif
 
 
@@ -726,15 +717,6 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         const Prefix_Key* const K   = key_buf[buf_id][sort_op_selector];    // The sort-output.
         idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
         idx_t* const key_rank       = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);      // Ranks of the distinct keys.
-
-#ifdef TESTS    // Save the sorted keys and the corresponding suffixes for validation-testing, as they will be rewritten to with ranks and then shuffled.
-        {
-            // TODO: validator broken post-compaction; will be redesigned.
-            const idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
-            CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(Prefix_Key), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(sorted_suf + P_off[p_id], SA, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        }
-#endif
 
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
@@ -937,15 +919,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Distinct key groups' ranks.
         idx_t* const primary_key_group_rank = key_group_rank + part_sz; // Distinct primary-key groups' ranks.
 
-#ifdef TESTS    // Save the sorted keys and the corresponding suffixes for validation-testing, as they will be rewritten to with ranks and then shuffled.
-        {
-            // TODO: validator broken post-compaction; will be redesigned.
-            const idx_t* const SA = suf_buf[buf_id][sort_op_selector];    // The partial SA.
-            CUDA_CHECK(cudaMemcpyAsync(sorted_key + P_off[p_id], K, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(sorted_suf + P_off[p_id], SA, part_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        }
-#endif
-
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
@@ -1078,10 +1051,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             PROFILE_SCOPE("sort_and_rank_dispatch");
             drive_pipeline<false>();
         }
-
-#ifdef TESTS
-        std::cerr << "Rankings verification for prefix-context " << (2 * k) << ": " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
-#endif
 
         // Update global-ranks based on the updated local-ranks.
         {

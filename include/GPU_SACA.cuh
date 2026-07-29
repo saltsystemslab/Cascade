@@ -123,10 +123,6 @@ private:
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
     // }
 
-#ifdef TESTS
-    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the order of the sorted keys of all partitions, before the new ranks overwrite those.
-    idx_t* sorted_suf = nullptr;    // Single host-pinned buffer to save the order of the suffix indices corresponding to sorted keys of all partitions, before they get shuffled.
-#endif
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
