@@ -6,9 +6,9 @@
 #include "types.hpp"
 #include "Prefix_Key.hpp"
 #include "Partition.hpp"
-#include "Partition_Backend.cuh"
+#include "Partition_Backend.hpp"
 #include "Spill_Store.hpp"
-#include "Staging_Slab.cuh"
+#include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
 #include "utility.cuh"
 

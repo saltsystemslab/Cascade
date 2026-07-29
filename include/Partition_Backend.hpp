@@ -5,7 +5,7 @@
 
 
 #include "types.hpp"
-#include "Staging_Slab.cuh"
+#include "Staging_Slab.hpp"
 #include "Partition.hpp"
 #include "Prefix_Key.hpp"
 

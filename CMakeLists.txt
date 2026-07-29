@@ -40,7 +40,7 @@ endif()
 # Bundle the warning flags that we want to pass on to the compiler.
 # Reference: https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html
 set(WARNING_FLAGS -Wall -Wextra) #-Wpedantic)
-set(SUPPRESS_WARNING_FLAGS -Wno-unused-function)
+set(SUPPRESS_WARNING_FLAGS -Wno-unused-function -Wno-unknown-pragmas)
 
 # Warning flags to be suppressed with clang.
 set(CLANG_SUPPRESS_WARNING_FLAGS "")
@@ -175,7 +175,7 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET libcubwt_driver PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-set(CUDA_ARCH "70-real;80-real;90-real;120-real")
+set(CUDA_ARCH "80-real;90-real;120-real")
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})

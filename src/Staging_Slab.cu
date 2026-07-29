@@ -1,5 +1,5 @@
 
-#include "Staging_Slab.cuh"
+#include "Staging_Slab.hpp"
 #include "utility.cuh"
 
 

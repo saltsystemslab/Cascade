@@ -6,7 +6,7 @@
 
 #include "types.hpp"
 #include "Partition.hpp"
-#include "Prefix_Key.cuh"
+#include "Prefix_Key.hpp"
 #include "Sort_Key.hpp"
 
 #include <cstddef>
