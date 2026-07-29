@@ -23,6 +23,8 @@ Suffix_Buffer::Suffix_Buffer(Direct_File suf_file, Direct_File key_file, idx_t c
     , flushed_(0)
     , worker_c_(omp_get_max_threads())
 {
+    // TODO: can we move the following two allocations somewhere central?
+    // File-allocation baked into buffer-logic isn't good design.
     suf_file_.preallocate(cap * sizeof(idx_t));
     key_file_.preallocate(cap * sizeof(Prefix_Key));
 
