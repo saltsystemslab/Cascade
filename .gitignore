@@ -43,8 +43,11 @@
 # third-party
 external/
 
-# scripts
+# local-scripts
 scripts/GPU/
 
 # docker-build
 build/
+
+# cache
+.cache/

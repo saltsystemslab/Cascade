@@ -1,0 +1,43 @@
+# clangd runs inside the build container (scripts/clangd/clangd-docker.sh), so
+# the Linux paths below are the real ones -- this file is useless to a host-side
+# clangd.
+
+# --- Global: strip OpenMP -----------------------------------------------------
+# clangd cannot navigate inside OpenMP regions: with -fopenmp, clang wraps the
+# body in OMPParallelForDirective -> CapturedStmt -> CapturedDecl and duplicates
+# its DeclRefExprs, and SelectionTree can't resolve a token inside that. Upstream
+# (clangd#1640, clangd#596) treats OpenMP as unsupported, not broken; removing the
+# flag is the maintainers' recommended workaround. Without it the pragma is an
+# ignored unknown pragma and the body is a plain ForStmt, which navigates fine.
+#
+# The glob is load-bearing: find_package(OpenMP) emits -fopenmp=libomp when it
+# detects clang, which a literal "-fopenmp" would miss.
+CompileFlags:
+  Remove:
+    - -fopenmp*
+  Add:
+    - -Wno-source-uses-openmp
+    - -Wno-unknown-pragmas
+
+---
+# --- CUDA sources -------------------------------------------------------------
+# Each Remove: entry corresponds to a drv_unknown_argument that `clangd --check`
+# actually reported on a .cu file in build/compile_commands.json. No speculative
+# entries; nvcc spellings clang tolerates (-dc, -x cu) are left alone.
+If:
+  PathMatch: [".*\\.cu", ".*\\.cuh"]
+
+CompileFlags:
+  Add:
+    - -xcuda                              # .cuh doesn't imply CUDA; without this it parses as C++
+    - --cuda-path=/usr/local/cuda
+    - --cuda-gpu-arch=sm_80               # any single arch parses; needn't match deployment
+    - -I/usr/local/cuda/include
+  Remove:
+    - -forward-unknown-to-host-compiler
+    - --generate-code*
+    - -gencode*
+    - -rdc=true
+    - -Xcompiler*
+    - --extended-lambda
+    - --expt-relaxed-constexpr
