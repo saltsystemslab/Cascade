@@ -6,7 +6,7 @@
 #include "types.hpp"
 #include "Prefix_Key.hpp"
 #include "Partition.hpp"
-#include "Partition_Backend.hpp"
+#include "Disk_Backend.hpp"
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
@@ -60,12 +60,10 @@ private:
 
     idx_t* rho; // Global rank of the suffixes.
 
-    Prefix_Key* prefix; // Pinned host arena of suffixes' prefixes, used to seed the ranks in exponentiation.
-
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
-    std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
+    std::unique_ptr<Disk_Backend> backend_; // Partition storage backend.
     std::unique_ptr<Spill_Store> spill_;    // Partitions' on-disk spill-files manager.
 
     // Data structures to for the chunked staging of data between the partition-backend and the device buffers.
@@ -185,10 +183,6 @@ private:
     // Keeps exponentiating the effective prefix-context of the suffixes until
     // the suffixes are fully sorted.
     void exponentiate_prefix();
-
-    // Exponentiates the effective prefix-context of the suffixes at the `p_id`
-    // 'th partition from `k`.
-    void exponentiate_prefix(p_id_t p_id, idx_t k);
 
     // Allocates enough space into `SA` and concatenates the partitions into it.
     void concatenate_partitions(idx_t*& SA);

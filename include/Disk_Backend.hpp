@@ -56,6 +56,10 @@ public:
     // the ranks, transforming the ranks into full keys.
     void read_keys(Staging_Slab& s) const;
 
+    // Reads `sz` suffixes and their corresponding ranks of the `p_id`'th
+    // partition, from its offset `off`, into `suf` and `key` respectively.
+    void read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, idx_t* key) const;
+
     // Writes the staging slab `s`'s chunk to the backend.
     void write(const Staging_Slab& s);
 

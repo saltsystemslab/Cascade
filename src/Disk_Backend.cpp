@@ -53,6 +53,13 @@ void Disk_Backend::read_keys(Staging_Slab& s) const
 }
 
 
+void Disk_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, idx_t* const key) const
+{
+    suf_[p_id].read_at(suf, sz * sizeof(idx_t), off * sizeof(idx_t));
+    key_[p_id].read_at(key, sz * sizeof(idx_t), off * sizeof(idx_t));
+}
+
+
 void Disk_Backend::write(const Staging_Slab& s)
 {
     const auto p_id = s.p_id();

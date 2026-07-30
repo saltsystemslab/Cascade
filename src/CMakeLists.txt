@@ -14,7 +14,6 @@ set(PROJECT_SRC
         Partition.cu
         Suffix_Buffer.cpp
         Staging_Slab.cu
-        RAM_Backend.cpp
         Direct_File.cpp
         Spill_Store.cpp
         Disk_Backend.cpp

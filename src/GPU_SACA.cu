@@ -47,7 +47,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , key_bits_(0)
     , P_id(nullptr)
     , rho(nullptr)
-    , prefix(nullptr)
     , null_d(nullptr)
     , workspace_sz(0)
 {
@@ -82,8 +81,6 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
     util::deallocate(P_id);
     util::deallocate(rho);
-
-    util::deallocate(prefix);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamDestroy(stream[s]));
@@ -144,7 +141,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
     {
         PROFILE_SCOPE("setup_staging");
-        backend_ = std::make_unique<RAM_Backend>(P_, prefix, P_off);
+        backend_ = std::make_unique<Disk_Backend>(*spill_, p_, Active_sz, rho, n_, secondary_bits_);
         setup_staging();
     }
 
@@ -480,8 +477,6 @@ void GPU_SACA<T_sym_>::partition()
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_.emplace_back(P_sz[p_id]);
 
-            prefix = util::allocate<Prefix_Key>(n_);
-
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_buf.emplace_back(Suffix_Buffer{
@@ -649,6 +644,12 @@ void GPU_SACA<T_sym_>::initial_rank()
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
         drive_pipeline<true>();
+    }
+
+    // Drop the prefix-keys (used in seeding) from the backend.
+    {
+        PROFILE_SCOPE("drop_prefixes");
+        backend_->drop_prefixes();
     }
 
 #ifdef TESTS
@@ -1025,13 +1026,26 @@ void GPU_SACA<T_sym_>::update_global_ranks()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 {
-    const auto& part = P_[p_id];
     const auto sz = Active_sz[p_id];
     const auto rank_off = P_off[p_id];
 
-    #pragma omp parallel for schedule(static)
-    for(idx_t j = 0; j < sz; ++j)
-        rho[part.suf(j)] = rank_off + part.key(j);
+    auto& s = S[0];
+    idx_t* const suf = s.suf();
+    idx_t* const key = reinterpret_cast<idx_t*>(s.key());
+    for(idx_t off = 0; off < sz;)
+    {
+        const idx_t to_read = std::min(chunk_cap_, sz - off);
+        backend_->read_chunk(p_id, off, to_read, suf, key);
+        off += to_read;
+
+        #pragma omp parallel for schedule(static)
+        for(idx_t i = 0; i < to_read; ++i)
+        {
+            const auto j = suf[i];  // Suffix.
+            const auto r_j = key[i];    // Local rank of `j`.
+            rho[j] = rank_off + r_j;    // Global rank of `j`.
+        }
+    }
 }
 
 
@@ -1043,16 +1057,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));
 
-        // For each partition, exponentiate the prefix-context of its suffixes.
+        // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
         {
-            PROFILE_SCOPE("cpu_gather");
-            for(p_id_t p_id = 0; p_id < p_; ++p_id) // TODO: do in parallel, with nested-parallelism inside partitions.
-            {
-                if(Active_sz[p_id] == 0)    // Skip partitions with fully stable rankings.
-                    continue;
-
-                exponentiate_prefix(p_id, k);
-            }
+            // PROFILE_SCOPE("cpu_gather"); // TODO: relocate properly.
+            backend_->set_prefix_context(k);
         }
 
         // Sort-and-rank each partition.
@@ -1090,22 +1098,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             if(sorted_part == p_)   // All partitions have already been sorted.
                 break;
         }
-    }
-}
-
-
-template <typename T_sym_>
-void GPU_SACA<T_sym_>::exponentiate_prefix(const p_id_t p_id, const idx_t k)
-{
-    auto& part = P_[p_id];
-    const idx_t sz = Active_sz[p_id];
-
-    #pragma omp parallel for schedule(static)
-    for(idx_t j = 0; j < sz; ++j)
-    {
-        const idx_t suf = part.suf(j);
-        const idx_t secondary = (suf + k < n_ ? rho[suf + k] : 0);
-        part.key(j) = (part.key(j) << secondary_bits_) | secondary;
     }
 }
 
