@@ -413,7 +413,7 @@ void GPU_SACA<T_sym_>::setup_staging()
     else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
     {
         constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(idx_t);
-        chunk_cap_ = ((chunk_cap_ + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
+        chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
     }
 
     reader_c_ = 8;  // TODO: tune.
