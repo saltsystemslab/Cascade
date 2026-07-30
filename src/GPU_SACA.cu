@@ -154,6 +154,9 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
 
     {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(SA);}
+
+    {   PROFILE_SCOPE("drop_backend");              backend_.reset();   spill_->cleanup();   }
+
     const auto t_5 = now();
     std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
 }
@@ -1042,8 +1045,8 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
         for(idx_t i = 0; i < to_read; ++i)
         {
             const auto j = suf[i];  // Suffix.
-            const auto r_j = key[i];    // Local rank of `j`.
-            rho[j] = rank_off + r_j;    // Global rank of `j`.
+            const auto r_j = key[i];    // Local rank.
+            rho[j] = rank_off + r_j;    // Global rank.
         }
     }
 }
@@ -1108,6 +1111,10 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
     SA = rho;
     rho = nullptr;
 
+    auto& s = S[0];
+    idx_t* const suf = s.suf();
+    idx_t* const key = reinterpret_cast<idx_t*>(s.key());
+
     // Place the partitions at their appropriate offsets and shuffle the in-
     // partition suffixes per their local-rank.
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -1116,12 +1123,19 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
         const auto sz = part.capacity();
         const auto off = P_off[p_id];
 
-        #pragma omp parallel for schedule(static)
-        for(idx_t j = 0; j < sz; ++j)
+        for(idx_t chunk_off = 0; chunk_off < sz;)
         {
-            const auto suf = part.suf(j);
-            const auto r = part.key(j);
-            SA[off + r] = suf;
+            const auto chunk_sz = std::min(chunk_cap_, sz - chunk_off);
+            backend_->read_chunk(p_id, chunk_off, chunk_sz, suf, key);
+            chunk_off += chunk_sz;
+
+            #pragma omp parallel for schedule(static)
+            for(idx_t i = 0; i < chunk_sz; ++i)
+            {
+                const auto j = suf[i];  // Suffix.
+                const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
+                SA[off + r_j] = j;
+            }
         }
     }
 }
