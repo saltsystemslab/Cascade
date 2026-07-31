@@ -11,7 +11,6 @@ set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 # Bundle the core source files into a variable.
 set(PROJECT_SRC
         GPU_SACA.cu
-        Partition.cu
         Suffix_Buffer.cpp
         Staging_Slab.cu
         Direct_File.cpp

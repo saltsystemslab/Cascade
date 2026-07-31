@@ -141,7 +141,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
     {
         PROFILE_SCOPE("setup_staging");
-        backend_ = std::make_unique<Disk_Backend>(*spill_, p_, Active_sz, rho, n_, secondary_bits_);
+        backend_ = std::make_unique<Disk_Backend>(*spill_, p_, P_cap, rho, n_, secondary_bits_);
         setup_staging();
     }
 
@@ -364,8 +364,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     // `cub` itself requires a workspace for sort and scan.
     // Memory constraint: STREAM_C x (P_sz_max x (2 x (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
-    const auto& P_sz = Active_sz;
-    const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+    const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
     // Compute required workspaces-sizes for the sort and the scan.
     workspace_sz = cub_workspace_size(P_sz_max);
@@ -409,8 +408,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::setup_staging()
 {
-    const auto& P_sz = Active_sz;
-    const auto P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
     if(P_sz_max >= CHUNK_CAP)
         chunk_cap_ = CHUNK_CAP;
     else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
@@ -457,7 +455,6 @@ void GPU_SACA<T_sym_>::partition()
         // Initialize the partitions' spill-stores and their prefix-key buffers.
         {
             PROFILE_SCOPE("allocate_partition_buffers");
-            const auto& P_sz = Active_sz;
 
             const auto scratch = env::get("GPU_SACA_SCRATCH");
             if(!scratch)
@@ -476,16 +473,12 @@ void GPU_SACA<T_sym_>::partition()
 
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
 
-            P_.reserve(p_);
-            for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_.emplace_back(P_sz[p_id]);
-
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_buf.emplace_back(Suffix_Buffer{
                     spill_->open(p_id, Spill_Role::suf, Direct_File::Mode::write),
                     spill_->open(p_id, Spill_Role::prefix, Direct_File::Mode::write),
-                    P_sz[p_id]
+                    P_cap[p_id]
                 });
         }
 
@@ -504,13 +497,12 @@ void GPU_SACA<T_sym_>::partition()
 
 #ifdef TESTS
         {
-            const auto& P_sz = Active_sz;
             bool part_sz_match = true;
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_sz[p_id]);
+                part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_cap[p_id]);
 
             std::cerr << "Partition-sizes match verification: " << (part_sz_match ? "Passes" : "Fails") << "\n";
-            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(T_h_, n_, P_id, P_sz, spill_) ? "Passes" : "Fails") << "\n";
+            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(T_h_, n_, P_id, P_cap, spill_) ? "Passes" : "Fails") << "\n";
         }
 #endif
     }
@@ -606,26 +598,26 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     // Move the partition-sizes to the host.
     {
-        auto& P_sz = Active_sz;
-        P_sz.resize(p_);
-        CUDA_CHECK(cudaMemcpy(P_sz.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
+        P_cap.resize(p_);
+        CUDA_CHECK(cudaMemcpy(P_cap.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaFree(P_sz_d));
 
         P_off.resize(p_);
         P_off[0] = 0;
         for(p_id_t p_id = 1; p_id < p_; ++p_id)
-            P_off[p_id] = P_off[p_id - 1] + P_sz[p_id - 1];
+            P_off[p_id] = P_off[p_id - 1] + P_cap[p_id - 1];
+
+        Active_sz = P_cap;
 
 #ifdef STATS
         std::cerr << "Partition-size stats:\n";
-        util::Collection_Stats::get_collection_stat(P_sz).print();
+        util::Collection_Stats::get_collection_stat(P_cap).print();
 #endif
     }
 
     // Determine bit-width of primary-keys of suffixes.
     {
-        const auto& P_sz = Active_sz;
-        const idx_t P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
+        const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
         key_bits_ = secondary_bits_ + util::math::bits_for(P_sz_max);
         if(key_bits_ > 64)
         {
@@ -1119,8 +1111,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
     // partition suffixes per their local-rank.
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
-        const auto& part = P_[p_id];
-        const auto sz = part.capacity();
+        const auto sz = P_cap[p_id];
         const auto off = P_off[p_id];
 
         for(idx_t chunk_off = 0; chunk_off < sz;)
