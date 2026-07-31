@@ -266,11 +266,11 @@ int main(int argc, char** argv)
     {
         std::vector<uint32_t> SA(n);
 
-        const auto t_0 = caps_sa::timer::now();
+        const auto t_0 = gpu_saca::timer::now();
         bench_libcubwt(T.c_str(), n, SA.data());
-        const auto t_1 = caps_sa::timer::now();
+        const auto t_1 = gpu_saca::timer::now();
 
-        std::cerr << "Built the SA using `libcubwt`. Time taken: " << caps_sa::timer::duration(t_1 - t_0) << " seconds.\n";
+        std::cerr << "Built the SA using `libcubwt`. Time taken: " << gpu_saca::timer::duration(t_1 - t_0) << " seconds.\n";
 
         // std::cerr << "SA matches reference: " << (SA == reference_sa(reinterpret_cast<const uint8_t*>(T), n) ? "YES" : "NO") << "\n";
     }

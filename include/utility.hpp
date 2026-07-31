@@ -12,7 +12,6 @@
 #include <random>
 #include <vector>
 #include <filesystem>
-#include <fstream>
 #include <iostream>
 #include <typeinfo>
 #include <cstdio>
@@ -22,7 +21,7 @@
 #include <chrono>
 
 
-namespace caps_sa::timer
+namespace gpu_saca::timer
 {
     // Fields for profiling time.
 

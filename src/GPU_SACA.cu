@@ -104,7 +104,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
 {
-    using namespace caps_sa::timer;
+    using namespace gpu_saca::timer;
     PROFILE_SCOPE("build_SA");
 
     // Pin the host-side text so that PCIe transfers of text can be overlapped kernel execution.
