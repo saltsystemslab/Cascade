@@ -28,6 +28,33 @@ namespace gpu_saca::timer
     typedef std::chrono::high_resolution_clock::time_point time_point_t;
     const static auto now = std::chrono::high_resolution_clock::now;
     const static auto duration = [](const std::chrono::nanoseconds& d) { return std::chrono::duration_cast<std::chrono::duration<double>>(d).count(); };
+
+    // Scope-timer, based on RAII mechanism.
+    class Scope_Timer
+    {
+    private:
+
+        uint64_t* const sink_;  // Where to accumulate the scope's timing.
+        const uint64_t t0_; // Initial timestamp of the timer's scope.
+
+        // Returns the current timestamp in nanoseconds.
+        static uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+    public:
+
+        // Constructs a scope-timer accumulating its timing to `sink`.
+        explicit Scope_Timer(uint64_t& sink):
+              sink_(&sink)
+            , t0_(now_ns())
+        {}
+
+        ~Scope_Timer() { *sink_ += (now_ns() - t0_); }
+
+        Scope_Timer(const Scope_Timer&) = delete;
+        Scope_Timer& operator=(const Scope_Timer&) = delete;
+        Scope_Timer(Scope_Timer&&) = delete;
+        Scope_Timer& operator=(Scope_Timer&&) = delete;
+    };
 }
 
 
