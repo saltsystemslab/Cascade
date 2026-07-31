@@ -6,6 +6,7 @@
 #include "utility.cuh"
 #include "env.hpp"
 #include "tests.hpp"
+#include "isa-instrument.hpp"
 #include "profile.hpp"
 
 #include "omp.h"
@@ -24,6 +25,7 @@
 #include <memory>
 #include <cstdlib>
 #include <random>
+#include <numeric>
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -420,6 +422,8 @@ void GPU_SACA<T_sym_>::setup_staging()
     reader_c_ = 8;  // TODO: tune.
     writer_c_ = 8;  // TODO: tune.
 
+    INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_));
+
     const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
     slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
@@ -635,6 +639,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
+    INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(0, 0, n_));
+
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
@@ -678,6 +684,8 @@ void GPU_SACA<T_sym_>::initial_rank()
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
     }
 #endif
+
+    INSTRUMENT(isa_instrument::ISA_Instrument().report_log());
 }
 
 
@@ -779,6 +787,12 @@ template <typename T_sym_>
 template <bool init_rank_>
 void GPU_SACA<T_sym_>::drive_pipeline()
 {
+#ifdef ISA_INSTRUMENT
+    uint64_t pipeline_ns = 0;
+#endif
+{
+    INSTRUMENT_TIMER(pipeline_ns);
+
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
     p_id_t active_part_c = 0;   // Count of active partitions in the current iteration.
 
@@ -807,18 +821,23 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     }
 
 
-    std::vector<std::thread> readers;   // Readers-pool.
+    std::vector<std::thread> readers;   // Readers-pool.    // TODO: why new pool per iteration? Fix.
     std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
     // Launch readers thread-pool to read chunks from the partition-backend to staging slabs.
     {
         for(idx_t r = 0; r < reader_c_; ++r)
             readers.emplace_back(
-                [&]
+                [&, r]
                 {
+                    INSTRUMENT(isa_instrument::ISA_Instrument().bind(r));
                     while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
                         Read_Task rt;       RT.wait_dequeue(rt);    // Get a read-task.
-                        Staging_Slab* s;    F.wait_dequeue(s);      // Get a free slab for the chunk.
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().wait_ns);
+                            F.wait_dequeue(s);      // Get a free slab for the chunk.
+                        }
 
                         s->assign(rt.p_id, rt.off, rt.sz);
                         if constexpr(init_rank_)    backend_->read_prefixes(*s);
@@ -834,7 +853,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     }
 
 
-    std::vector<std::thread> writers;   // Writers-pool.
+    std::vector<std::thread> writers;   // Writers-pool.    // TODO: why new pool per iteration?
     std::atomic<int64_t> dl_remain(total_chunk);    // Count of chunks left to download from the device.
     // Launch writers thread-pool to drain the processed chunks to the partition-backend from staging slabs.
     {
@@ -880,6 +899,9 @@ void GPU_SACA<T_sym_>::drive_pipeline()
         for(auto& r : readers)  r.join();
         for(auto& w : writers)  w.join();
     }
+}
+
+    INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_pipeline_ns(pipeline_ns));
 }
 
 
@@ -1024,23 +1046,41 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
     const auto sz = Active_sz[p_id];
     const auto rank_off = P_off[p_id];
 
+#ifdef ISA_INSTRUMENT
+    uint64_t read_ns = 0, scatter_ns = 0;
+#endif
+
     auto& s = S[0];
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());
     for(idx_t off = 0; off < sz;)
     {
         const idx_t to_read = std::min(chunk_cap_, sz - off);
-        backend_->read_chunk(p_id, off, to_read, suf, key);
-        off += to_read;
 
-        #pragma omp parallel for schedule(static)
-        for(idx_t i = 0; i < to_read; ++i)
+        // Read the chunk of suffixes and their keys from offset `off`.
         {
-            const auto j = suf[i];  // Suffix.
-            const auto r_j = key[i];    // Local rank.
-            rho[j] = rank_off + r_j;    // Global rank.
+            INSTRUMENT_TIMER(read_ns);
+            backend_->read_chunk(p_id, off, to_read, suf, key);
         }
+
+        // Update `rho`-entries corresponding to the chunk.
+        {
+            INSTRUMENT_TIMER(scatter_ns);
+
+            #pragma omp parallel for schedule(static)
+            for(idx_t i = 0; i < to_read; ++i)
+            {
+                const auto j = suf[i];  // Suffix.
+                const auto r_j = key[i];    // Local rank.
+                rho[j] = rank_off + r_j;    // Global rank.
+            }
+        }
+
+        off += to_read;
     }
+
+    INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_read_chunk_ns(read_ns));
+    INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_scatter_ns(scatter_ns));
 }
 
 
@@ -1048,9 +1088,12 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
     constexpr idx_t ell = K;
-    for(idx_t k = ell; k < n_; k *= 2)
+    idx_t iter = 1;
+    for(idx_t k = ell; k < n_; k *= 2, ++iter)
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));
+
+        INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(iter, k, std::accumulate(Active_sz.cbegin(), Active_sz.cend(), idx_t(0))));
 
         // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
         {
@@ -1089,6 +1132,8 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << "."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
 #endif
+
+            INSTRUMENT(isa_instrument::ISA_Instrument().report_log());
 
             if(sorted_part == p_)   // All partitions have already been sorted.
                 break;

@@ -1,5 +1,6 @@
 
 #include "Disk_Backend.hpp"
+#include "isa-instrument.hpp"
 
 
 namespace gpu_saca
@@ -27,6 +28,8 @@ Disk_Backend::Disk_Backend(Spill_Store& spill, const p_id_t p, const std::vector
 
 void Disk_Backend::read_prefixes(Staging_Slab& s) const
 {
+    INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+
     const auto p_id = s.p_id();
     suf_[p_id].read_at(s.suf(), s.size() * sizeof(idx_t), s.off() * sizeof(idx_t));
     prefix_[p_id].read_at(s.key(), s.size() * sizeof(Prefix_Key), s.off() * sizeof(Prefix_Key));
@@ -35,12 +38,19 @@ void Disk_Backend::read_prefixes(Staging_Slab& s) const
 
 void Disk_Backend::read_keys(Staging_Slab& s) const
 {
-    const auto p_id = s.p_id();
-    suf_[p_id].read_at(s.suf(), s.size() * sizeof(idx_t), s.off() * sizeof(idx_t));
-    key_[p_id].read_at(s.key(), s.size() * sizeof(idx_t), s.off() * sizeof(idx_t));
+    // Read the suffixes and their ranks, corresponding to slab `s`.
+    {
+        INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+
+        const auto p_id = s.p_id();
+        suf_[p_id].read_at(s.suf(), s.size() * sizeof(idx_t), s.off() * sizeof(idx_t));
+        key_[p_id].read_at(s.key(), s.size() * sizeof(idx_t), s.off() * sizeof(idx_t));
+    }
 
     // Gather the secondary keys of the read suffixes and fold those in to the keys.
     {
+        INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().gather_ns);
+
         const idx_t* const suf = s.suf();
         idx_t* const key = reinterpret_cast<idx_t*>(s.key());
         for(idx_t i = 0; i < s.size(); ++i)
