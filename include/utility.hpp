@@ -120,6 +120,10 @@ void deallocate(T_* const ptr)
 }
 
 
+// Returns the host's currently available memory, in bytes.
+std::size_t available_memory();
+
+
 // Generates a random text of symbols of type `T_sym_` and of length `n` at `T`.
 // `T` must have enough space allocated beforehand.
 template <typename T_sym_>
