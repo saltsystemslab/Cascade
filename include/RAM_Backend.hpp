@@ -35,6 +35,12 @@ public:
 
     ~RAM_Backend();
 
+    // Returns the `p_id`'th partition's resident suffixes.
+    idx_t* suf(const p_id_t p_id) { return suf_[p_id]; }
+
+    // Returns the `p_id`'th partition's resident prefix-keys.
+    Prefix_Key* prefix(const p_id_t p_id) { return prefix_[p_id]; }
+
     // Reads `sz`-many initial prefixes of the `p_id`'th partition, from its
     // offset `off`, into `dst`.
     void read_prefix(p_id_t p_id, idx_t off, idx_t sz, Prefix_Key* dst) const;
@@ -49,16 +55,10 @@ public:
 
     // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
     // offset `off`, from `suf` and `key`.
-    void write_data(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const idx_t* key);
+    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const idx_t* key);
 
     // Drops the prefix-keys from the backend.
     void drop_prefixes();
-
-    // Returns the `p_id`'th partition's resident suffixes.
-    const idx_t* suf(const p_id_t p_id) const { return suf_[p_id]; }
-
-    // Returns the `p_id`'th partition's resident prefix-keys.
-    const Prefix_Key* prefix(const p_id_t p_id) const { return prefix_[p_id]; }
 };
 
 }

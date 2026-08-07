@@ -46,6 +46,9 @@ private:
 
 public:
 
+    // Constructs a null file-handle.
+    Direct_File();
+
     // Opens a direct-file at `path` with access-mode `mode`.
     Direct_File(const std::string& path, Mode mode);
 

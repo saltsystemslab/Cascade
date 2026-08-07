@@ -63,7 +63,7 @@ void RAM_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, i
 }
 
 
-void RAM_Backend::write_data(const p_id_t p_id, const  idx_t off, const  idx_t sz, const idx_t* const suf, const idx_t* const key)
+void RAM_Backend::write(const p_id_t p_id, const  idx_t off, const  idx_t sz, const idx_t* const suf, const idx_t* const key)
 {
     std::memcpy(suf_[p_id] + off, suf, sz * sizeof(idx_t));
     std::memcpy(key_[p_id] + off, key, sz * sizeof(idx_t));

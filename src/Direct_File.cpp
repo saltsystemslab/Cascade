@@ -26,6 +26,11 @@ bool Direct_File::is_block_aligned(const std::size_t sz)
 }
 
 
+Direct_File::Direct_File():
+      fd_(-1)
+{}
+
+
 Direct_File::Direct_File(const std::string& path, const Mode mode):
       fd_(-1)
     , path_(path)
@@ -129,7 +134,7 @@ void Direct_File::unlink()
         fd_ = -1;
     }
 
-    if(::unlink(path_.c_str()) != 0)
+    if(!path_.empty() && ::unlink(path_.c_str()) != 0)
         exit("unlink");
 }
 
