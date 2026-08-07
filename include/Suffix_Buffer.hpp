@@ -30,8 +30,10 @@ private:
     static_assert((w_buf_cap * sizeof(idx_t)) % Direct_File::DISK_BLOCK == 0);
     static_assert((w_buf_cap * sizeof(Prefix_Key)) % Direct_File::DISK_BLOCK == 0);
 
-    Direct_File suf_file_;  // Sink file for the suffixes.
-    Direct_File key_file_;  // Sink file for the prefix-keys of the suffixes.
+    idx_t* suf_mem_;    // Resident sink for the suffixes.
+    Prefix_Key* key_mem_;   // Resident sink for the prefix-keys.
+    Direct_File* suf_file_; // Spill-file sink for the suffixes.
+    Direct_File* key_file_; // Spill-file sink for the prefix-keys.
 
     idx_t* w_suf_base_;         // Flattened collection of worker-local suffix buffers.
     Prefix_Key* w_key_base_;    // Flattened collection of worker-local prefix-key-buffers.
@@ -44,12 +46,17 @@ private:
     auto w_suf(const idx_t w) { return w_suf_base_ + w * w_buf_cap; }   // Returns the `w`'th worker's suffix-buffer.
     auto w_key(const idx_t w) { return w_key_base_ + w * w_buf_cap; }   // Returns the `w`'th worker's prefix-key-buffer.
 
+    // Sinks `sz`-many suffixes and their prefix-keys, from `suf` and `key`, at
+    // the partition-offset `off`.
+    void sink(idx_t off, idx_t sz, const idx_t* suf, const Prefix_Key* key);
+
 public:
 
     // Constructs a buffer that overflows suffixes and their prefix-keys to
-    // sink files `suf_file` and `key_file respectively, for a total `cap`
-    // suffixes.
-    Suffix_Buffer(Direct_File suf_file, Direct_File key_file, idx_t cap);
+    // the partition's sinks: the resident allocations `suf_mem` and `key_mem`
+    // when these are non-null, and the spill-files `suf_file` and `key_file`
+    // otherwise.
+    Suffix_Buffer(idx_t* suf_mem, Prefix_Key* key_mem, Direct_File* suf_file, Direct_File* key_file);
 
     Suffix_Buffer(const Suffix_Buffer&) = delete;
     Suffix_Buffer& operator=(const Suffix_Buffer&) = delete;
@@ -81,8 +88,7 @@ inline void Suffix_Buffer::add(const idx_t suf, const Prefix_Key& p_key)
     if(++fill == w_buf_cap)
     {
         const auto off = flushed_.fetch_add(w_buf_cap, std::memory_order_relaxed);
-        suf_file_.write_at(suf_buf, w_buf_cap * sizeof(idx_t), off * sizeof(idx_t));
-        key_file_.write_at(key_buf, w_buf_cap * sizeof(Prefix_Key), off * sizeof(Prefix_Key));
+        sink(off, w_buf_cap, suf_buf, key_buf);
         fill = 0;
     }
 }

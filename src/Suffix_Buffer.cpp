@@ -14,20 +14,17 @@
 namespace gpu_saca
 {
 
-Suffix_Buffer::Suffix_Buffer(Direct_File suf_file, Direct_File key_file, idx_t cap):
-      suf_file_(std::move(suf_file))
-    , key_file_(std::move(key_file))
+Suffix_Buffer::Suffix_Buffer(idx_t* const suf_mem, Prefix_Key* const key_mem, Direct_File* const suf_file, Direct_File* const key_file):
+      suf_mem_(suf_mem)
+    , key_mem_(key_mem)
+    , suf_file_(suf_file)
+    , key_file_(key_file)
     , w_suf_base_(nullptr)
     , w_key_base_(nullptr)
     , w_fill_(omp_get_max_threads())
     , flushed_(0)
     , worker_c_(omp_get_max_threads())
 {
-    // TODO: can we move the following two allocations somewhere central?
-    // File-allocation baked into buffer-logic isn't good design.
-    suf_file_.preallocate(cap * sizeof(idx_t));
-    key_file_.preallocate(cap * sizeof(Prefix_Key));
-
     w_suf_base_ = util::aligned_allocate<idx_t>(worker_c_ * w_buf_cap, Direct_File::DISK_BLOCK);
     w_key_base_ = util::aligned_allocate<Prefix_Key>(worker_c_ * w_buf_cap, Direct_File::DISK_BLOCK);
     if(w_suf_base_ == nullptr || w_key_base_ == nullptr)
@@ -41,16 +38,19 @@ Suffix_Buffer::Suffix_Buffer(Direct_File suf_file, Direct_File key_file, idx_t c
 
 
 Suffix_Buffer::Suffix_Buffer(Suffix_Buffer&& rhs):
-      suf_file_(std::move(rhs.suf_file_))
-    , key_file_(std::move(rhs.key_file_))
+      suf_mem_(rhs.suf_mem_)
+    , key_mem_(rhs.key_mem_)
+    , suf_file_(rhs.suf_file_)
+    , key_file_(rhs.key_file_)
     , w_suf_base_(rhs.w_suf_base_)
     , w_key_base_(rhs.w_key_base_)
     , w_fill_(std::move(rhs.w_fill_))
     , flushed_(rhs.flushed_.load(std::memory_order_relaxed))
     , worker_c_(rhs.worker_c_)
 {
-    rhs.w_suf_base_ = nullptr;
-    rhs.w_key_base_ = nullptr;
+    rhs.suf_mem_ = nullptr, rhs.key_mem_ = nullptr;
+    rhs.suf_file_ = nullptr, rhs.key_file_ = nullptr;
+    rhs.w_suf_base_ = nullptr, rhs.w_key_base_ = nullptr;
 }
 
 
@@ -79,9 +79,18 @@ void Suffix_Buffer::flush()
     if(total_tail > 0)
     {
         const auto off = flushed_.fetch_add(total_tail, std::memory_order_relaxed);
-        suf_file_.write_at(w_suf_base_, total_tail * sizeof(idx_t), off * sizeof(idx_t));
-        key_file_.write_at(w_key_base_, total_tail * sizeof(Prefix_Key), off * sizeof(Prefix_Key));
+        sink(off, total_tail, w_suf_base_, w_key_base_);
     }
+}
+
+
+void Suffix_Buffer::sink(const idx_t off, const idx_t sz, const idx_t* suf, const Prefix_Key* key)
+{
+    suf_mem_ != nullptr ?   (void) std::memcpy(suf_mem_ + off, suf, sz * sizeof(idx_t)) :
+                            suf_file_->write_at(suf, sz * sizeof(idx_t), off * sizeof(idx_t));
+
+    key_mem_ != nullptr ?   (void) std::memcpy(key_mem_ + off, key, sz * sizeof(Prefix_Key)) :
+                            key_file_->write_at(key, sz * sizeof(Prefix_Key), off * sizeof(Prefix_Key));
 }
 
 }
