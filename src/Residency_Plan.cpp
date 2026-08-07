@@ -45,10 +45,10 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
         return admitted;
     };
 
-#ifdef STATS
     const auto data_resident = admit(data_, 2 * sizeof(idx_t));
     const auto prefix_resident = admit(prefix_, prefix_elem_bytes);
 
+#ifdef STATS
     const auto n = std::accumulate(P_cap.cbegin(), P_cap.cend(), idx_t(0));
     const auto data_c = std::count(data_.cbegin(), data_.cend(), 1);
     const auto prefix_c = std::count(prefix_.cbegin(), prefix_.cend(), 1);
@@ -57,7 +57,8 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
               << GB(data_resident) << "GBs resident, " << GB(2 * sizeof(idx_t) * n - data_resident) << "GBs spilled.\n"
               << "\tprefix: " << prefix_c << "/" << P_cap.size() << " partitions, "
               << GB(prefix_resident) << "GBs resident, " << GB(prefix_elem_bytes * n - prefix_resident) << "GBs spilled.\n";
-
+#else
+    (void)data_resident, (void)prefix_resident;
 #endif
 }
 
