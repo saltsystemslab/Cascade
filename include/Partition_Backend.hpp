@@ -53,6 +53,9 @@ public:
     // Returns the `p_id`'th partition's resident suffixes, if any.
     idx_t* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }
 
+    // Returns the `p_id`'th partition's resident keys, if any.
+    idx_t* resident_key(const p_id_t p_id) { return plan_.data(p_id) ? ram_.key(p_id) : nullptr; }
+
     // Returns the `p_id`'th partition's resident prefix-keys, if any.
     Prefix_Key* resident_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? ram_.prefix(p_id) : nullptr; }
 

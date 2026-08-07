@@ -1030,6 +1030,22 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
     const auto sz = Active_sz[p_id];
     const auto rank_off = P_off[p_id];
 
+    if(backend_->resident_suf(p_id) != nullptr) // Resident fast path.
+    {
+        const auto* const suf = backend_->resident_suf(p_id);
+        const auto* const key = backend_->resident_key(p_id);
+
+        #pragma omp parallel for schedule(static)
+        for(idx_t i = 0; i < sz; ++i)
+        {
+            const auto j = suf[i];  // Suffix.
+            const auto r_j = key[i];    // Local rank.
+            rho[j] = rank_off + r_j;    // Global rank.
+        }
+
+        return;
+    }
+
     auto& s = S[0];
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());
@@ -1057,6 +1073,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     for(idx_t k = ell; k < n_; k *= 2)
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));
+        const auto t_0 = caps_sa::timer::now();
 
         // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
         {
@@ -1083,6 +1100,9 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
         }
 
+        const auto t_1 = caps_sa::timer::now();
+        (void)t_0, (void)t_1;
+
 
         // Check for early-exit.
         {
@@ -1092,7 +1112,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 sorted_part += (Active_sz[p_id] == 0),
                 unsorted += Active_sz[p_id];
 #ifdef STATS
-            std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << "."
+            std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << ". Time taken in iteration: " << caps_sa::timer::duration(t_1 - t_0) << "s."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
 #endif
 
@@ -1119,6 +1139,22 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
     {
         const auto sz = P_cap[p_id];
         const auto off = P_off[p_id];
+
+        if(backend_->resident_suf(p_id) != nullptr) // Resident fast path.
+        {
+            const auto* const suf = backend_->resident_suf(p_id);
+            const auto* const key = backend_->resident_key(p_id);
+
+            #pragma omp parallel for schedule(static)
+            for(idx_t i = 0; i < sz; ++i)
+            {
+                const auto j = suf[i];  // Suffix.
+                const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
+                SA[off + r_j] = j;
+            }
+
+            continue;
+        }
 
         for(idx_t chunk_off = 0; chunk_off < sz;)
         {

@@ -38,6 +38,9 @@ public:
     // Returns the `p_id`'th partition's resident suffixes.
     idx_t* suf(const p_id_t p_id) { return suf_[p_id]; }
 
+    // Returns the `p_id`'th partition's resident keys.
+    idx_t* key(const p_id_t p_id) { return key_[p_id]; }
+
     // Returns the `p_id`'th partition's resident prefix-keys.
     Prefix_Key* prefix(const p_id_t p_id) { return prefix_[p_id]; }
 
