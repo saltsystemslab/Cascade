@@ -426,7 +426,7 @@ void GPU_SACA<T_sym_>::setup_staging()
         chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
     }
 
-    reader_c_ = 8;  // TODO: tune.
+    reader_c_ = omp_get_max_threads();  // TODO: tune.
     writer_c_ = 8;  // TODO: tune.
 
     const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
