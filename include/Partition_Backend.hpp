@@ -60,7 +60,7 @@ public:
     Direct_File* spilled_suf(const p_id_t p_id) { return plan_.data(p_id) ? nullptr : &disk_.suf(p_id); }
 
     // Returns the `p_id`'th partition's spilled prefix-keys' file, if any.
-    Direct_File* spilled_prefix(const p_id_t p_id) { return plan_.data(p_id) ? nullptr : &disk_.prefix(p_id); }
+    Direct_File* spilled_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? nullptr : &disk_.prefix(p_id); }
 
     // Reads the staging slab `s`'s chunk of suffixes and their corresponding
     // prefix-keys from the backend into it.
