@@ -18,13 +18,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
 
 void Partition_Backend::read_prefixes(Staging_Slab& s) const
 {
-    const auto p_id = s.p_id();
-
-    plan_.data(p_id) ?  ram_.read_suf(p_id, s.off(), s.size(), s.suf()) :
-                        disk_.read_suf(p_id, s.off(), s.size(), s.suf());
-
-    plan_.prefix(p_id) ?    ram_.read_prefix(p_id, s.off(), s.size(), s.key()) :
-                            disk_.read_prefix(p_id, s.off(), s.size(), s.key());
+    read_prefix_chunk(s.p_id(), s.off(), s.size(), s.suf(), s.key());
 }
 
 
@@ -46,10 +40,20 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 }
 
 
-void Partition_Backend::read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, idx_t* key) const
+void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, idx_t* const key) const
 {
     plan_.data(p_id) ?  (ram_.read_suf(p_id, off, sz, suf), ram_.read_key(p_id, off, sz, key)) :
                         (disk_.read_suf(p_id, off, sz, suf), disk_.read_key(p_id, off, sz, key));
+}
+
+
+void Partition_Backend::read_prefix_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, Prefix_Key* const key) const
+{
+    plan_.data(p_id) ?  ram_.read_suf(p_id, off, sz, suf) :
+                        disk_.read_suf(p_id, off, sz, suf);
+
+    plan_.prefix(p_id) ?    ram_.read_prefix(p_id, off, sz, key) :
+                            disk_.read_prefix(p_id, off, sz, key);
 }
 
 

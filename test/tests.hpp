@@ -6,7 +6,7 @@
 
 #include "types.hpp"
 #include "Prefix_Key.hpp"
-#include "Spill_Store.hpp"
+#include "Partition_Backend.hpp"
 
 #include <vector>
 
@@ -45,7 +45,7 @@ T_sym_ universe_split_threshold(const T_sym_* T, idx_t n);
 // (2) that it is not duplicated anywhere; and (3) that its associated prefix
 // matches to the actual prefix extracted from `T`.
 template <typename T_sym_>
-bool validate_partition_contents(const T_sym_* T, idx_t n, const p_id_t* P_id, const std::vector<idx_t>& P_sz, const std::unique_ptr<Spill_Store>& spill);
+bool validate_partition_contents(const T_sym_* T, idx_t n, const p_id_t* P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
 
 // Returns `true` iff `SA` is a permutation of `[0, n)`.
 bool is_permutation(const idx_t* SA, idx_t n);

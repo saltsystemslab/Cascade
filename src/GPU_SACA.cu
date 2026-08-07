@@ -141,7 +141,6 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
     {
         PROFILE_SCOPE("setup_staging");
-        backend_ = std::make_unique<Disk_Backend>(*spill_, p_, P_cap, rho, n_, secondary_bits_);
         setup_staging();
     }
 
@@ -159,6 +158,16 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
 
     const auto t_5 = now();
     std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
+}
+
+
+template <typename T_sym_>
+std::size_t GPU_SACA<T_sym_>::fixed_budget() const
+{
+    return  n_ * sizeof(T_sym_) +   // `T`
+            n_ * sizeof(p_id_t) +   // `Π`
+            n_ * sizeof(idx_t) +    // `ρ`
+            Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_);
 }
 
 
@@ -472,14 +481,11 @@ void GPU_SACA<T_sym_>::partition()
             }
 
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
+            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(Suffix_Buffer{
-                    spill_->open(p_id, Spill_Role::suf, Direct_File::Mode::write),
-                    spill_->open(p_id, Spill_Role::prefix, Direct_File::Mode::write),
-                    P_cap[p_id]
-                });
+                P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->resident_prefix(p_id), backend_->spilled_suf(p_id), backend_->spilled_prefix(p_id)});
         }
 
 
@@ -502,7 +508,7 @@ void GPU_SACA<T_sym_>::partition()
                 part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_cap[p_id]);
 
             std::cerr << "Partition-sizes match verification: " << (part_sz_match ? "Passes" : "Fails") << "\n";
-            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(T_h_, n_, P_id, P_cap, spill_) ? "Passes" : "Fails") << "\n";
+            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(T_h_, n_, P_id, P_cap, *backend_) ? "Passes" : "Fails") << "\n";
         }
 #endif
     }

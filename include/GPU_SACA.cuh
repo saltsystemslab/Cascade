@@ -5,7 +5,7 @@
 
 #include "types.hpp"
 #include "Prefix_Key.hpp"
-#include "Disk_Backend.hpp"
+#include "Partition_Backend.hpp"
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
@@ -62,7 +62,7 @@ private:
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
-    std::unique_ptr<Disk_Backend> backend_; // Partition storage backend.
+    std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
     std::unique_ptr<Spill_Store> spill_;    // Partitions' on-disk spill-files manager.
 
     // Data structures to for the chunked staging of data between the partition-backend and the device buffers.
@@ -120,6 +120,11 @@ private:
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
     // }
 
+
+    // Returns the fixed space-budget (in bytes) required in the algorithm.
+    // Currently: the text (`T`), the partition-IDs (`Π`), the ISA (`ρ`), and
+    // the scatter-buffers in partitioning.
+    std::size_t fixed_budget() const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();

@@ -12,13 +12,13 @@ namespace gpu_saca::test
 {
 
 template <typename T_sym_>
-bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const std::unique_ptr<Spill_Store>& spill)
+bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend)
 {
     const auto p_ = P_sz.size();
 
     const auto P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
-    auto* const suf_buf = util::aligned_allocate<idx_t>(Direct_File::block_up(P_sz_max * sizeof(idx_t)), Direct_File::DISK_BLOCK);  // Buffer to read-in the whole suffix-file of a partition.
-    auto* const pre_buf = util::aligned_allocate<Prefix_Key>(Direct_File::block_up(P_sz_max * sizeof(Prefix_Key)), Direct_File::DISK_BLOCK);    // Buffer to read-in the whole prefix-key-file of a partition.
+    auto* const suf_buf = util::aligned_allocate<idx_t>(Direct_File::block_up(P_sz_max * sizeof(idx_t)) / sizeof(idx_t), Direct_File::DISK_BLOCK);  // Buffer to read-in the whole suffix-file of a partition.
+    auto* const pre_buf = util::aligned_allocate<Prefix_Key>(Direct_File::block_up(P_sz_max * sizeof(Prefix_Key)) / sizeof(Prefix_Key), Direct_File::DISK_BLOCK);   // Buffer to read-in the whole prefix-key-file of a partition.
     uint8_t* present = util::allocate<uint8_t>(n); // Whether each suffix is present in the partitions.
 
     #pragma omp parallel for schedule(static)
@@ -32,10 +32,7 @@ bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p
         if(sz == 0) // TODO: check if there may be any required checks here.
             continue;
 
-        const auto suf_file = spill->open(p_id, Spill_Role::suf, Direct_File::Mode::read);
-        const auto pre_file = spill->open(p_id, Spill_Role::prefix, Direct_File::Mode::read);
-        suf_file.read_at(suf_buf, sz * sizeof(idx_t), 0);
-        pre_file.read_at(pre_buf, sz * sizeof(Prefix_Key), 0);
+        backend.read_prefix_chunk(p_id, 0, sz, suf_buf, pre_buf);
 
         #pragma omp parallel for schedule(static) reduction(&& : content_match)
         for(idx_t i = 0; i < sz; ++i)
@@ -65,10 +62,10 @@ bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p
 
 
 // Template instantiations for the required instances.
-template bool validate_partition_contents(const char* const T_h_, const idx_t n_, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const std::unique_ptr<Spill_Store>& spill_);
-template bool validate_partition_contents(const uint8_t* const T_h_, const idx_t n_, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const std::unique_ptr<Spill_Store>& spill_);
-template bool validate_partition_contents(const uint16_t* const T_h_, const idx_t n_, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const std::unique_ptr<Spill_Store>& spill_);
-template bool validate_partition_contents(const uint32_t* const T_h_, const idx_t n_, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const std::unique_ptr<Spill_Store>& spill_);
-template bool validate_partition_contents(const uint64_t* const T_h_, const idx_t n_, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const std::unique_ptr<Spill_Store>& spill_);
+template bool validate_partition_contents(const char*, idx_t, const p_id_t*, const std::vector<idx_t>&, const Partition_Backend&);
+template bool validate_partition_contents(const uint8_t*, idx_t, const p_id_t* const, const std::vector<idx_t>&, const Partition_Backend&);
+template bool validate_partition_contents(const uint16_t*, idx_t, const p_id_t* const, const std::vector<idx_t>&, const Partition_Backend&);
+template bool validate_partition_contents(const uint32_t*, idx_t, const p_id_t* const, const std::vector<idx_t>&, const Partition_Backend&);
+template bool validate_partition_contents(const uint64_t*, idx_t, const p_id_t* const, const std::vector<idx_t>&, const Partition_Backend&);
 
 }

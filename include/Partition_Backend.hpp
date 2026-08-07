@@ -75,6 +75,11 @@ public:
     // partition, from its offset `off`, into `suf` and `key` respectively.
     void read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, idx_t* key) const;
 
+    // Reads `sz` suffixes and their corresponding initial prefix-keys of the
+    // `p_id`'th partition, from its offset `off`, into `suf` and `key`
+    // respectively.
+    void read_prefix_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, Prefix_Key* key) const;
+
     // Writes the staging slab `s`'s chunk to the backend.
     void write(const Staging_Slab& s);
 

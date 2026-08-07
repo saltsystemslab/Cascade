@@ -65,6 +65,10 @@ public:
 
     ~Suffix_Buffer();
 
+    // Returns the total memory of the worker-local scatter-buffers for `p`-many
+    // partitions and `worker_c`-many workers.
+    static std::size_t scatter_buffer_memory(std::size_t worker_c, std::size_t p);
+
     // Adds a suffix with index `suf` and prefix-key `p_key`.
     void add(idx_t suf, const Prefix_Key& p_key);
 

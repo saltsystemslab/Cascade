@@ -61,6 +61,12 @@ Suffix_Buffer::~Suffix_Buffer()
 }
 
 
+std::size_t Suffix_Buffer::scatter_buffer_memory(const std::size_t worker_c, const std::size_t p)
+{
+    return p * (worker_c * w_buf_cap * (sizeof(idx_t) + sizeof(Prefix_Key)));
+}
+
+
 void Suffix_Buffer::flush()
 {
     idx_t total_tail = w_fill_[0].unwrap();
