@@ -17,12 +17,12 @@ RAM_Backend::RAM_Backend(const std::vector<idx_t>& P_cap, const Residency_Plan& 
     {
         if(plan.data(p_id))
         {
-            suf_[p_id] = util::allocate<idx_t>(P_cap[p_id]);
-            key_[p_id] = util::allocate<idx_t>(P_cap[p_id]);
+            suf_[p_id] = util::checked_allocate<idx_t>(P_cap[p_id]);
+            key_[p_id] = util::checked_allocate<idx_t>(P_cap[p_id]);
         }
 
         if(plan.prefix(p_id))
-            prefix_[p_id] = util::allocate<Prefix_Key>(P_cap[p_id]);
+            prefix_[p_id] = util::checked_allocate<Prefix_Key>(P_cap[p_id]);
     }
 }
 
