@@ -45,8 +45,12 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
         return admitted;
     };
 
-    const auto data_resident = admit(data_, 2 * sizeof(idx_t));
-    const auto prefix_resident = admit(prefix_, prefix_elem_bytes);
+    std::size_t data_resident = 0, prefix_resident = 0;
+    if(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) == 0)   // `GPU_SACA_FORCE_SPILL` spills all data regardless of the budget.
+    {
+        data_resident = admit(data_, 2 * sizeof(idx_t));
+        prefix_resident = admit(prefix_, prefix_elem_bytes);
+    }
 
 #ifdef STATS
     const auto n = std::accumulate(P_cap.cbegin(), P_cap.cend(), idx_t(0));
