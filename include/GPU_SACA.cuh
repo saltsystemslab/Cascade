@@ -89,11 +89,9 @@ private:
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
 
 
-        // Sets the capacity of each staging-slab.
-        void set_slab_capacity();
-
-        // Returns the size of the staging-slab pool.
-        std::size_t slab_pool_size() const;
+        // Sets the staging configurations: slab capacity, slab pool size, and
+        // reader- / writer-pool sizes.
+        void setup_staging_config();
 
         // Returns the total memory used by the slab-pool.
         std::size_t slab_pool_memory() const;

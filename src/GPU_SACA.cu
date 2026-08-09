@@ -416,14 +416,52 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 
 
 template <typename T_sym_>
+void GPU_SACA<T_sym_>::setup_staging_config()
+{
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
+
+    // Sets the capacity of each staging-slab.
+    {
+        if(P_sz_max >= CHUNK_CAP)
+            chunk_cap_ = CHUNK_CAP;
+        else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
+        {
+            constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(idx_t);
+            chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
+        }
+    }
+
+    // Set the reader- and writer-pool sizes.
+    {
+        reader_c_ = omp_get_max_threads();  // TODO: tune.
+        writer_c_ = 8;  // TODO: tune.
+    }
+
+    // Sets the slab pool size.
+    {
+        const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
+
+        // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
+        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer
+        slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
+    }
+
+    // Log the staging configurations.
+    {
+#ifdef STATS
+        std::cerr << "Staging-configuration between backend and device:\n";
+        std::cerr << "\tReader-pool size: " << reader_c_ << "\n";
+        std::cerr << "\tWriter-pool size: " << writer_c_ << "\n";
+        std::cerr << "\tSlab-pool size: " << slab_c_ << "\n";
+        std::cerr << "\tSlab-capacity:  " << chunk_cap_ << "\n";
+#endif
+    }
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::setup_staging()
 {
-    set_slab_capacity();
-
-    reader_c_ = omp_get_max_threads();  // TODO: tune.
-    writer_c_ = 8;  // TODO: tune.
-
-    slab_c_ = slab_pool_size();
     S.resize(slab_c_);
     for(auto& s : S)
     {
@@ -439,35 +477,9 @@ void GPU_SACA<T_sym_>::setup_staging()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::set_slab_capacity()
-{
-    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
-    if(P_sz_max >= CHUNK_CAP)
-        chunk_cap_ = CHUNK_CAP;
-    else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
-    {
-        constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(idx_t);
-        chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
-    }
-}
-
-
-template <typename T_sym_>
-std::size_t GPU_SACA<T_sym_>::slab_pool_size() const
-{
-    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
-    const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
-
-    // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
-    // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer
-    return (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
-}
-
-
-template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 {
-    return slab_pool_size() * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key));
+    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key));
 }
 
 
@@ -503,6 +515,7 @@ void GPU_SACA<T_sym_>::partition()
                         roots.push_back(r);
             }
 
+            setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
             backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_);
 
