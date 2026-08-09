@@ -433,8 +433,10 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Set the reader- and writer-pool sizes.
     {
-        reader_c_ = omp_get_max_threads();  // TODO: tune.
-        writer_c_ = 8;  // TODO: tune.
+        writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
+        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, omp_get_max_threads()));
+        if(reader_c_ + writer_c_ + 1 > static_cast<idx_t>(omp_get_max_threads()))
+            std::cerr << "Warning: the staging workers (readers, writers, and dispatcher) oversubscribes the " << omp_get_max_threads() << "available CPU-threads.\n";
     }
 
     // Sets the slab pool size.
