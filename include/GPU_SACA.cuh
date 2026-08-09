@@ -88,6 +88,16 @@ private:
 
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
 
+
+        // Sets the capacity of each staging-slab.
+        void set_slab_capacity();
+
+        // Returns the size of the staging-slab pool.
+        std::size_t slab_pool_size() const;
+
+        // Returns the total memory used by the slab-pool.
+        std::size_t slab_pool_memory() const;
+
         struct Partition_Download_Callback_Args // Argument bundle for the host-callback at download of a partition's chunks from the device.
         {
             GPU_SACA* const self;
