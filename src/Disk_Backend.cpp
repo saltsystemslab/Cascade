@@ -51,13 +51,20 @@ void Disk_Backend::read_keys(Staging_Slab& s) const
     {
         INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().gather_ns);
 
+#ifdef ISA_INSTRUMENT
+        auto& stat = isa_instrument::ISA_Instrument().me();
+        const auto gen = isa_instrument::ISA_Instrument().generation();
+#endif
+
         const idx_t* const suf = s.suf();
         idx_t* const key = reinterpret_cast<idx_t*>(s.key());
         for(idx_t i = 0; i < s.size(); ++i)
         {
             const auto j = suf[i];  // Suffix.
-            const idx_t secondary = (j + k_ < n_ ? rho_[j + k_] : 0);
-            key[i] = (key[i] << secondary_bits_) | secondary;
+            const bool in_bound = (j + k_ < n_);
+            const idx_t secondary = (in_bound ? rho_[j + k_] : 0);
+            key[i] = (key[i] << secondary_bits_) | INSTRUMENT_UNSTAMP(secondary);
+            INSTRUMENT(stat.observe(gen, in_bound, secondary));
         }
     }
 }
