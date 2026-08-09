@@ -41,13 +41,15 @@ int main(int argc, char** argv)
     std::cerr << "Sequence length: " << n << "\n";
 
     {
-        gpu_saca::GPU_SACA<T_sym_> saca(T, n);
         gpu_saca::idx_t* SA;
+        {
+            gpu_saca::GPU_SACA<T_sym_> saca(T, n);
 
-        const auto t_0 = caps_sa::timer::now();
-        saca.build_SA(SA);
-        const auto t_1 = caps_sa::timer::now();
-        std::cerr << "Time taken: " << caps_sa::timer::duration(t_1 - t_0) << "s.\n";
+            const auto t_0 = caps_sa::timer::now();
+            saca.build_SA(SA);
+            const auto t_1 = caps_sa::timer::now();
+            std::cerr << "Time taken: " << caps_sa::timer::duration(t_1 - t_0) << "s.\n";
+        }
 
 #if defined(TESTS) || defined(VALIDATE)
         std::cerr << "Suffix array validation: " << (gpu_saca::test::is_correct_SA(SA, T, n) ? "Passes" : "Fails") << ".\n";
