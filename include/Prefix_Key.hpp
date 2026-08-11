@@ -8,10 +8,7 @@
 #include "types.hpp"
 #include "utility.hpp"
 
-#include "cuda/std/tuple"
-
 #include <cstddef>
-#include <utility>
 
 
 namespace gpu_saca
@@ -54,26 +51,8 @@ struct Prefix_Key
 };
 
 
-// Decomposer of a `Prefix_Key` into its constituent 64-bit words. `word[0]` is
-// treated as the most significant element.
-struct Prefix_Key_Decomposer
-{
-    template <std::size_t... Idx>
-    CUDA_SPECIFIER
-    auto tie_words(Prefix_Key& key, std::index_sequence<Idx...>) const
-    {
-        return cuda::std::tie(key.word[Idx]...);
-    }
-
-    CUDA_SPECIFIER
-    auto operator()(Prefix_Key& key) const
-    {
-        return tie_words(key, std::make_index_sequence<Prefix_Key::PREFIX_WORDS>{});
-    }
-};
-
-
 template <typename T_sym_>
+CUDA_SPECIFIER
 inline Prefix_Key Prefix_Key::pack_prefix(const T_sym_* const T)
 {
     constexpr idx_t sym_per_word = sizeof(idx_t) / sizeof(T_sym_);
@@ -87,6 +66,7 @@ inline Prefix_Key Prefix_Key::pack_prefix(const T_sym_* const T)
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator<(const Prefix_Key& rhs) const
 {
     #pragma unroll
@@ -98,6 +78,7 @@ inline bool Prefix_Key::operator<(const Prefix_Key& rhs) const
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator<=(const Prefix_Key& rhs) const
 {
     #pragma unroll
@@ -109,6 +90,7 @@ inline bool Prefix_Key::operator<=(const Prefix_Key& rhs) const
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator==(const Prefix_Key& rhs) const
 {
     #pragma unroll
@@ -120,6 +102,7 @@ inline bool Prefix_Key::operator==(const Prefix_Key& rhs) const
 }
 
 
+CUDA_SPECIFIER
 inline bool Prefix_Key::operator!=(const Prefix_Key& rhs) const
 {
     return !(*this == rhs);

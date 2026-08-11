@@ -11,8 +11,15 @@ set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 # Bundle the core source files into a variable.
 set(PROJECT_SRC
         GPU_SACA.cu
-        Partition.cu
-        Suffix_Buffer.cu
+        Suffix_Buffer.cpp
+        Staging_Slab.cu
+        Direct_File.cpp
+        Spill_Store.cpp
+        Disk_Backend.cpp
+        RAM_Backend.cpp
+        Partition_Backend.cpp
+        Residency_Plan.cpp
+        utility.cpp
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.
@@ -30,6 +37,6 @@ add_executable(test test.cu)
 
 target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 
-target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${TESTS_INCLUDE})
+target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 target_include_directories(libcubwt_driver PRIVATE ${INCLUDE_DIR})
 target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})

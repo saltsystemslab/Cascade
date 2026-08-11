@@ -40,8 +40,15 @@
 # debug information files
 *.dwo
 
-# scripts
-scripts/GPU/
+# third-party
+external/
+
+# local content
+scripts/local/
+docs/
 
 # docker-build
 build/
+
+# cache
+.cache/

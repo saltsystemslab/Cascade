@@ -4,14 +4,20 @@
 
 
 #include "types.hpp"
-#include "Prefix_Key.cuh"
-#include "Partition.hpp"
+#include "Prefix_Key.hpp"
+#include "Partition_Backend.hpp"
+#include "Spill_Store.hpp"
+#include "Staging_Slab.hpp"
+#include "Read_Task.hpp"
 #include "utility.cuh"
+#include "env.hpp"
+
+#include "concurrentqueue/blockingconcurrentqueue.h"
 
 #include <cstdint>
 #include <cstddef>
-#include <vector>
 #include <limits>
+#include <vector>
 
 
 // TODO: name algorithm.
@@ -48,16 +54,60 @@ private:
 
     p_id_t* P_id;   // Partition-IDs of the suffixes.
 
-    std::vector<Partition> P_;  // The suffix partitions.
-    std::vector<idx_t> P_sz;    // Sizes of the suffix partitions; tracks the active-set sizes of the partitions instead of the full size.
+    std::vector<idx_t> P_cap;   // Full initial sizes of the partitions.
+    std::vector<idx_t> Active_sz;   // Active-set sizes of the suffix partitions.
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
 
     idx_t* rho; // Global rank of the suffixes.
 
-    Prefix_Key* prefix; // Pinned host arena of suffixes' prefixes, used to seed the ranks in exponentiation.
-
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
+
+    std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
+    std::unique_ptr<Spill_Store> spill_;    // Partitions' on-disk spill-files manager.
+
+    // Data structures to for the chunked staging of data between the partition-backend and the device buffers.
+    // {
+        // ~2M elements per chunk / slab: memory usage: 2M x (sizeof(Prefix_Key) + 8) (~48 MB at `ell = 2`).
+        static constexpr idx_t CHUNK_CAP = (idx_t(1) << 21);
+        inline static const idx_t PREFETCH_DEPTH = env::get_u64("GPU_SACA_PREFETCH_DEPTH").value_or(0); // Complete partitions to stage ahead for the device-dispatcher.
+        inline static const idx_t WRITEBACK_DEPTH = env::get_u64("GPU_SACA_WRITEBACK_DEPTH").value_or(0);   // Complete partitions to stage ahead to return to the backend.
+
+        idx_t chunk_cap_;   // Chunk granularity (keys / suffixes per slab).
+        idx_t slab_c_;  // |S|: slab pool size.
+        idx_t reader_c_;    // |r|: reader-threads count.
+        idx_t writer_c_;    // |w|: writer-threads count.
+
+        std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
+
+        template <typename T> using blocking_q_t = moodycamel::BlockingConcurrentQueue<T>;
+        blocking_q_t<Read_Task> RT; // Chunk-read tasks.
+        blocking_q_t<Staging_Slab*> F;  // Free slabs.
+        blocking_q_t<Partition_Assembly*> R;    // Slabs with chunks read from partition-backend, ready to be uploaded to device.
+        blocking_q_t<idx_t> FS; // IDs of the free device-streams.
+        blocking_q_t<Staging_Slab*> W;  // Slabs with chunks downloaded from device, ready to be written to partition-backend.
+
+        std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
+
+
+        // Sets the staging configurations: slab capacity, slab pool size, and
+        // reader- / writer-pool sizes.
+        void setup_staging_config();
+
+        // Returns the total memory used by the slab-pool.
+        std::size_t slab_pool_memory() const;
+
+        struct Partition_Download_Callback_Args // Argument bundle for the host-callback at download of a partition's chunks from the device.
+        {
+            GPU_SACA* const self;
+            Partition_Assembly* const p_assembly;   // Assembly / chain of slabs making up the corresponding partition.
+            const idx_t s_id;   // ID of the CUDA stream processing the partition.
+        };
+
+        // Host-callback once a partition's chunks get downloaded back from the
+        // device.
+        static void CUDART_CB on_partition_download(void* arg);
+    // }
 
     // Sampling parameters.
     // {
@@ -79,10 +129,11 @@ private:
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
     // }
 
-#ifdef TESTS
-    Sort_Key* sorted_key = nullptr; // Single host-pinned buffer to save the order of the sorted keys of all partitions, before the new ranks overwrite those.
-    idx_t* sorted_suf = nullptr;    // Single host-pinned buffer to save the order of the suffix indices corresponding to sorted keys of all partitions, before they get shuffled.
-#endif
+
+    // Returns the fixed space-budget (in bytes) required in the algorithm.
+    // Currently: the text (`T`), the partition-IDs (`Π`), the ISA (`ρ`), and
+    // the scatter-buffers in partitioning.
+    std::size_t fixed_budget() const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
@@ -101,6 +152,10 @@ private:
     // iff the device had enough space for such.
     bool allocate_device_space();
 
+    // Sets up the staging slabs and their readers-writers, for chunked staging
+    // of data between the partition-backend and the device buffers.
+    void setup_staging();
+
     // Partitions the suffixes based on the selected pivots.
     void partition();
 
@@ -111,15 +166,25 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
+    // Drives a complete pipeline for all the partitions: chunked reading from
+    // the backend, sort-and-rank in the device, and chunked write-back to the
+    // backend. `init_rank_` determines whether the pipeline is being executed
+    // for the initial-ranking phase.
+    template <bool init_rank_> void drive_pipeline();
+
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
-    // of the partition.
-    void sort_and_init_rank_and_filter(p_id_t p_id);
+    // of the partition. The slab-assembly `p_assembly` contains the partition's
+    // content before and after, and the `buf_id`'th device-buffer set is used
+    // for device operations.
+    void sort_and_init_rank_and_filter(p_id_t p_id, Partition_Assembly& p_assembly, idx_t buf_id);
 
     // Sorts the `p_id`'th partition, re-ranks it based on the sorted order, and
     // filters the entries in the partition with unique ranks by grouping them
-    // into the tail of the partition.
-    void sort_and_re_rank_and_filter(p_id_t p_id);
+    // into the tail of the partition. The slab-assembly `p_assembly` contains
+    // the partition's content before and after, and the `buf_id`'th device-
+    // buffer set is used for device operations.
+    void sort_and_re_rank_and_filter(p_id_t p_id, Partition_Assembly& p_assembly, idx_t buf_id);
 
     // Updates the global ranks of the suffixes based on the current status of
     // the partitions.
@@ -131,10 +196,6 @@ private:
     // Keeps exponentiating the effective prefix-context of the suffixes until
     // the suffixes are fully sorted.
     void exponentiate_prefix();
-
-    // Exponentiates the effective prefix-context of the suffixes at the `p_id`
-    // 'th partition from `k`.
-    void exponentiate_prefix(p_id_t p_id, idx_t k);
 
     // Allocates enough space into `SA` and concatenates the partitions into it.
     void concatenate_partitions(idx_t*& SA);
