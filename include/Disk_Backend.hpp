@@ -6,7 +6,7 @@
 
 #include "types.hpp"
 #include "Direct_File.hpp"
-#include "Prefix_Key.hpp"
+#include "Packed_Prefix.hpp"
 #include "Spill_Store.hpp"
 #include "Residency_Plan.hpp"
 
