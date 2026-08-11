@@ -279,7 +279,7 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
             P_id[off] = low;
 
             // Count this suffix into the block-local histogram.
-            atomicAdd(local_hist + P_id[off], 1u);
+            atomicAdd(local_hist + low, 1u);
         }
     }
 
