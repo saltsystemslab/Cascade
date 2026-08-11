@@ -1,0 +1,15 @@
+{
+    "clangd.path": "${workspaceFolder}/scripts/clangd/clangd-docker.sh",
+    "clangd.arguments": [
+        "--background-index",
+        "--header-insertion=never",
+        "--log=info",
+        "--pretty"
+    ],
+    "clangd.checkUpdates": false,
+
+    "files.associations": {
+        "*.cu": "cuda-cpp",
+        "*.cuh": "cuda-cpp"
+    },
+}

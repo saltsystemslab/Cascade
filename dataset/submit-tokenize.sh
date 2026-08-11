@@ -16,6 +16,7 @@
 #   MEM       memory per 1-CPU task           (default 4G)
 #   TIME      walltime per task               (default 04:00:00)
 #   PART      Slurm partition                 (default short)
+#   PYTHON    interpreter for the tasks       (default: the python3 active at submit)
 #
 # N need not match the file count: with striding, each task just handles
 # ceil(files/N) files. Pick N for how much parallelism you want, not per file.
@@ -29,9 +30,15 @@ MEM="${MEM:-4G}"
 TIME="${TIME:-04:00:00}"
 PART="${PART:-short}"
 
+# Pin the interpreter: capture the absolute path of the python3 active *now* (after
+# your `module load`) and pass it to every task, so a batch node that resets PATH to
+# a system python can't run the tasks under the wrong version + stale site-packages.
+PYTHON="${PYTHON:-$(command -v python3 || true)}"
+[ -n "$PYTHON" ] || { echo "no python3 on PATH -- 'module load python/3.13.5' (or set PYTHON=/abs/path/python3) before submitting" >&2; exit 1; }
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/tokenize.sbatch"
-EXPORTS="INPUT_DIR=$INPUT_DIR,OUT=$OUT,TOKENIZER=$TOKENIZER,GLOB=$GLOB,N=$N,TOK_DIR=$SCRIPT_DIR"
+EXPORTS="INPUT_DIR=$INPUT_DIR,OUT=$OUT,TOKENIZER=$TOKENIZER,GLOB=$GLOB,N=$N,TOK_DIR=$SCRIPT_DIR,PYTHON=$PYTHON"
 
 phase1=$(sbatch --parsable \
     --partition="$PART" --array="0-$((N - 1))" \
@@ -46,5 +53,6 @@ phase2=$(sbatch --parsable \
     --export="ALL,$EXPORTS,MODE=concat" "$SB")
 echo "Phase 2 (concat):   job $phase2  (runs after $phase1 succeeds)"
 echo
+echo "python: $PYTHON"
 echo "watch:  squeue -j $phase1,$phase2"
 echo "output: $OUT   (parts in $OUT.parts/ until concat cleans them up)"

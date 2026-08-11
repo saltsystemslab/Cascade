@@ -4,86 +4,96 @@
 
 
 
-#include "Sort_Key.hpp"
-#include "Spin_Lock.hpp"
+#include "Prefix_Key.hpp"
+#include "Direct_File.hpp"
 #include "types.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
 
 #include <cstddef>
+#include <atomic>
 #include <vector>
-#include <cstring>
-#include <cassert>
 
 
 namespace gpu_saca
 {
 
-// A buffer of suffixes, backed by a provided sink. Additions are thread-safe.
+// A buffer of suffixes along with their associated prefix-keys, backed by
+// direct-files.
 class Suffix_Buffer
 {
 private:
 
-    using suf_buf_t = std::vector<idx_t>;       // Type of worker-local suffix buffers.
-    using key_buf_t = std::vector<Sort_Key>;    // Type of worker-local sort-key (of suffixes) buffers.
+    static constexpr std::size_t w_buf_cap = 256 * 1024llu / sizeof(idx_t); // Worker-local buffers overflow at reaching 256 KB worth of suffixes.
 
-    static constexpr std::size_t w_buf_cap = 4 * 1024llu / (sizeof(idx_t) + sizeof(Sort_Key));  // Worker-local buffers overflow at total size: 4KB.
+    static_assert((w_buf_cap * sizeof(idx_t)) % Direct_File::DISK_BLOCK == 0);
+    static_assert((w_buf_cap * sizeof(Prefix_Key)) % Direct_File::DISK_BLOCK == 0);
 
-    std::vector<util::Padded<suf_buf_t>> w_suf_buf; // Worker-local suffix buffers.
-    std::vector<util::Padded<key_buf_t>> w_key_buf; // Worker-local sort-key buffers.
+    idx_t* suf_mem_;    // Resident sink for the suffixes.
+    Prefix_Key* key_mem_;   // Resident sink for the prefix-keys.
+    Direct_File* suf_file_; // Spill-file sink for the suffixes.
+    Direct_File* key_file_; // Spill-file sink for the prefix-keys.
 
-    idx_t* const suf_sink_;     // Sink to flush the worker-local suffix buffers.
-    Sort_Key* const key_sink_;  // Sink to flush the worker-local sort-key buffers.
+    idx_t* w_suf_base_;         // Flattened collection of worker-local suffix buffers.
+    Prefix_Key* w_key_base_;    // Flattened collection of worker-local prefix-key-buffers.
+    std::vector<util::Padded<idx_t>> w_fill_;   // Fill count of the worker-local buffers.
 
-    std::size_t flushed_;   // Number of suffixes flushed to the sink.
+    std::atomic<idx_t> flushed_;    // Number of suffixes reserved / written to the sink files.
+    const idx_t worker_c_;  // Worker count.
 
-    util::Spin_Lock lock;   // Mutually-exclusive access-lock to the sink.
+
+    auto w_suf(const idx_t w) { return w_suf_base_ + w * w_buf_cap; }   // Returns the `w`'th worker's suffix-buffer.
+    auto w_key(const idx_t w) { return w_key_base_ + w * w_buf_cap; }   // Returns the `w`'th worker's prefix-key-buffer.
+
+    // Sinks `sz`-many suffixes and their prefix-keys, from `suf` and `key`, at
+    // the partition-offset `off`.
+    void sink(idx_t off, idx_t sz, const idx_t* suf, const Prefix_Key* key);
 
 public:
 
-    // Constructs a buffer that overflows suffixes to `suf_sink` and their keys
-    // to `key_sink`.
-    Suffix_Buffer(idx_t* suf_sink, Sort_Key* key_sink);
+    // Constructs a buffer that overflows suffixes and their prefix-keys to
+    // the partition's sinks: the resident allocations `suf_mem` and `key_mem`
+    // when these are non-null, and the spill-files `suf_file` and `key_file`
+    // otherwise.
+    Suffix_Buffer(idx_t* suf_mem, Prefix_Key* key_mem, Direct_File* suf_file, Direct_File* key_file);
 
     Suffix_Buffer(const Suffix_Buffer&) = delete;
     Suffix_Buffer& operator=(const Suffix_Buffer&) = delete;
     Suffix_Buffer(Suffix_Buffer&& rhs);
     Suffix_Buffer& operator=(Suffix_Buffer&&) = delete;
 
-    // Adds a suffix to the buffer with index `suf`, primary key `p_key`, and
-    // secondary key `s_key`.
-    void add(idx_t suf, idx_t p_key, idx_t s_key);
+    ~Suffix_Buffer();
 
-    // Flushes the buffer to the sink. There must be no concurrent pending add
+    // Returns the total memory of the worker-local scatter-buffers for `p`-many
+    // partitions and `worker_c`-many workers.
+    static std::size_t scatter_buffer_memory(std::size_t worker_c, std::size_t p);
+
+    // Adds a suffix with index `suf` and prefix-key `p_key`.
+    void add(idx_t suf, const Prefix_Key& p_key);
+
+    // Flushes the buffer to the sinks. There must be no concurrent pending add
     // invocations.
     void flush();
 
     // Returns the number of suffixes flushed to the sinks.
-    auto flushed() const { return flushed_; }
+    auto flushed() const { return flushed_.load(std::memory_order_relaxed); }
 };
 
 
-inline void Suffix_Buffer::add(const idx_t suf, const idx_t p_key, const idx_t s_key)
+inline void Suffix_Buffer::add(const idx_t suf, const Prefix_Key& p_key)
 {
     const auto w_id = omp_get_thread_num();
-    auto& suf_buf = w_suf_buf[w_id].unwrap();
-    auto& key_buf = w_key_buf[w_id].unwrap();
+    auto& fill = w_fill_[w_id].unwrap();
+    auto suf_buf = w_suf(w_id);
+    auto key_buf = w_key(w_id);
 
-    suf_buf.push_back(suf);
-    key_buf.push_back({p_key, s_key});
-    assert(suf_buf.size() <= w_buf_cap), assert(key_buf.size() <= w_buf_cap), assert(suf_buf.size() == key_buf.size());
-
-    if(suf_buf.size() == w_buf_cap)
+    suf_buf[fill] = suf, key_buf[fill] = p_key;
+    if(++fill == w_buf_cap)
     {
-        lock.lock();
-        std::memcpy(reinterpret_cast<void*>(suf_sink_ + flushed_), reinterpret_cast<void*>(suf_buf.data()), w_buf_cap * sizeof(idx_t));
-        std::memcpy(reinterpret_cast<void*>(key_sink_ + flushed_), reinterpret_cast<void*>(key_buf.data()), w_buf_cap * sizeof(Sort_Key));
-        flushed_ += w_buf_cap;
-        lock.unlock();
-
-        suf_buf.clear();
-        key_buf.clear();
+        const auto off = flushed_.fetch_add(w_buf_cap, std::memory_order_relaxed);
+        sink(off, w_buf_cap, suf_buf, key_buf);
+        fill = 0;
     }
 }
 

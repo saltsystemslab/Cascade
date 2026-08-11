@@ -2,8 +2,7 @@
 #
 # Targets linux/amd64 for CUDA toolchain compatibility (runs under emulation on
 # Apple Silicon). No GPU is required: this image only verifies that the project
-# compiles. The hardcoded CUDA_ARCH in CMakeLists.txt (70-real, Volta/V100)
-# matches our cluster, so no arch override is needed.
+# compiles.
 
 FROM --platform=linux/amd64 nvidia/cuda:12.8.0-devel-ubuntu22.04
 
@@ -44,3 +43,22 @@ RUN wget -qO /tmp/cccl.tar.gz \
     && rm -rf /tmp/cccl /tmp/cccl.tar.gz
 
 WORKDIR /workspace
+
+# Modern clangd for in-container IDE indexing. Ubuntu 22.04's own clangd is 14,
+# which predates CUDA 12.8 and chokes on the toolkit and CCCL 2.7 headers.
+# libomp-N-dev is what puts omp.h into clang's own resource dir. clangd-N does not
+# depend on it, and clang won't fall back to GCC's copy -- it borrows GCC's libstdc++
+# paths but uses its own resource dir for builtin headers. Without this, every
+# OpenMP-using TU fails to parse even though the GCC build is fine.
+# Kept as the trailing layer so version bumps don't invalidate the CCCL layer.
+ARG LLVM_VERSION=20
+RUN apt-get update && apt-get install -y --no-install-recommends gnupg \
+    && wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+         | gpg --dearmor -o /usr/share/keyrings/llvm.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/jammy/ llvm-toolchain-jammy-${LLVM_VERSION} main" \
+         > /etc/apt/sources.list.d/llvm.list \
+    && apt-get update && apt-get install -y --no-install-recommends clangd-${LLVM_VERSION} \
+    && ln -sf /usr/bin/clangd-${LLVM_VERSION} /usr/bin/clangd \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get update && apt-get install -y --no-install-recommends \
+         clangd-${LLVM_VERSION} libomp-${LLVM_VERSION}-dev \

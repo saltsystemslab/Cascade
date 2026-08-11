@@ -35,8 +35,8 @@ echo ">> Compiling inside container (artifacts -> ./build)..."
 # stays safe under `set -u` when empty on macOS's bash 3.2.
 docker run --rm \
     --platform "$PLATFORM" \
-    -v "$PROJECT_DIR":/workspace \
-    -w /workspace \
+    -v "$PROJECT_DIR":"$PROJECT_DIR" \
+    -w "$PROJECT_DIR" \
     "$IMAGE_NAME" \
     bash -c '
         set -euo pipefail

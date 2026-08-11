@@ -40,7 +40,7 @@ endif()
 # Bundle the warning flags that we want to pass on to the compiler.
 # Reference: https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html
 set(WARNING_FLAGS -Wall -Wextra) #-Wpedantic)
-set(SUPPRESS_WARNING_FLAGS -Wno-unused-function)
+set(SUPPRESS_WARNING_FLAGS -Wno-unused-function -Wno-unknown-pragmas)
 
 # Warning flags to be suppressed with clang.
 set(CLANG_SUPPRESS_WARNING_FLAGS "")
@@ -81,7 +81,11 @@ list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 
 # Add the required preprocessor definitions (`#define`s) to pass on.
 add_compile_definitions(PROJECT_VERSION=${CMAKE_PROJECT_VERSION})
-add_compile_definitions(CMAKE_EXPORT_COMPILE_COMMANDS)  # For better `clangd` scanning.
+add_compile_definitions(_GNU_SOURCE)    # For `O_DIRECT` support.
+
+if(ELL)
+    add_compile_definitions(ELL=${ELL})
+endif()
 
 if(TESTS)
     add_compile_definitions(TESTS)
@@ -98,6 +102,11 @@ endif()
 if(PROFILE)
     add_compile_definitions(PROFILE)
 endif()
+
+
+# Set option for CMake to produce exact compiler-calls and file-paths, for
+# better code analysis.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # Better `clangd` scan.
 
 
 # Set path for modules required to search for existing packages in the system.
@@ -129,10 +138,24 @@ set(EXT_INCLUDE ${CMAKE_SOURCE_DIR}/external/include/)
 
 file(MAKE_DIRECTORY ${EXT_LIB} ${EXT_INCLUDE})
 
-set(EXT_LIB ${CMAKE_SOURCE_DIR}/external/lib/)
-set(EXT_INCLUDE ${CMAKE_SOURCE_DIR}/external/include/)
 
-file(MAKE_DIRECTORY ${EXT_LIB} ${EXT_INCLUDE})
+# Prepare the `concurrentqueue` library. It provides fast multi-producer, multi-
+# consumer lock-free concurrent queues.
+set(CONCURRENTQUEUE_MIN_VERSION "1.0.5")
+message("Build system will fetch and install moodycamel::ConcurrentQueue.")
+ExternalProject_Add(prj_concurrentqueue
+    DOWNLOAD_DIR        ${CMAKE_SOURCE_DIR}/external
+    DOWNLOAD_COMMAND    wget -O concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}.tar.gz https://github.com/cameron314/concurrentqueue/archive/refs/tags/v${CONCURRENTQUEUE_MIN_VERSION}.tar.gz &&
+                        tar -xzf concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}.tar.gz &&
+                        rm concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}.tar.gz
+
+    SOURCE_DIR          ${CMAKE_SOURCE_DIR}/external/concurrentqueue-${CONCURRENTQUEUE_MIN_VERSION}
+    BUILD_IN_SOURCE     TRUE
+    INSTALL_DIR         ${CMAKE_SOURCE_DIR}/external
+    CONFIGURE_COMMAND   ""
+    BUILD_COMMAND       ""
+    INSTALL_COMMAND     sh -c "mkdir -p ${EXT_INCLUDE}/concurrentqueue && cp -rf concurrentqueue.h blockingconcurrentqueue.h lightweightsemaphore.h ${EXT_INCLUDE}/concurrentqueue/"
+)
 
 
 # The `Debug` configuration optimizes the program for debugging and enables full debug information.
@@ -156,7 +179,7 @@ set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET libcubwt_driver PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-set(CUDA_ARCH "70-real;80-real;90-real;120-real")
+set(CUDA_ARCH "120-real")
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
@@ -166,6 +189,8 @@ set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
 # Define dependencies between the targets.
+add_dependencies(${PROJECT_NAME} core)
+add_dependencies(core prj_concurrentqueue)
 
 
 # Set the compile flags for the targets.

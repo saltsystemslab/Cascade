@@ -32,6 +32,21 @@ namespace caps_sa::timer
 }
 
 
+namespace gpu_saca::util::type
+{
+    template <typename T>
+    inline void print_type()
+    {
+        // Prints the full function signature containing the exact type name.
+#if defined(__clang__) || defined(__GNUC__)
+        std::cout << __PRETTY_FUNCTION__ << "\n";
+#elif defined(_MSC_VER)
+        std::cout << __FUNCSIG__ << "\n";
+#endif
+    }
+}
+
+
 namespace gpu_saca::util
 {
 
@@ -67,6 +82,16 @@ public:
 };
 
 
+namespace math
+{
+    // Returns the number of bits required to represent `x`, i.e. `ceil(log_2(x))`.
+    inline uint64_t bits_for(const uint64_t x)
+    {
+        return x <= 1 ? 0 : 64 - __builtin_clzll(x - 1);
+    }
+}
+
+
 // Returns the `N` symbols situated at the text `T` as a 64-bit word. The
 // endian-ness of the word matches the lexicographical order of the text—the
 // symbol at index `idx` corresponds to the most significant bits of the word.
@@ -93,12 +118,43 @@ T_* allocate(const std::size_t size)
 }
 
 
+// Returns pointer to a memory-allocation for `n` elements of type `T_`, whose
+// alignment is specified by `alignment`.
+template <typename T_>
+T_* aligned_allocate(const std::size_t size, const std::size_t alignment)
+{
+    return static_cast<T_*>(std::aligned_alloc(alignment, size * sizeof(T_)));
+}
+
+
+// Returns pointer to a memory-allocation for `size` elements of type `T_`;
+// aborts the execution if the allocation fails.
+template<typename T_>
+T_* checked_allocate(const std::size_t sz)
+{
+    auto* const p = allocate<T_>(sz);
+    if(p == nullptr)
+    {
+        std::cerr << "Failed to allocate " << sz << "-many bytes for: ";
+        type::print_type<T_>();
+        std::cerr << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    return p;
+}
+
+
 // Deallocates the pointer `ptr`, allocated with `allocate`.
 template <typename T_>
 void deallocate(T_* const ptr)
 {
     std::free(ptr);
 }
+
+
+// Returns the host's currently available memory, in bytes.
+std::size_t available_memory();
 
 
 // Generates a random text of symbols of type `T_sym_` and of length `n` at `T`.
