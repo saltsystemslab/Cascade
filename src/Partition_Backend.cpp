@@ -1,5 +1,6 @@
 
 #include "Partition_Backend.hpp"
+#include "isa-instrument.hpp"
 
 
 namespace gpu_saca
@@ -18,6 +19,8 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
 
 void Partition_Backend::read_prefixes(Staging_Slab& s) const
 {
+    INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+
     read_prefix_chunk(s.p_id(), s.off(), s.size(), s.suf(), s.key());
 }
 
@@ -26,15 +29,27 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 {
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());
-    read_chunk(s.p_id(), s.off(), s.size(), suf, key);
+
+    {
+        INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+        read_chunk(s.p_id(), s.off(), s.size(), suf, key);
+    }
 
     // Gather the secondary keys of the read suffixes and fold those in to the keys.
     {
+        INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().gather_ns);
+#ifdef ISA_INSTRUMENT
+        auto& stat = isa_instrument::ISA_Instrument().me();
+        const auto gen = isa_instrument::ISA_Instrument().generation();
+#endif
+
         for(idx_t i = 0; i < s.size(); ++i)
         {
             const auto j = suf[i];  // Suffix.
-            const idx_t secondary = (j + k_ < n_ ? rho_[j + k_] : 0);
-            key[i] = (key[i] << secondary_bits_) | secondary;
+            const bool in_bound = (j + k_ < n_);
+            const idx_t v = (in_bound ? rho_[j + k_] : 0);
+            INSTRUMENT(stat.observe(gen, in_bound, v));
+            key[i] = (key[i] << secondary_bits_) | INSTRUMENT_UNSTAMP(v);
         }
     }
 }

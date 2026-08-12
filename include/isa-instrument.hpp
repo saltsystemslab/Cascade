@@ -61,7 +61,7 @@ struct alignas(2 * util::L1_CACHE_LINE_SIZE)
             return;
         }
 
-        look_back[(gen - (v >> GEN_SHIFT))]++;
+        look_back[(gen - (v >> GEN_SHIFT)) & (LOOK_BACK_BINS - 1)]++;
     }
 };
 

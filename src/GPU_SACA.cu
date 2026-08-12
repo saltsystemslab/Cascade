@@ -49,6 +49,14 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , null_d(nullptr)
     , workspace_sz(0)
 {
+#ifdef ISA_INSTRUMENT
+    if(secondary_bits_ > isa_instrument::GEN_SHIFT)
+    {
+        std::cerr << "Instrumented build needs n < 2^" << isa_instrument::GEN_SHIFT << " to stamp generations into rho's high bits. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+#endif
+
     P_id = util::allocate<p_id_t>(n_);
     rho = util::allocate<idx_t>(n_);
 
@@ -435,6 +443,8 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, omp_get_max_threads()));
         if(reader_c_ + writer_c_ + 1 > static_cast<idx_t>(omp_get_max_threads()))
             std::cerr << "Warning: the staging workers (readers, writers, and dispatcher) oversubscribes the " << omp_get_max_threads() << "available CPU-threads.\n";
+
+        INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_));
     }
 
     // Sets the slab pool size.
