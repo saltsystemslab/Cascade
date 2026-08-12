@@ -87,6 +87,10 @@ if(ELL)
     add_compile_definitions(ELL=${ELL})
 endif()
 
+if(PIVOT_WORDS)
+    add_compile_definitions(PIVOT_WORDS=${PIVOT_WORDS})
+endif()
+
 if(TESTS)
     add_compile_definitions(TESTS)
 endif()

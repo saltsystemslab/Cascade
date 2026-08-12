@@ -24,8 +24,8 @@
 namespace gpu_saca
 {
 
-constexpr p_id_t MAX_PIVOT_COUNT = CONST_MEM_SZ / sizeof(Prefix_Key);   // Maximum supported number of pivots.
-extern __constant__ Prefix_Key pivots_d[];
+constexpr p_id_t MAX_PIVOT_COUNT = CONST_MEM_SZ / sizeof(Pivot_Key);    // Maximum supported number of pivots.
+extern __constant__ Pivot_Key pivots_d[];
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
@@ -35,6 +35,13 @@ class GPU_SACA
 private:
 
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
+
+    // Bytes per suffix required in each of the two device key-buffers, per
+    // partition. The initial-ranking phase sorts the suffixes by their `\ell`-
+    // length prefixes, whereas the re-ranking phase reuses one buffer as two
+    // laid-flat `idx_t` arrays (the key-group and the primary-key-group ranks).
+    // So the buffers are sized to whichever of the two demands is larger.
+    static constexpr std::size_t DEV_KEY_BYTES = (sizeof(Prefix_Key) > 2 * sizeof(idx_t) ? sizeof(Prefix_Key) : 2 * sizeof(idx_t));
 
     // Assumed worst-case ratio of actual max partition-size to the target
     // estimated during pivots-selection.
@@ -48,9 +55,10 @@ private:
     const idx_t secondary_bits_;    // Bit-width of the secondary-key of a suffix: `\ceil(\log_2(n))`.
     idx_t key_bits_;    // Bit-width of the packed (primary, secondary) key of a suffix — primary: `\ceil(\log_2(P_sz_max))`, secondary: `\ceil(\log_2(n))`.
 
-    static constexpr idx_t K = Prefix_Key::PREFIX_WORDS * sizeof(idx_t) / sizeof(T_sym_);   // Prefix-size for pivots and partitioning.
+    static constexpr idx_t ell = ELL_WORDS * sizeof(idx_t) / sizeof(T_sym_);    // Prefix-size of the initial sort-keys.
+    static constexpr idx_t K = K_WORDS * sizeof(idx_t) / sizeof(T_sym_);    // Prefix-size of pivots.
 
-    std::vector<Prefix_Key> pivots; // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
+    std::vector<Pivot_Key> pivots;  // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
     p_id_t* P_id;   // Partition-IDs of the suffixes.
 
@@ -120,7 +128,7 @@ private:
     // {
         T_sym_* null_d; // Buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 
-        Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the largest-width type used in sort (which is in initial-ranking).
+        Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the initial-ranking sort key.
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
         void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;           // Size of the `cub` workspace.
@@ -263,7 +271,7 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
         const auto off = block_off + t_id;  // Offset into the text-chunk being processed.
         if(off < chunk_sz)
         {
-            const auto pre_key = Prefix_Key::pack_prefix(tile + t_id);
+            const auto pre_key = Pivot_Key::pack_prefix(tile + t_id);
 
             // Binary search for the smallest `p_id` such that `pre_key <= pivots[p_id]`.
             p_id_t low = 0, high = part_count - 1;  // The solution lies in the range `[low, high]`.

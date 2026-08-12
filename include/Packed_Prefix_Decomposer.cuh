@@ -1,6 +1,6 @@
 
-#ifndef PREFIX_KEY_DECOMPOSER_CUH
-#define PREFIX_KEY_DECOMPOSER_CUH
+#ifndef PACKED_PREFIX_DECOMPOSER_CUH
+#define PACKED_PREFIX_DECOMPOSER_CUH
 
 
 
@@ -15,23 +15,28 @@
 namespace gpu_saca
 {
 
-// Decomposer of a `Prefix_Key` into its constituent 64-bit words. `word[0]` is
-// treated as the most significant element.
-struct Prefix_Key_Decomposer
+// Decomposer of a `Packed_Prefix<W_>` into its constituent 64-bit words.
+// `word[0]` is treated as the most significant element.
+template <idx_t W_>
+struct Packed_Prefix_Decomposer
 {
     template <std::size_t... Idx>
     __host__ __device__
-    auto tie_words(Prefix_Key& key, std::index_sequence<Idx...>) const
+    auto tie_words(Packed_Prefix<W_>& key, std::index_sequence<Idx...>) const
     {
         return cuda::std::tie(key.word[Idx]...);
     }
 
     __host__ __device__
-    auto operator()(Prefix_Key& key) const
+    auto operator()(Packed_Prefix<W_>& key) const
     {
-        return tie_words(key, std::make_index_sequence<Prefix_Key::PREFIX_WORDS>{});
+        return tie_words(key, std::make_index_sequence<W_>{});
     }
 };
+
+
+// Decomposer of the stored initial sort-key of a suffix.
+using Prefix_Key_Decomposer = Packed_Prefix_Decomposer<ELL_WORDS>;
 
 }
 

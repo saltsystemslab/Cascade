@@ -35,7 +35,7 @@
 namespace gpu_saca
 {
 
-__constant__ Prefix_Key pivots_d[MAX_PIVOT_COUNT];
+__constant__ Pivot_Key pivots_d[MAX_PIVOT_COUNT];
 
 
 template <typename T_sym_>
@@ -180,7 +180,7 @@ void GPU_SACA<T_sym_>::select_pivots()
     const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PIVOT_COUNT + 1);  // Maximum number of partitions.
 
     const idx_t s = OVERSAMPLING_FACTOR * p_max * std::log2(n_);    // Number of samples.
-    std::vector<Prefix_Key> S(s);   // The samples.
+    std::vector<Pivot_Key> S(s);    // The samples.
 
     // Draw and sort the samples.
     {
@@ -191,7 +191,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 
             #pragma omp for schedule(static)
             for(idx_t i = 0; i < s; ++i)
-                S[i] = Prefix_Key::pack_prefix(T_h_ + dist(rng));
+                S[i] = Pivot_Key::pack_prefix(T_h_ + dist(rng));
         }
 
         std::sort(S.begin(), S.end());
@@ -243,7 +243,7 @@ template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
     // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sort, plus one flag byte to mark its activeness in subsequent steps.
-    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t);   // 2 x (key + suffix) ping-pong + activeness flag.
+    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t)) + sizeof(uint8_t);    // 2 x (key + suffix) ping-pong + activeness flag.
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
@@ -322,7 +322,7 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
             keys_dummy, vals_dummy,
             part_sz,
             Prefix_Key_Decomposer{},
-            0, Prefix_Key::PREFIX_WORDS * 64
+            0, ELL_WORDS * 64
         ));
     }
 
@@ -368,11 +368,11 @@ template <typename T_sym_>
 bool GPU_SACA<T_sym_>::allocate_device_space()
 {
     // Each suffix in each stream needs:
-    //      1. `cub::DoubleBuffer` keys, input and output (2 x `Prefix_Key`);
+    //      1. `cub::DoubleBuffer` keys, input and output (2 x `DEV_KEY_BYTES`);
     //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
     //      3. activeness-flag, output (1 x `uint8_t`).
     // `cub` itself requires a workspace for sort and scan.
-    // Memory constraint: STREAM_C x (P_sz_max x (2 x (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
     const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
@@ -384,7 +384,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -400,7 +400,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         {
             for(std::size_t r = 0; r < 2; ++r)  // For each buffer in the radix-sort ping-pong
             {
-                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Prefix_Key)));
+                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * DEV_KEY_BYTES));
                 CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
             }
 
@@ -557,7 +557,7 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_IDs()
 {
     // Copy the pivots to the device constant-memory.
-    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(Prefix_Key)));
+    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(Pivot_Key)));
 
     constexpr std::size_t BLOCK_SZ = 256;
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
@@ -711,7 +711,6 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 #ifdef STATS
     {
-        constexpr idx_t ell = K;
         p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `ell`).
         idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -754,7 +753,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             key, suf,
             part_sz,
             Prefix_Key_Decomposer{},
-            0, Prefix_Key::PREFIX_WORDS * 64,
+            0, ELL_WORDS * 64,
             stream[buf_id]
         ));
     }
@@ -1107,7 +1106,6 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
-    constexpr idx_t ell = K;
     for(idx_t k = ell; k < n_; k *= 2)
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));

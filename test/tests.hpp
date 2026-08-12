@@ -18,7 +18,7 @@ namespace gpu_saca::test
 // defined by the pivots `X`, match to the partition-IDs computed at the CPU-
 // side as reference.
 template <typename T_sym_>
-bool validate_partition_IDs(const T_sym_* T, idx_t n, const std::vector<Prefix_Key>& X, const p_id_t* P_id);
+bool validate_partition_IDs(const T_sym_* T, idx_t n, const std::vector<Pivot_Key>& X, const p_id_t* P_id);
 
 /*
 // Returns `true` iff the keys in `key` and their corresponding suffixes in
