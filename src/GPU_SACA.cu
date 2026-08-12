@@ -1105,14 +1105,19 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
         const auto* const suf = backend_->resident_suf(p_id);
         const auto* const key = backend_->resident_key(p_id);
 
-        #pragma omp parallel for schedule(static)
-        for(idx_t i = 0; i < sz; ++i)
         {
-            const auto j = suf[i];  // Suffix.
-            const auto r_j = key[i];    // Local rank.
-            rho[j] = rank_off + r_j;    // Global rank.
+            INSTRUMENT_TIMER(scatter_ns);
+
+            #pragma omp parallel for schedule(static)
+            for(idx_t i = 0; i < sz; ++i)
+            {
+                const auto j = suf[i];  // Suffix.
+                const auto r_j = key[i];    // Local rank.
+                rho[j] = INSTRUMENT_STAMP(gen, rank_off + r_j); // Global rank.
+            }
         }
 
+        INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_scatter_ns(scatter_ns));
         return;
     }
 
