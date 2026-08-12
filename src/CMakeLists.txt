@@ -16,6 +16,10 @@ set(PROJECT_SRC
         Direct_File.cpp
         Spill_Store.cpp
         Disk_Backend.cpp
+        RAM_Backend.cpp
+        Partition_Backend.cpp
+        Residency_Plan.cpp
+        utility.cpp
 )
 
 # Define the core library and the `libcubwt` library for benchmarking.

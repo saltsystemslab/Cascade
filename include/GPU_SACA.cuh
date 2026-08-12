@@ -4,12 +4,13 @@
 
 
 #include "types.hpp"
-#include "Prefix_Key.hpp"
-#include "Disk_Backend.hpp"
+#include "Packed_Prefix.hpp"
+#include "Partition_Backend.hpp"
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
 #include "utility.cuh"
+#include "env.hpp"
 
 #include "concurrentqueue/blockingconcurrentqueue.h"
 
@@ -23,8 +24,7 @@
 namespace gpu_saca
 {
 
-constexpr p_id_t MAX_PIVOT_COUNT = CONST_MEM_SZ / sizeof(Prefix_Key);   // Maximum supported number of pivots.
-extern __constant__ Prefix_Key pivots_d[];
+constexpr p_id_t MAX_PART_COUNT = std::numeric_limits<p_id_t>::max();  // Maximum supported number of partitions.
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
@@ -34,6 +34,13 @@ class GPU_SACA
 private:
 
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
+
+    // Bytes per suffix required in each of the two device key-buffers, per
+    // partition. The initial-ranking phase sorts the suffixes by their `\ell`-
+    // length prefixes, whereas the re-ranking phase reuses one buffer as two
+    // laid-flat `idx_t` arrays (the key-group and the primary-key-group ranks).
+    // So the buffers are sized to whichever of the two demands is larger.
+    static constexpr std::size_t DEV_KEY_BYTES = (sizeof(Prefix_Key) > 2 * sizeof(idx_t) ? sizeof(Prefix_Key) : 2 * sizeof(idx_t));
 
     // Assumed worst-case ratio of actual max partition-size to the target
     // estimated during pivots-selection.
@@ -47,9 +54,10 @@ private:
     const idx_t secondary_bits_;    // Bit-width of the secondary-key of a suffix: `\ceil(\log_2(n))`.
     idx_t key_bits_;    // Bit-width of the packed (primary, secondary) key of a suffix — primary: `\ceil(\log_2(P_sz_max))`, secondary: `\ceil(\log_2(n))`.
 
-    static constexpr idx_t K = Prefix_Key::PREFIX_WORDS * sizeof(idx_t) / sizeof(T_sym_);   // Prefix-size for pivots and partitioning.
+    static constexpr idx_t ell = ELL_WORDS * sizeof(idx_t) / sizeof(T_sym_);    // Prefix-size of the initial sort-keys.
+    static constexpr idx_t K = K_WORDS * sizeof(idx_t) / sizeof(T_sym_);    // Prefix-size of pivots.
 
-    std::vector<Prefix_Key> pivots; // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
+    std::vector<Pivot_Key> pivots;  // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
     p_id_t* P_id;   // Partition-IDs of the suffixes.
 
@@ -62,15 +70,15 @@ private:
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
-    std::unique_ptr<Disk_Backend> backend_; // Partition storage backend.
+    std::unique_ptr<Partition_Backend> backend_;    // Partition storage backend.
     std::unique_ptr<Spill_Store> spill_;    // Partitions' on-disk spill-files manager.
 
     // Data structures to for the chunked staging of data between the partition-backend and the device buffers.
     // {
         // ~2M elements per chunk / slab: memory usage: 2M x (sizeof(Prefix_Key) + 8) (~48 MB at `ell = 2`).
         static constexpr idx_t CHUNK_CAP = (idx_t(1) << 21);
-        static constexpr idx_t PREFETCH_DEPTH = 0;  // Complete partitions to stage ahead for the device-dispatcher.
-        static constexpr idx_t WRITEBACK_DEPTH = 0; // Complete partitions to stage ahead to return to the backend.
+        inline static const idx_t PREFETCH_DEPTH = env::get_u64("GPU_SACA_PREFETCH_DEPTH").value_or(0); // Complete partitions to stage ahead for the device-dispatcher.
+        inline static const idx_t WRITEBACK_DEPTH = env::get_u64("GPU_SACA_WRITEBACK_DEPTH").value_or(0);   // Complete partitions to stage ahead to return to the backend.
 
         idx_t chunk_cap_;   // Chunk granularity (keys / suffixes per slab).
         idx_t slab_c_;  // |S|: slab pool size.
@@ -87,6 +95,14 @@ private:
         blocking_q_t<Staging_Slab*> W;  // Slabs with chunks downloaded from device, ready to be written to partition-backend.
 
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
+
+
+        // Sets the staging configurations: slab capacity, slab pool size, and
+        // reader- / writer-pool sizes.
+        void setup_staging_config();
+
+        // Returns the total memory used by the slab-pool.
+        std::size_t slab_pool_memory() const;
 
         struct Partition_Download_Callback_Args // Argument bundle for the host-callback at download of a partition's chunks from the device.
         {
@@ -111,7 +127,7 @@ private:
     // {
         T_sym_* null_d; // Buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
 
-        Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the largest-width type used in sort (which is in initial-ranking).
+        Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the initial-ranking sort key.
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
         void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;           // Size of the `cub` workspace.
@@ -120,6 +136,11 @@ private:
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
     // }
 
+
+    // Returns the fixed space-budget (in bytes) required in the algorithm.
+    // Currently: the text (`T`), the partition-IDs (`Π`), the ISA (`ρ`), and
+    // the scatter-buffers in partitioning.
+    std::size_t fixed_budget() const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
@@ -199,34 +220,22 @@ public:
 };
 
 
-// Computes the partition-IDs (in `[0, part_count)`) of the suffixes of the
-// text-chunk `T_chunk`, of type `T_sym_` and having `chunk_sz` many suffixes,
-// into `P_id`. Also accumulates the per-partition suffix counts of this chunk
-// into the global histogram `P_sz`.
+// Computes the partition-IDs of the suffixes of the text-chunk `T_chunk`, of
+// type `T_sym_` and having `chunk_sz` many suffixes, against the `p - 1` pivots
+// in `pivots`, into `P_id`. Also accumulates the per-partition suffix counts of
+// this chunk into the global histogram `P_sz`.
 // Grid organization: one thread per suffix of the chunk.
-// Shared memory layout: text-tile (`T_sym_`) | block-local histogram (`uint32_t`)
 template <typename T_sym_, idx_t K, idx_t BLOCK_SZ>
 __global__
 void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, const idx_t chunk_sz,
-                                    p_id_t* const __restrict__ P_id, const p_id_t part_count, idx_t* const __restrict__ P_sz)
+                                    const Pivot_Key* const __restrict__ pivots,
+                                    p_id_t* const __restrict__ P_id, const p_id_t p, idx_t* const __restrict__ P_sz)
 {
     constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
-
-    // Shared memory pattern: text-tile of size `TILE_SZ`, followed by block-local histogram of size `part_count`.
-    extern __shared__ uint8_t s_mem[];
-    T_sym_* const tile         = reinterpret_cast<T_sym_*>(s_mem);  // Text-tile.
-    constexpr idx_t tile_bytes = TILE_SZ * sizeof(T_sym_);
-    constexpr idx_t hist_off   = ((tile_bytes + alignof(uint32_t) - 1) / alignof(uint32_t)) * alignof(uint32_t);
-    uint32_t* const local_hist = reinterpret_cast<uint32_t*>(s_mem + hist_off);
+    __shared__ T_sym_ tile[TILE_SZ];    // Text-tile.
 
     const auto t_id = threadIdx.x;
     const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text-chunk.
-
-    // Clear the block-local histogram cooperatively.
-    {
-        for(idx_t j = t_id; j < part_count; j += BLOCK_SZ)
-            local_hist[j] = 0;
-    }
 
     // Load the corresponding text-tile cooperatively.
     {
@@ -249,33 +258,22 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
         const auto off = block_off + t_id;  // Offset into the text-chunk being processed.
         if(off < chunk_sz)
         {
-            const auto pre_key = Prefix_Key::pack_prefix(tile + t_id);
+            const auto pre_key = Pivot_Key::pack_prefix(tile + t_id);
 
             // Binary search for the smallest `p_id` such that `pre_key <= pivots[p_id]`.
-            p_id_t low = 0, high = part_count - 1;  // The solution lies in the range `[low, high]`.
+            p_id_t low = 0, high = p - 1;   // The solution lies in the range `[low, high]`.
             while(low < high)
             {
                 const auto mid = low + (high - low) / 2;
-                if(pre_key <= pivots_d[mid])    // The solution lies in the range `[low, mid]`.
+                if(pre_key <= pivots[mid])  // The solution lies in the range `[low, mid]`.
                     high = mid;
                 else    // It lies in the range `[mid + 1, high]`.
                     low = mid + 1;
             }
 
             P_id[off] = low;
-
-            // Count this suffix into the block-local histogram.
-            atomicAdd(local_hist + P_id[off], 1u);
+            atomicAdd(reinterpret_cast<unsigned long long*>(P_sz + low), 1ull);
         }
-    }
-
-    __syncthreads();
-
-    // Flush the block-local counts into the global-local histogram.
-    {
-        for(idx_t j = t_id; j < part_count; j += BLOCK_SZ)
-            if(local_hist[j])
-                atomicAdd(reinterpret_cast<unsigned long long*>(P_sz + j), static_cast<unsigned long long>(local_hist[j]));
     }
 }
 

@@ -20,7 +20,7 @@ int main(int argc, char** argv)
 
     // using T_sym_ = uint8_t;
     using T_sym_ = uint16_t;
-    constexpr auto null_count = sizeof(gpu_saca::Prefix_Key) / sizeof(T_sym_);
+    constexpr auto null_count = gpu_saca::tail_padding<T_sym_>;
 
     const std::string file_path(argv[1]);
     const auto sym_count = gpu_saca::util::file_size<T_sym_>(file_path);
@@ -41,13 +41,15 @@ int main(int argc, char** argv)
     std::cerr << "Sequence length: " << n << "\n";
 
     {
-        gpu_saca::GPU_SACA<T_sym_> saca(T, n);
         gpu_saca::idx_t* SA;
+        {
+            gpu_saca::GPU_SACA<T_sym_> saca(T, n);
 
-        const auto t_0 = gpu_saca::timer::now();
-        saca.build_SA(SA);
-        const auto t_1 = gpu_saca::timer::now();
-        std::cerr << "Time taken: " << gpu_saca::timer::duration(t_1 - t_0) << "s.\n";
+            const auto t_0 = gpu_saca::timer::now();
+            saca.build_SA(SA);
+            const auto t_1 = gpu_saca::timer::now();
+            std::cerr << "Time taken: " << gpu_saca::timer::duration(t_1 - t_0) << "s.\n";
+        }
 
 #if defined(TESTS) || defined(VALIDATE)
         std::cerr << "Suffix array validation: " << (gpu_saca::test::is_correct_SA(SA, T, n) ? "Passes" : "Fails") << ".\n";
