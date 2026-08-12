@@ -35,9 +35,6 @@
 namespace gpu_saca
 {
 
-__constant__ Pivot_Key pivots_d[MAX_PIVOT_COUNT];
-
-
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
       n_(n)
@@ -177,8 +174,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 {
     const idx_t p_sz_max = partition_size_upper_bound();    // Maximum supported partition-size based on the device-memory budget.
     const idx_t p_min = (n_ + p_sz_max - 1) / p_sz_max;     // Minimum number of partitions.
-    const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PIVOT_COUNT + 1);  // Maximum number of partitions.
-
+    const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PART_COUNT);    // Maximum number of partitions.
     const idx_t s = OVERSAMPLING_FACTOR * p_max * std::log2(n_);    // Number of samples.
     std::vector<Pivot_Key> S(s);    // The samples.
 
@@ -295,11 +291,11 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
         }
     }
 
-    // The (primary, secondary) key packing scheme, or very large `n`, can demand more partitions than constant-memory allow pivots.
-    if(p_min > MAX_PIVOT_COUNT + 1)
+    // The (primary, secondary) key packing scheme, or very large `n`, can demand more partitions than the partition-ID type can index.
+    if(p_min > MAX_PART_COUNT)
     {
         std::cerr   << "Current partitioning policy requires at least " << p_min << " partitions for the " << n_ << "-length text. "
-                    << "But constant-memory can hold at most " << MAX_PIVOT_COUNT << " pivots. Aborting.\n";
+                    << "But `p_id_t` can index at most " << MAX_PART_COUNT << " partitions. Aborting.\n";
         std::exit(EXIT_FAILURE);
     }
 
@@ -556,8 +552,14 @@ void GPU_SACA<T_sym_>::partition()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_IDs()
 {
-    // Copy the pivots to the device constant-memory.
-    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(Pivot_Key)));
+    // Copy the pivots to the device.
+    Pivot_Key* pivots_d = nullptr;
+    if(!pivots.empty())
+    {
+        const auto pivots_bytes = pivots.size() * sizeof(Pivot_Key);
+        CUDA_CHECK(cudaMalloc(&pivots_d, pivots_bytes));
+        CUDA_CHECK(cudaMemcpy(pivots_d, pivots.data(), pivots_bytes, cudaMemcpyHostToDevice));
+    }
 
     constexpr std::size_t BLOCK_SZ = 256;
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
@@ -597,11 +599,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     // Stream text in chunks to device, compute partition-IDs and per-partition counts, and move the output to host.
     {
-        constexpr idx_t tile_bytes = (BLOCK_SZ + K - 1) * sizeof(T_sym_);
-        constexpr idx_t hist_off = ((tile_bytes + alignof(uint32_t) - 1) / alignof(uint32_t)) * alignof(uint32_t);
-        const idx_t hist_bytes = p_ * sizeof(uint32_t);
-        const auto s_mem_sz = hist_off + hist_bytes;    // Shared memory: text-tile | block-local histogram.
-
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
         for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
         {
@@ -619,8 +616,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
                 CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id] + chunk_symbol_count, null_d, (chunk_symbol_req - chunk_symbol_count) * sizeof(T_sym_), cudaMemcpyDeviceToDevice, stream[buf_id]));
 
             const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
-            compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz, stream[buf_id] >>>
-                (T_buf[buf_id], chunk_suf_count, P_id_buf[buf_id], p_, P_sz_d);
+            compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (T_buf[buf_id], chunk_suf_count, pivots_d, P_id_buf[buf_id], p_, P_sz_d);
             CUDA_CHECK(cudaGetLastError());
 
             // Asynchronously copy this chunk's partition-IDs to the host.
@@ -634,6 +631,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         CUDA_CHECK(cudaStreamSynchronize(stream[s]));
 
     // Free the buffers.
+    CUDA_CHECK(cudaFree(pivots_d));
     for(std::size_t b = 0; b < STREAM_C; ++b)
     {
         CUDA_CHECK(cudaFree(T_buf[b]));

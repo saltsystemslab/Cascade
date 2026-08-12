@@ -24,8 +24,7 @@
 namespace gpu_saca
 {
 
-constexpr p_id_t MAX_PIVOT_COUNT = CONST_MEM_SZ / sizeof(Pivot_Key);    // Maximum supported number of pivots.
-extern __constant__ Pivot_Key pivots_d[];
+constexpr p_id_t MAX_PART_COUNT = std::numeric_limits<p_id_t>::max();  // Maximum supported number of partitions.
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
@@ -221,34 +220,22 @@ public:
 };
 
 
-// Computes the partition-IDs (in `[0, part_count)`) of the suffixes of the
-// text-chunk `T_chunk`, of type `T_sym_` and having `chunk_sz` many suffixes,
-// into `P_id`. Also accumulates the per-partition suffix counts of this chunk
-// into the global histogram `P_sz`.
+// Computes the partition-IDs of the suffixes of the text-chunk `T_chunk`, of
+// type `T_sym_` and having `chunk_sz` many suffixes, against the `p - 1` pivots
+// in `pivots`, into `P_id`. Also accumulates the per-partition suffix counts of
+// this chunk into the global histogram `P_sz`.
 // Grid organization: one thread per suffix of the chunk.
-// Shared memory layout: text-tile (`T_sym_`) | block-local histogram (`uint32_t`)
 template <typename T_sym_, idx_t K, idx_t BLOCK_SZ>
 __global__
 void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, const idx_t chunk_sz,
-                                    p_id_t* const __restrict__ P_id, const p_id_t part_count, idx_t* const __restrict__ P_sz)
+                                    const Pivot_Key* const __restrict__ pivots,
+                                    p_id_t* const __restrict__ P_id, const p_id_t p, idx_t* const __restrict__ P_sz)
 {
     constexpr auto TILE_SZ = BLOCK_SZ + K - 1;  // Size of the text-tile processed by a block.
-
-    // Shared memory pattern: text-tile of size `TILE_SZ`, followed by block-local histogram of size `part_count`.
-    extern __shared__ uint8_t s_mem[];
-    T_sym_* const tile         = reinterpret_cast<T_sym_*>(s_mem);  // Text-tile.
-    constexpr idx_t tile_bytes = TILE_SZ * sizeof(T_sym_);
-    constexpr idx_t hist_off   = ((tile_bytes + alignof(uint32_t) - 1) / alignof(uint32_t)) * alignof(uint32_t);
-    uint32_t* const local_hist = reinterpret_cast<uint32_t*>(s_mem + hist_off);
+    __shared__ T_sym_ tile[TILE_SZ];    // Text-tile.
 
     const auto t_id = threadIdx.x;
     const idx_t block_off = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ;  // Offset of this block into the text-chunk.
-
-    // Clear the block-local histogram cooperatively.
-    {
-        for(idx_t j = t_id; j < part_count; j += BLOCK_SZ)
-            local_hist[j] = 0;
-    }
 
     // Load the corresponding text-tile cooperatively.
     {
@@ -274,30 +261,19 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
             const auto pre_key = Pivot_Key::pack_prefix(tile + t_id);
 
             // Binary search for the smallest `p_id` such that `pre_key <= pivots[p_id]`.
-            p_id_t low = 0, high = part_count - 1;  // The solution lies in the range `[low, high]`.
+            p_id_t low = 0, high = p - 1;   // The solution lies in the range `[low, high]`.
             while(low < high)
             {
                 const auto mid = low + (high - low) / 2;
-                if(pre_key <= pivots_d[mid])    // The solution lies in the range `[low, mid]`.
+                if(pre_key <= pivots[mid])  // The solution lies in the range `[low, mid]`.
                     high = mid;
                 else    // It lies in the range `[mid + 1, high]`.
                     low = mid + 1;
             }
 
             P_id[off] = low;
-
-            // Count this suffix into the block-local histogram.
-            atomicAdd(local_hist + low, 1u);
+            atomicAdd(reinterpret_cast<unsigned long long*>(P_sz + low), 1ull);
         }
-    }
-
-    __syncthreads();
-
-    // Flush the block-local counts into the global-local histogram.
-    {
-        for(idx_t j = t_id; j < part_count; j += BLOCK_SZ)
-            if(local_hist[j])
-                atomicAdd(reinterpret_cast<unsigned long long*>(P_sz + j), static_cast<unsigned long long>(local_hist[j]));
     }
 }
 
