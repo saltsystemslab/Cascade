@@ -762,9 +762,9 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     // Rank and filter the sort-output.
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
-        const Prefix_Key* const K   = key_buf[buf_id][sort_op_selector];    // The sort-output.
+        const Prefix_Key* const K_sorted = key_buf[buf_id][sort_op_selector];   // The sort-output.
         idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
-        idx_t* const key_rank       = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);      // Ranks of the distinct keys.
+        idx_t* const key_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // Ranks of the distinct keys.
 
         constexpr std::size_t BLOCK_SZ = 256;
         const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
@@ -772,7 +772,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         // Track groups with distinct prefixes and rank by the groups' offsets, and mark non-unique keys as active.
         {
             initialize_key_group_ranks_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, key_group_rank, is_active);
+                (K_sorted, part_sz, key_group_rank, is_active);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -963,7 +963,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Re-rank and filter the sort-output.
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
-        idx_t* const K = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);   // The sort-output.
+        idx_t* const K_sorted = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // The sort-output.
         idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Distinct key groups' ranks.
         idx_t* const primary_key_group_rank = key_group_rank + part_sz; // Distinct primary-key groups' ranks.
 
@@ -973,7 +973,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank, is_active);
+                (K_sorted, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank, is_active);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -997,7 +997,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Refine rankings to finer resolution based on the in-primary-key-group offsets of different key groups.
         {
             refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank);
+                (K_sorted, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -1005,7 +1005,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // TODO: refactor all the repeated code between sort-and-initial-rank and sort-and-rank, with a `bool` template parameter.
         // Group non-unique rank keys and suffixes to the head and the rest to the tail of the partition.
         {
-            const idx_t* const K_in     = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);  assert(K_in == K);
+            const idx_t* const K_in     = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);  assert(K_in == K_sorted);
             const idx_t* const SA_in    = suf_buf[buf_id][sort_op_selector];
             idx_t* const K_out          = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
             idx_t* const SA_out         = suf_buf[buf_id][1 - sort_op_selector];
