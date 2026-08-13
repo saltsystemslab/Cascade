@@ -50,14 +50,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , null_d(nullptr)
     , workspace_sz(0)
 {
-#ifdef ISA_INSTRUMENT
-    if(secondary_bits_ > isa_instrument::GEN_SHIFT)
-    {
-        std::cerr << "Instrumented build needs n < 2^" << isa_instrument::GEN_SHIFT << " to stamp generations into rho's high bits. Aborting.\n";
-        std::exit(EXIT_FAILURE);
-    }
-#endif
-
     P_id = util::allocate<p_id_t>(n_);
     rho = util::allocate<idx_t>(n_);
 
@@ -1107,7 +1099,6 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 
 #ifdef ISA_INSTRUMENT
     uint64_t read_ns = 0, scatter_ns = 0;
-    const auto gen = isa_instrument::ISA_Instrument().generation();
 #endif
 
     if(backend_->resident_suf(p_id) != nullptr) // Resident fast path.
@@ -1123,7 +1114,7 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
             {
                 const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
                 const auto r_j = key[i];    // Local rank.
-                rho[j] = INSTRUMENT_STAMP(gen, rank_off + r_j); // Global rank.
+                rho[j] = rank_off + r_j;    // Global rank.
             }
         }
 
@@ -1153,7 +1144,7 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
             {
                 const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
                 const auto r_j = key[i];    // Local rank.
-                rho[j] = INSTRUMENT_STAMP(gen, rank_off + r_j); // Global rank.
+                rho[j] = rank_off + r_j;    // Global rank.
             }
         }
 
@@ -1223,8 +1214,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 break;
         }
     }
-
-    INSTRUMENT(isa_instrument::ISA_Instrument().report_summary());
 }
 
 

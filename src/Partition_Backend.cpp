@@ -39,18 +39,13 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
     // Gather the secondary keys of the read suffixes and fold those in to the keys.
     {
         INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().gather_ns);
-#ifdef ISA_INSTRUMENT
-        auto& stat = isa_instrument::ISA_Instrument().me();
-        const auto gen = isa_instrument::ISA_Instrument().generation();
-#endif
 
         for(idx_t i = 0; i < s.size(); ++i)
         {
             const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
             const bool in_bound = (j + k_ < n_);
             const idx_t v = (in_bound ? rho_[j + k_] : 0);
-            INSTRUMENT(stat.observe(gen, in_bound, v));
-            key[i] = (key[i] << secondary_bits_) | INSTRUMENT_UNSTAMP(v);
+            key[i] = (key[i] << secondary_bits_) | v;
         }
     }
 }
