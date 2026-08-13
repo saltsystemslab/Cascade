@@ -540,7 +540,7 @@ void GPU_SACA<T_sym_>::partition()
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
             {
-                const p_id_t fwd_tag = 0;
+                const p_id_t fwd_tag = (i + ell < n_ ? P_id[i + ell] : 0);
                 P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, fwd_tag), Prefix_Key::pack_prefix(T_h_ + i));
             }
 
