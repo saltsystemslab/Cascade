@@ -1,5 +1,6 @@
 
 #include "Partition_Backend.hpp"
+#include "bit-layout.hpp"
 #include "isa-instrument.hpp"
 
 
@@ -45,7 +46,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 
         for(idx_t i = 0; i < s.size(); ++i)
         {
-            const auto j = suf[i];  // Suffix.
+            const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
             const bool in_bound = (j + k_ < n_);
             const idx_t v = (in_bound ? rho_[j + k_] : 0);
             INSTRUMENT(stat.observe(gen, in_bound, v));

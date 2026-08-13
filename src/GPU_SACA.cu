@@ -2,6 +2,7 @@
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.hpp"
 #include "Packed_Prefix_Decomposer.cuh"
+#include "bit-layout.hpp"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "env.hpp"
@@ -241,6 +242,12 @@ void GPU_SACA<T_sym_>::select_pivots()
         }
 
         p_ = pivots.size() + 1;
+
+        if(!bit_layout::validate(n_, p_))
+        {
+            std::cerr << "Bit-packing layout violated. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -540,7 +547,10 @@ void GPU_SACA<T_sym_>::partition()
             PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
-                P_buf[P_id[i]].unwrap().add(i, Prefix_Key::pack_prefix(T_h_ + i));
+            {
+                const p_id_t fwd_tag = 0;
+                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, fwd_tag), Prefix_Key::pack_prefix(T_h_ + i));
+            }
 
             #pragma omp parallel for schedule(static)
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -1111,7 +1121,7 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < sz; ++i)
             {
-                const auto j = suf[i];  // Suffix.
+                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
                 const auto r_j = key[i];    // Local rank.
                 rho[j] = INSTRUMENT_STAMP(gen, rank_off + r_j); // Global rank.
             }
@@ -1141,7 +1151,7 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < to_read; ++i)
             {
-                const auto j = suf[i];  // Suffix.
+                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
                 const auto r_j = key[i];    // Local rank.
                 rho[j] = INSTRUMENT_STAMP(gen, rank_off + r_j); // Global rank.
             }
@@ -1243,7 +1253,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < sz; ++i)
             {
-                const auto j = suf[i];  // Suffix.
+                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
                 const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
                 SA[off + r_j] = j;
             }
@@ -1260,7 +1270,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < chunk_sz; ++i)
             {
-                const auto j = suf[i];  // Suffix.
+                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
                 const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
                 SA[off + r_j] = j;
             }

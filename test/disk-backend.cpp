@@ -1,5 +1,6 @@
 
 #include "tests.hpp"
+#include "bit-layout.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
@@ -37,7 +38,7 @@ bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p
         #pragma omp parallel for schedule(static) reduction(&& : content_match)
         for(idx_t i = 0; i < sz; ++i)
         {
-            const auto j = suf_buf[i];
+            const auto j = bit_layout::suffix_of(suf_buf[i]);
             if(j >= n || P_id[j] != p_id || present[j] || pre_buf[i] != Prefix_Key::pack_prefix(T_h + j))
                 content_match = false;
 
