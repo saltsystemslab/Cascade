@@ -83,8 +83,8 @@ list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 add_compile_definitions(PROJECT_VERSION=${CMAKE_PROJECT_VERSION})
 add_compile_definitions(_GNU_SOURCE)    # For `O_DIRECT` support.
 
-if(ELL)
-    add_compile_definitions(ELL=${ELL})
+if(PREF_KEY_WORDS)
+    add_compile_definitions(PREF_KEY_WORDS=${PREF_KEY_WORDS})
 endif()
 
 if(PIVOT_WORDS)
