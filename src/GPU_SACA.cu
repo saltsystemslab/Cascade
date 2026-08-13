@@ -534,7 +534,7 @@ void GPU_SACA<T_sym_>::partition()
         }
 
 
-        // Add suffix indices along with their `ELL x 8`-byte prefixes to their corresponding partitions (through the buffers).
+        // Add suffix indices along with their `ELL_WORDS x 8`-byte prefixes to their corresponding partitions (through the buffers).
         {
             PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)

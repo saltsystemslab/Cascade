@@ -14,13 +14,13 @@
 namespace gpu_saca
 {
 
-// Number of 64-bit words in the stored initial sort-key of a suffix: the `\ell`
-// knob. It defines the resolution of the initial-ranking phase:
+// Number of 64-bit words in the stored initial sort-key of a suffix: translates
+// to the `\ell` knob. It defines the resolution of the initial-ranking phase:
 // `ELL_WORDS * 8 / sizeof(T_sym)` symbols.
-#ifndef ELL
+#ifndef PREF_KEY_WORDS
     constexpr idx_t ELL_WORDS = 2;
 #else
-    constexpr idx_t ELL_WORDS = ELL;
+    constexpr idx_t ELL_WORDS = PREF_KEY_WORDS;
 #endif
 
 // Number of 64-bit words in the partitioning prefix, i.e. in a pivot: the `K`
