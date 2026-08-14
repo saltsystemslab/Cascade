@@ -9,6 +9,7 @@
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
+#include "bit-layout.hpp"
 #include "utility.cuh"
 #include "env.hpp"
 
@@ -278,15 +279,15 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 }
 
 
-// Initializes the ranks of the distinct prefix-key groups from the sorted array
-// `K` (of size `n`) into `rank`, and marks the keys' activeness-flags into
-// `is_active`. The first key of a group is ranked by its offset into `K`; the
-// rest in the group are ranked `0`.
+// Initializes the ranks of the unique prefix-key groups from the sorted arrays
+// `K` and `SA` (of size `n`) into `rank`, and marks the keys' activeness-flags
+// into `is_active`. The first key of a group is ranked by its offset into `K`;
+// the rest in the group are ranked `0`.
 // Grid organization: one thread per key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key* const __restrict__ K, const idx_t n,
+void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
                                                                 idx_t* const __restrict__ rank,
                                                                 uint8_t* const __restrict__ is_active)
 {
@@ -294,7 +295,9 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
     if(i >= n)
         return;
 
-    rank[i] = (i == 0 ? 0 : (K[i] != K[i - 1] ? i : 0));
+    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y] && bit_layout::tag_of(SA[x]) == bit_layout::tag_of(SA[y]); };
+
+    rank[i] = (i == 0 ? 0 : (!tied(i, i - 1) ? i : 0));
 
     const bool pre_tie = (i == 0        ? false : K[i] == K[i - 1]);
     const bool suc_tie = (i == n - 1    ? false : K[i] == K[i + 1]);
@@ -302,8 +305,8 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 }
 
 
-// Ranks the distinct key groups and primary-key groups from the sorted array
-// `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`,
+// Ranks the distinct key groups and primary-key groups from the sorted arrays
+// `K` and `SA` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
 // respectively, and marks the keys' activeness-flags into `is_active`. The low
 // `secondary_bits` bits of a key are its secondary, and the rest are primary.
 // The first entry of a group is ranked by its offset into `K`, whereas the rest
@@ -312,7 +315,7 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t n,
+void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
                                                                             const idx_t secondary_bits,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
                                                                             uint8_t* const __restrict__ is_active)
@@ -320,6 +323,8 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
+
+    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y] && bit_layout::tag_of(SA[x]) == bit_layout::tag_of(SA[y]); };
 
     if(i == 0)
     {
@@ -329,14 +334,14 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
     }
     else
     {
-        const bool key_tie = (K[i] == K[i - 1]);
+        const bool key_tie = tied(i, i - 1);
         const bool primary_key_tie = ((K[i] >> secondary_bits) == (K[i - 1] >> secondary_bits));
         key_group_rank[i] = (!key_tie ? i : 0);
         primary_key_group_rank[i] = (!primary_key_tie ? i : 0);
     }
 
-    const bool pre_tie = (i == 0        ? false : K[i] == K[i - 1]);
-    const bool suc_tie = (i == n - 1    ? false : K[i] == K[i + 1]);
+    const bool pre_tie = (i == 0        ? false : tied(i, i - 1));
+    const bool suc_tie = (i == n - 1    ? false : tied(i, i + 1));
     is_active[i] = (pre_tie || suc_tie);
 }
 

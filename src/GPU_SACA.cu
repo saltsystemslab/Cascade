@@ -322,13 +322,25 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
     std::size_t init_rank_workspace_sz = 0;
     {
         cub::DoubleBuffer<Prefix_Key> keys_dummy(nullptr, nullptr);
-        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            nullptr, init_rank_workspace_sz,
+
+        std::size_t suf_pref_sort_space = 0;
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs( // Check space for sorting based on the forward tag.
+            nullptr, suf_pref_sort_space,
+            vals_dummy, keys_dummy,
+            part_sz,
+            bit_layout::TAG_SHIFT, bit_layout::WORD_BITS
+        ));
+
+        std::size_t pref_suf_sort_space = 0;
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs( // Check space for sorting based on the prefix-key.
+            nullptr, pref_suf_sort_space,
             keys_dummy, vals_dummy,
             part_sz,
             Prefix_Key_Decomposer{},
             0, ELL_WORDS * 64
         ));
+
+        init_rank_workspace_sz = std::max(suf_pref_sort_space, pref_suf_sort_space);
     }
 
     std::size_t exponentiation_workspace_size = 0;
@@ -766,8 +778,18 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     }
 
 
-    // Sort the partition by the initial packed prefixes.
+    // Sort the partition by the (packed-prefix, forward-tag): two-phase radix-sort.
     {
+        // Sort by forward tag.
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+            workspace, workspace_sz,
+            suf, key,   // The tertiary (forward tag) is packed in suffix.
+            part_sz,
+            bit_layout::TAG_SHIFT, bit_layout::WORD_BITS,
+            stream[buf_id]
+        ));
+
+        // Sort by prefix-key.
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
             workspace, workspace_sz,
             key, suf,
@@ -783,6 +805,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
         const Prefix_Key* const K_sorted = key_buf[buf_id][sort_op_selector];   // The sort-output.
+        const idx_t* const SA_sorted = suf_buf[buf_id][sort_op_selector];   // The associated suffixes.
         idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
         idx_t* const key_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // Ranks of the distinct keys.
 
@@ -792,7 +815,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         // Track groups with distinct prefixes and rank by the groups' offsets, and mark non-unique keys as active.
         {
             initialize_key_group_ranks_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K_sorted, part_sz, key_group_rank, is_active);
+                (K_sorted, SA_sorted, part_sz, key_group_rank, is_active);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -982,8 +1005,18 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     }
 
 
-    // Sort the partition by (primary, secondary).
+    // Sort the partition by (primary, secondary, tertiary): two phase radix sort.
     {
+        // Sort by forward tag.
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+            workspace, workspace_sz,
+            suf, key,   // The tertiary (forward tag) is packed in suffix.
+            part_sz,
+            static_cast<int>(bit_layout::TAG_SHIFT), static_cast<int>(bit_layout::WORD_BITS),
+            stream[buf_id]
+        ));
+
+        // Sort by (primary, secondary).
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
             workspace, workspace_sz,
             key, suf,
@@ -998,6 +1031,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
         idx_t* const K_sorted = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // The sort-output.
+        idx_t* const SA_sorted = suf_buf[buf_id][sort_op_selector]; // The associated suffixes.
         idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Distinct key groups' ranks.
         idx_t* const primary_key_group_rank = key_group_rank + part_sz; // Distinct primary-key groups' ranks.
 
@@ -1007,7 +1041,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K_sorted, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank, is_active);
+                (K_sorted, SA_sorted, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank, is_active);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
