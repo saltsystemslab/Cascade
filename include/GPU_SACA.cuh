@@ -130,6 +130,7 @@ private:
 
         Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the initial-ranking sort key.
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
+        p_sz_t* perm_buf[STREAM_C][2];      // Input and output buffers for sort's permutation-indices, per stream; required for sorting with physically disjoint keys.
         void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;           // Size of the `cub` workspace.
 
@@ -276,6 +277,33 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
             atomicAdd(reinterpret_cast<unsigned long long*>(P_sz + low), 1ull);
         }
     }
+}
+
+
+// Fills `I[0, n)` with the identity permutation.
+// Grid organization: one thread per index.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void iota_kernel(p_sz_t* const __restrict__ I, const idx_t n)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        I[i] = i;
+}
+
+
+// Shuffles `src` into `dest` per the permutation `I`, all of size `n`.
+// Grid organization: one thread per index.
+// Shared memory layout: no usage.
+template <typename T_, idx_t BLOCK_SZ>
+__global__
+void shuffle_kernel(T_* const __restrict__ dest, const T_* const __restrict__ src,
+                    const p_sz_t* const __restrict__ I, const idx_t n)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        dest[i] = src[I[i]];
 }
 
 
