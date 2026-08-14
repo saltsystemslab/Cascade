@@ -43,9 +43,10 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
         for(idx_t i = 0; i < s.size(); ++i)
         {
             const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
-            const bool in_bound = (j + k_ < n_);
-            const idx_t v = (in_bound ? rho_[j + k_] : 0);
-            key[i] = (key[i] << secondary_bits_) | v;
+            const idx_t v = (j + k_ < n_ ? rho_[j + k_] : 0);   // Secondary rank, packed with previous generation's forward tag of the extension suffix.
+            const auto phi = bit_layout::tag_of(v); // Forward tag of `j` for this generation.
+            suf[i] = bit_layout::pack(j, phi);  // Writeback suffix to slab with its forward tag packed in.
+            key[i] = (key[i] << secondary_bits_) | bit_layout::rank_of(v);
         }
     }
 }

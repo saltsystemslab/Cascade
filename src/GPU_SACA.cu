@@ -540,8 +540,8 @@ void GPU_SACA<T_sym_>::partition()
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
             {
-                const p_id_t fwd_tag = (i + ell < n_ ? P_id[i + ell] : 0);
-                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, fwd_tag), Prefix_Key::pack_prefix(T_h_ + i));
+                const p_id_t phi = (i + ell < n_ ? P_id[i + ell] : 0);  // Forward tag for generation 0.
+                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi), Prefix_Key::pack_prefix(T_h_ + i));   // Suffix packed with its forward tag, seeded at generation 0.
             }
 
             #pragma omp parallel for schedule(static)
@@ -1113,8 +1113,9 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
             for(idx_t i = 0; i < sz; ++i)
             {
                 const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
+                const auto phi = bit_layout::tag_of(suf[i]);    // Forward tag used at current generation.
                 const auto r_j = key[i];    // Local rank.
-                rho[j] = rank_off + r_j;    // Global rank.
+                rho[j] = bit_layout::pack(rank_off + r_j, phi); // Global rank, packed with the tag (being made available for the next generation's consumer, if any).
             }
         }
 
@@ -1143,8 +1144,9 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
             for(idx_t i = 0; i < to_read; ++i)
             {
                 const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
+                const auto phi = bit_layout::tag_of(suf[i]);    // Forward tag used at current generation.
                 const auto r_j = key[i];    // Local rank.
-                rho[j] = rank_off + r_j;    // Global rank.
+                rho[j] = bit_layout::pack(rank_off + r_j, phi); // Global rank, packed with the tag (being made available for the next generation's consumer, if any).
             }
         }
 
