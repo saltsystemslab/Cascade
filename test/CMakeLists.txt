@@ -13,6 +13,7 @@ set(TESTS_SRC
         partitioning.cpp
         disk-backend.cpp
         ranking.cpp
+        rank-propagation.cpp
         end-to-end.cpp
 )
 

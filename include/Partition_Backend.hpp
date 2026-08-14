@@ -31,7 +31,11 @@ private:
     idx_t* rho_;    // Global ranks of the suffixes.
     const idx_t n_; // Text-size.
     const idx_t secondary_bits_;    // Bit-width of the secondary-key of a suffix: `\ceil(\log_2(n))`.
-    idx_t k_;   // Current prefix-context of the suffixes in the algorithm execution.
+    idx_t k_;   // Current stride (half of the context this generation is resolving) of the suffixes in the algorithm execution.
+#ifdef TESTS
+    const p_id_t* const P_id;   // Partition-IDs.
+#endif
+
 
 public:
 
@@ -41,14 +45,18 @@ public:
     // ranks array `rho` of size `n` and the secondary-key bit-width
     // `secondary_bits` are used to extend the ranks of the suffixes while they
     // are read off the backend.
+#ifndef TESTS
     Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t fixed_bytes, idx_t* rho, idx_t n, idx_t secondary_bits);
+#else
+    Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t fixed_bytes, idx_t* rho, idx_t n, idx_t secondary_bits, const p_id_t* P_id);
+#endif
 
     Partition_Backend(const Partition_Backend&) = delete;
     Partition_Backend& operator=(const Partition_Backend&) = delete;
 
-    // Sets the prefix-context to `k` for the rank-gather operations during
-    // partition-reading.
-    void set_prefix_context(const idx_t k) { k_ = k; }
+    // Sets the stride to `k` for the rank-gather operations during partition-
+    // reading.
+    void set_stride(const idx_t k) { k_ = k; }
 
     // Returns the `p_id`'th partition's resident suffixes, if any.
     idx_t* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }

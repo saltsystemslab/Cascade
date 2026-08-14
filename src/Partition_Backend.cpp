@@ -2,12 +2,19 @@
 #include "Partition_Backend.hpp"
 #include "bit-layout.hpp"
 #include "isa-instrument.hpp"
+#include "tests.hpp"
+
+#include <cstdlib>
 
 
 namespace gpu_saca
 {
 
+#ifndef TESTS
 Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, idx_t* const rho, idx_t n, const idx_t secondary_bits):
+#else
+Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, idx_t* const rho, idx_t n, const idx_t secondary_bits, const p_id_t* const P_id):
+#endif
       plan_(P_cap, fixed_bytes, sizeof(Prefix_Key))
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
@@ -15,6 +22,9 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
     , n_(n)
     , secondary_bits_(secondary_bits)
     , k_(0)
+#ifdef TESTS
+    , P_id(P_id)
+#endif
 {}
 
 
@@ -42,6 +52,16 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 
         for(idx_t i = 0; i < s.size(); ++i)
         {
+#ifdef TESTS
+            // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
+            // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
+            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, k_, P_id))
+            {
+                std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+#endif
+
             const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
             const idx_t v = (j + k_ < n_ ? rho_[j + k_] : 0);   // Secondary rank, packed with previous generation's forward tag of the extension suffix.
             const auto phi = bit_layout::tag_of(v); // Forward tag of `j` for this generation.

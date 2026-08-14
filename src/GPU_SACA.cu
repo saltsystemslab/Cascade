@@ -526,7 +526,11 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
+#ifndef TESTS
             backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_);
+#else
+            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_, P_id);
+#endif
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -1172,7 +1176,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
         {
             // PROFILE_SCOPE("cpu_gather"); // TODO: relocate properly.
-            backend_->set_prefix_context(k);
+            backend_->set_stride(k);
         }
 
         // Sort-and-rank each partition.
