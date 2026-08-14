@@ -53,6 +53,11 @@ bool validate_partition_contents(const T_sym_* T, idx_t n, const p_id_t* P_id, c
 // `stride`.
 bool validate_previous_gen_fwd_tag(idx_t suf, idx_t n, idx_t stride, const p_id_t* P_id);
 
+// Returns `true` iff the target coherence invariant holds for the suffixes
+// `j_1` and `j_2` with respective local ranks `r_1` and `r_2`. The suffixes
+// must be from the same partition.
+bool validate_target_coherence(idx_t j_1, idx_t r_1, idx_t j_2, idx_t r_2);
+
 // Returns `true` iff `SA` is a permutation of `[0, n)`.
 bool is_permutation(const idx_t* SA, idx_t n);
 

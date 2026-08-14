@@ -60,6 +60,12 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
                 std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
+
+            if(i > 0 && !test::validate_target_coherence(suf[i - 1], key[i - 1], suf[i], key[i]))
+            {
+                std::cerr << "Target coherence invariant broken. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
 #endif
 
             const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.

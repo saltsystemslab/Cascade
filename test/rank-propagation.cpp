@@ -14,4 +14,10 @@ bool validate_previous_gen_fwd_tag(const idx_t suf, const idx_t n, const idx_t s
     return bit_layout::tag_of(suf) == phi_prev;
 }
 
+
+bool validate_target_coherence(const idx_t j_1, const idx_t r_1, const idx_t j_2, const idx_t r_2)
+{
+    return r_1 != r_2 || bit_layout::tag_of(j_1) == bit_layout::tag_of(j_2);
+}
+
 }
