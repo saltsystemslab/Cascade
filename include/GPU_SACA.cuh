@@ -299,8 +299,8 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 
     rank[i] = (i == 0 ? 0 : (!tied(i, i - 1) ? i : 0));
 
-    const bool pre_tie = (i == 0        ? false : K[i] == K[i - 1]);
-    const bool suc_tie = (i == n - 1    ? false : K[i] == K[i + 1]);
+    const bool pre_tie = (i == 0        ? false : tied(i, i - 1));
+    const bool suc_tie = (i == n - 1    ? false : tied(i, i + 1));
     is_active[i] = (pre_tie || suc_tie);
 }
 
