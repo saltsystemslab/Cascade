@@ -318,30 +318,31 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 {
-    cub::DoubleBuffer<idx_t> vals_dummy(nullptr, nullptr);
+    cub::DoubleBuffer<idx_t> suf_dummy(nullptr, nullptr);
+    cub::DoubleBuffer<p_sz_t> perm_dummy(nullptr, nullptr);
 
     std::size_t init_rank_workspace_sz = 0;
     {
         cub::DoubleBuffer<Prefix_Key> keys_dummy(nullptr, nullptr);
 
-        std::size_t suf_pref_sort_space = 0;
+        std::size_t suf_perm_sort_space = 0;
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs( // Check space for sorting based on the forward tag.
-            nullptr, suf_pref_sort_space,
-            vals_dummy, keys_dummy,
+            nullptr, suf_perm_sort_space,
+            suf_dummy, perm_dummy,
             part_sz,
             bit_layout::TAG_SHIFT, bit_layout::WORD_BITS
         ));
 
-        std::size_t pref_suf_sort_space = 0;
+        std::size_t pref_perm_sort_space = 0;
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs( // Check space for sorting based on the prefix-key.
-            nullptr, pref_suf_sort_space,
-            keys_dummy, vals_dummy,
+            nullptr, pref_perm_sort_space,
+            keys_dummy, perm_dummy,
             part_sz,
             Prefix_Key_Decomposer{},
             0, ELL_WORDS * 64
         ));
 
-        init_rank_workspace_sz = std::max(suf_pref_sort_space, pref_suf_sort_space);
+        init_rank_workspace_sz = std::max(suf_perm_sort_space, pref_perm_sort_space);
     }
 
     std::size_t exponentiation_workspace_size = 0;
@@ -349,7 +350,7 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
         cub::DoubleBuffer<idx_t> keys_dummy(nullptr, nullptr);
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
             nullptr, exponentiation_workspace_size,
-            keys_dummy, vals_dummy,
+            keys_dummy, perm_dummy,
             part_sz,
             0, 64
         ));
