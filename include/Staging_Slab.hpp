@@ -23,6 +23,7 @@ private:
 
     Prefix_Key* key_;   // Keys of the partition-chunk; typed to the largest-width type used in sort (which is in initial-ranking).
     idx_t* suf_;    // Suffixes of the partition-chunk.
+    p_id_t* beta_;  // Backward routing tags of the partition-chunk.
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
     idx_t off_; // Offset of the content of this slab within the corresponding partition.
     idx_t sz_;  // Number of elements in the slab.
@@ -34,19 +35,25 @@ public:
 
     ~Staging_Slab();
 
-    // Returns the keys of the staged partition: typed to the largest-width
+    // Returns the keys of the staged slab: typed to the largest-width
     // type used as keys.
     auto key() const { return key_; }
 
-    // Returns the keys of the staged partition: typed to the largest-width
+    // Returns the keys of the staged slab: typed to the largest-width
     // type used as keys.
     auto key() { return key_; }
 
-    // Returns the suffixes of the staged partition.
+    // Returns the suffixes of the staged slab.
     auto suf() const { return suf_; }
 
-    // Returns the suffixes of the staged partition.
+    // Returns the suffixes of the staged slab.
     auto suf() { return suf_; }
+
+    // Returns the backward routing tags of the staged slab.
+    auto beta() const { return beta_; }
+
+    // Returns the backward routing tags of the staged slab.
+    auto beta() { return beta_; }
 
     // Returns the ID of the partition this slab's content belongs to.
     auto p_id() const { return p_id_; }

@@ -542,11 +542,7 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-#ifndef TESTS
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_);
-#else
             backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_, P_id);
-#endif
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -716,6 +712,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
+        backend_->set_context(ell);
         drive_pipeline<true>();
     }
 

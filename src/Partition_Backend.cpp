@@ -22,9 +22,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
     , n_(n)
     , secondary_bits_(secondary_bits)
     , k_(0)
-#ifdef TESTS
     , P_id(P_id)
-#endif
 {}
 
 
@@ -33,6 +31,17 @@ void Partition_Backend::read_prefixes(Staging_Slab& s) const
     INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
 
     read_prefix_chunk(s.p_id(), s.off(), s.size(), s.suf(), s.key());
+
+    // Gather the backward routing tags of the read suffixes.
+    {
+        const idx_t* const suf = s.suf();
+        p_id_t* const beta = s.beta();
+        for(idx_t i = 0; i < s.size(); ++i)
+        {
+            const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
+            beta[i] = (j >= ctx_ ? P_id[j - ctx_] : 0); // Backward tag.
+        }
+    }
 }
 
 
@@ -40,6 +49,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 {
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());
+    p_id_t* const beta = s.beta();
 
     {
         INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
@@ -73,6 +83,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
             const auto phi = bit_layout::tag_of(v); // Forward tag of `j` for this generation.
             suf[i] = bit_layout::pack(j, phi);  // Writeback suffix to slab with its forward tag packed in.
             key[i] = (key[i] << secondary_bits_) | bit_layout::rank_of(v);
+            beta[i] = (j >= ctx_ ? P_id[j - ctx_] : 0); // Backward tag.
         }
     }
 }
