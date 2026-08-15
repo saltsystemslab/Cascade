@@ -765,12 +765,6 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 {
     PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter_p%d", static_cast<int>(p_id));
 
-    const auto part_sz = Active_sz[p_id];    // Size of this partition.
-
-    cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);  // Input and output buffers for the prefix-keys of suffixes at the device.
-    cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);   // Input and output buffers for the suffixes at the device.
-    auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
-    auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
 
     // Asynchronously upload this partition's chunks of suffixes and their prefix-keys to the device.
     {
@@ -782,39 +776,79 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     }
 
 
+    const auto part_sz = Active_sz[p_id];   // Size of this partition.
+    auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
+    auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
+
+    constexpr std::size_t BLOCK_SZ = 256;
+    const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+
+    Prefix_Key* K_sorted = nullptr; // Sorted prefix-keys.
+    idx_t* SA_sorted = nullptr; // Sorted suffixes.
+    Prefix_Key* K_ranked = nullptr; // Ranked keys.
+    idx_t* SA_ranked = nullptr; // Suffixes in ranked order (bar the active | retired split).
+
+
     // Sort the partition by the (packed-prefix, forward-tag): two-phase radix-sort.
     {
-        // Sort by forward tag.
-        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            workspace, workspace_sz,
-            suf, key,   // The tertiary (forward tag) is packed in suffix.
-            part_sz,
-            bit_layout::TAG_SHIFT, bit_layout::WORD_BITS,
-            stream[buf_id]
-        ));
+        cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
+        cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
 
-        // Sort by prefix-key.
-        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            workspace, workspace_sz,
-            key, suf,
-            part_sz,
-            Prefix_Key_Decomposer{},
-            0, ELL_WORDS * 64,
-            stream[buf_id]
-        ));
+        // Sort by the forward tag.
+        {
+            // Populate identity permutation.
+            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            // Sort the forward tags.
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                workspace, workspace_sz,
+                suf, perm,  // The forward tag is packed in suffix.
+                part_sz,
+                static_cast<int>(bit_layout::TAG_SHIFT), static_cast<int>(bit_layout::WORD_BITS),
+                stream[buf_id]
+            ));
+
+            // Shuffle keys per the forward-tag-sorted permutation.
+            shuffle_kernel<Prefix_Key, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (key_buf[buf_id][1], key_buf[buf_id][0], perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+        }
+
+        // Sort by the packed-prefix.
+        {
+            // Populate identity permutation.
+            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            // Sort the packed-prefixes.
+            cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][1], key_buf[buf_id][0]);
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                workspace, workspace_sz,
+                key, perm,
+                part_sz,
+                Prefix_Key_Decomposer{},
+                0, ELL_WORDS * 64,
+                stream[buf_id]
+            ));
+
+            // Shuffle suffixes per the packed-prefix-sorted permutation.
+            shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            K_sorted = key.Current(), K_ranked = key.Alternate();
+            SA_sorted = suf.Alternate(), SA_ranked = suf.Current();
+        }
     }
 
 
     // Rank and filter the sort-output.
-    const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
-        const Prefix_Key* const K_sorted = key_buf[buf_id][sort_op_selector];   // The sort-output.
-        const idx_t* const SA_sorted = suf_buf[buf_id][sort_op_selector];   // The associated suffixes.
-        idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
-        idx_t* const key_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);    // Ranks of the distinct keys.
-
-        constexpr std::size_t BLOCK_SZ = 256;
-        const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+        idx_t* const key_group_rank = reinterpret_cast<idx_t*>(K_ranked);   // Distinct key groups' ranks.
+        idx_t* const key_rank = reinterpret_cast<idx_t*>(K_sorted); // Distinct keys' ranks.
 
         // Track groups with distinct prefixes and rank by the groups' offsets, and mark non-unique keys as active.
         {
@@ -834,16 +868,11 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
         // Group non-unique rank keys and suffixes to the head and the rest to the tail of the partition.
         {
-            const idx_t* const K_in     = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);  assert(K_in == key_rank);
-            const idx_t* const SA_in    = suf_buf[buf_id][sort_op_selector];
-            idx_t* const K_out          = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
-            idx_t* const SA_out         = suf_buf[buf_id][1 - sort_op_selector];
-
             CUDA_CHECK(cub::DevicePartition::Flagged(
                 workspace, workspace_sz,
-                thrust::make_zip_iterator(thrust::make_tuple(K_in, SA_in)),
+                thrust::make_zip_iterator(thrust::make_tuple(static_cast<const idx_t*>(key_rank), static_cast<idx_t*>(SA_sorted))),
                 is_active,
-                thrust::make_zip_iterator(thrust::make_tuple(K_out, SA_out)),
+                thrust::make_zip_iterator(thrust::make_tuple(reinterpret_cast<idx_t*>(K_ranked), SA_ranked)),
                 active_set_sz_d + p_id,
                 part_sz,
                 stream[buf_id]
@@ -854,12 +883,10 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
-        const idx_t* const K_out    = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
-        const idx_t* const SA_out   = suf_buf[buf_id][1 - sort_op_selector];
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), reinterpret_cast<idx_t*>(K_ranked) + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
     }
 }
