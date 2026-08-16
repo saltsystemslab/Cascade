@@ -131,6 +131,7 @@ private:
         Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the initial-ranking sort key.
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
         p_sz_t* perm_buf[STREAM_C][2];      // Input and output buffers for sort's permutation-indices, per stream; required for sorting with physically disjoint keys.
+        p_id_t* beta_buf[STREAM_C][2];      // Input and output buffers for the backward routing tags, per stream.
         void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;           // Size of the `cub` workspace.
 

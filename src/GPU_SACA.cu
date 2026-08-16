@@ -64,7 +64,9 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     {
         for(std::size_t r = 0; r < 2; ++r)
             key_buf[b][r] = nullptr,
-            suf_buf[b][r] = nullptr;
+            suf_buf[b][r] = nullptr,
+            perm_buf[b][r] = nullptr,
+            beta_buf[b][r] = nullptr;
 
         workspace_buf[b] = nullptr;
         is_active_buf[b] = nullptr;
@@ -92,6 +94,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
             CUDA_CHECK(cudaFree(key_buf[b][r]));
             CUDA_CHECK(cudaFree(suf_buf[b][r]));
             CUDA_CHECK(cudaFree(perm_buf[b][r]));
+            CUDA_CHECK(cudaFree(beta_buf[b][r]));
         }
 
         CUDA_CHECK(cudaFree(workspace_buf[b]));
@@ -249,7 +252,8 @@ template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
     // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sort, plus one flag byte to mark its activeness in subsequent steps.
-    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t);   // 2 x (key + suffix + permutation-index) ping-pong + activeness flag.
+    // 2 x (key + suffix + permutation-index + backward tag) ping-pong + activeness flag.
+    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t);
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
@@ -389,8 +393,9 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     // Each suffix in each stream needs:
     //      1. `cub::DoubleBuffer` keys, input and output (2 x `DEV_KEY_BYTES`);
     //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
-    //      3. `cub::DoubleBuffer` permutation-indices, input and output (2 x `p_sz_t`);
-    //      4. activeness-flag, output (1 x `uint8_t`).
+    //      3. `cub::DoubleBuffer` permutation-indices, generated and transformed (2 x `p_sz_t`);
+    //      4. `cub::DoubleBuffer` backward routing tags, input and output (2 x `p_id_t`);
+    //      5. activeness-flag, output (1 x `uint8_t`).
     // `cub` itself requires a workspace for sort and scan.
     // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
@@ -404,7 +409,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t)) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -423,6 +428,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
                 CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * DEV_KEY_BYTES));
                 CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
                 CUDA_CHECK(cudaMalloc(&perm_buf[b][r], P_sz_max * sizeof(p_sz_t)));
+                CUDA_CHECK(cudaMalloc(&beta_buf[b][r], P_sz_max * sizeof(p_id_t)));
             }
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
