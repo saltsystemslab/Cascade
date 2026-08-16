@@ -775,6 +775,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         {
             CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0] + s->off(), s->key(), s->size() * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0] + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(beta_buf[buf_id][0] + s->off(), s->beta(), s->size() * sizeof(p_id_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
 
@@ -790,12 +791,14 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     idx_t* SA_sorted = nullptr; // Sorted suffixes.
     Prefix_Key* K_ranked = nullptr; // Ranked keys.
     idx_t* SA_ranked = nullptr; // Suffixes in ranked order (bar the active | retired split).
+    p_id_t* beta_ranked = nullptr;  // Backward tags corresponding to the ranked suffixes.
 
 
     // Sort the partition by the (packed-prefix, forward-tag): two-phase radix-sort.
     {
         cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
         cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
+        cub::DoubleBuffer<p_id_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
 
         // Sort by the forward tag.
         {
@@ -813,9 +816,13 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
                 stream[buf_id]
             ));
 
-            // Shuffle keys per the forward-tag-sorted permutation.
+            // Shuffle keys and backward tags per the forward-tag-sorted permutation.
             shuffle_kernel<Prefix_Key, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (key_buf[buf_id][1], key_buf[buf_id][0], perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta_buf[buf_id][1], beta_buf[buf_id][0], perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -837,13 +844,18 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
                 stream[buf_id]
             ));
 
-            // Shuffle suffixes per the packed-prefix-sorted permutation.
+            // Shuffle suffixes and backward tags per the packed-prefix-sorted permutation.
             shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
 
+            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta_buf[buf_id][0], beta_buf[buf_id][1], perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
             K_sorted = key.Current(), K_ranked = key.Alternate();
             SA_sorted = suf.Alternate(), SA_ranked = suf.Current();
+            beta_ranked = beta_buf[buf_id][0];
         }
     }
 
@@ -890,6 +902,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         {
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), reinterpret_cast<idx_t*>(K_ranked) + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            (void)beta_ranked;
         }
     }
 }
@@ -1029,6 +1042,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         {
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(key_buf[buf_id][0]) + s->off(), s->key(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0] + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(beta_buf[buf_id][0] + s->off(), s->beta(), s->size() * sizeof(p_id_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
 
@@ -1044,12 +1058,14 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     idx_t* SA_sorted = nullptr; // Sorted suffixes.
     idx_t* K_re_ranked = nullptr;   // Re-ranked keys.
     idx_t* SA_re_ranked = nullptr;  // Suffixes in re-ranked order (bar the active | retired split).
+    p_id_t* beta_re_ranked = nullptr;   // Backward tags corresponding to the re-ranked suffixes.
 
 
     // Sort the partition by (primary, secondary, tertiary): two phase radix sort.
     {
         cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
         cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
+        cub::DoubleBuffer<p_id_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
 
         // Sort by the tertiary (forward tag).
         {
@@ -1067,9 +1083,13 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 stream[buf_id]
             ));
 
-            // Shuffle keys per the forward-tag-sorted permutation.
+            // Shuffle keys and backward tags per the forward-tag-sorted permutation.
             shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (reinterpret_cast<idx_t*>(key_buf[buf_id][1]), reinterpret_cast<const idx_t*>(key_buf[buf_id][0]), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta_buf[buf_id][1], beta_buf[buf_id][0], perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -1091,13 +1111,18 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 stream[buf_id]
             ));
 
-            // Shuffle suffixes per the (primary, secondary)-sorted permutation.
+            // Shuffle suffixes and backward tags per the (primary, secondary)-sorted permutation.
             shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
 
+            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta_buf[buf_id][0], beta_buf[buf_id][1], perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
             K_sorted = key.Current(), K_re_ranked = key.Alternate();
             SA_sorted = suf.Alternate(), SA_re_ranked = suf.Current();
+            beta_re_ranked = beta_buf[buf_id][0];
         }
     }
 
@@ -1161,6 +1186,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         {
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            (void)beta_re_ranked;
         }
     }
 }
