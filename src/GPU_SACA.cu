@@ -404,7 +404,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
