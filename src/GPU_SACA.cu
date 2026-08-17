@@ -520,6 +520,8 @@ void GPU_SACA<T_sym_>::setup_staging()
         FS.enqueue(s_id);
 
     part_assembly = std::make_unique<Partition_Assembly[]>(p_);
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        part_assembly[p_id].msg_off.resize(p_ + 1);
 }
 
 
@@ -817,6 +819,9 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     Prefix_Key* K_ranked = nullptr; // Ranked keys.
     idx_t* SA_ranked = nullptr; // Suffixes in ranked order (bar the active | retired split).
     p_id_t* beta_ranked = nullptr;  // Backward tags corresponding to the ranked suffixes.
+    idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
+    idx_t* msg_rank = nullptr;  // Global ranks sent with the messages.
+    p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
 
 
     // Sort the partition by the (packed-prefix, forward-tag): two-phase radix-sort.
@@ -923,9 +928,9 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
-        p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
-        idx_t* const msg_target = reinterpret_cast<idx_t*>(K_sorted);   // Target recipient suffixes for the messages.
-        idx_t* const msg_rank = msg_target + part_sz;  // Global ranks sent with the messages.
+        msg_target = reinterpret_cast<idx_t*>(K_sorted);
+        msg_rank = msg_target + part_sz;
+        msg_off = msg_off_buf[buf_id];
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
         count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
@@ -952,7 +957,11 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), reinterpret_cast<idx_t*>(K_ranked) + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             (void)beta_ranked;
+            CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + s->off(), s->size() * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
+
+        CUDA_CHECK(cudaMemcpyAsync(p_assembly.msg_off.data(), msg_off, (p_ + 1) * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 
@@ -1109,6 +1118,9 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     idx_t* K_re_ranked = nullptr;   // Re-ranked keys.
     idx_t* SA_re_ranked = nullptr;  // Suffixes in re-ranked order (bar the active | retired split).
     p_id_t* beta_re_ranked = nullptr;   // Backward tags corresponding to the re-ranked suffixes.
+    p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
+    idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
+    idx_t* msg_rank = nullptr;  // Global ranks sent with the messages.
 
 
     // Sort the partition by (primary, secondary, tertiary): two phase radix sort.
@@ -1232,9 +1244,9 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
-        p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
-        idx_t* const msg_target = K_sorted; // Target recipient suffixes for the messages.
-        idx_t* const msg_rank = K_sorted + part_sz; // Global ranks sent with the messages.
+        msg_target = K_sorted;
+        msg_rank = msg_target + part_sz;
+        msg_off = msg_off_buf[buf_id];
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
         count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
@@ -1261,7 +1273,11 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             (void)beta_re_ranked;
+            CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + s->off(), s->size() * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
+
+        CUDA_CHECK(cudaMemcpyAsync(p_assembly.msg_off.data(), msg_off, (p_ + 1) * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 

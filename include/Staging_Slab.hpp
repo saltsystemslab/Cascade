@@ -91,10 +91,11 @@ public:
 };
 
 
-// Assembly / chain of slabs making up partition.
+// Assembly / chain of slabs making up a partition.
 struct Partition_Assembly
 {
     std::vector<Staging_Slab*> slab;    // Collection of the slabs containing the partition's content.
+    std::vector<p_sz_t> msg_off;    // Offsets of the destination-partitions into the messages (present across the slabs, in order) produced by this partition.
     std::atomic<idx_t> chunks_to_read;  // Count of chunks still remaining to be read for the partition.
 };
 
