@@ -70,6 +70,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
 
         workspace_buf[b] = nullptr;
         is_active_buf[b] = nullptr;
+        msg_off_buf[b] = nullptr;
     }
 
     active_set_sz_d = nullptr;
@@ -99,6 +100,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
         CUDA_CHECK(cudaFree(workspace_buf[b]));
         CUDA_CHECK(cudaFree(is_active_buf[b]));
+        CUDA_CHECK(cudaFree(msg_off_buf[b]));
     }
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
@@ -397,8 +399,9 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     //      3. `cub::DoubleBuffer` permutation-indices, generated and transformed (2 x `p_sz_t`);
     //      4. `cub::DoubleBuffer` backward routing tags, input and output (2 x `p_id_t`);
     //      5. activeness-flag, output (1 x `uint8_t`).
+    // Message-collation requires `~2p` counts (per-partition offset and cursor).
     // `cub` itself requires a workspace for sort and scan.
-    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + 2(p + 1) * sizeof(p_sz_t) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
     const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
@@ -410,7 +413,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t)) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t)) + 2 * (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -434,6 +437,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
             CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
+            CUDA_CHECK(cudaMalloc(&msg_off_buf[b], 2 * (p_ + 1) * sizeof(p_sz_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));

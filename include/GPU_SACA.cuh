@@ -10,7 +10,6 @@
 #include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
 #include "bit-layout.hpp"
-#include "utility.cuh"
 #include "env.hpp"
 
 #include "concurrentqueue/blockingconcurrentqueue.h"
@@ -135,6 +134,7 @@ private:
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
         p_sz_t* perm_buf[STREAM_C][2];      // Input and output buffers for sort's permutation-indices, per stream; required for sorting with physically disjoint keys.
         p_id_t* beta_buf[STREAM_C][2];      // Input and output buffers for the backward routing tags, per stream.
+        p_sz_t* msg_off_buf[STREAM_C];      // Buffer for message offsets per destination-partition, followed by a cursor array to iterate through the actual messages, per stream.
         void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;           // Size of the `cub` workspace.
 
