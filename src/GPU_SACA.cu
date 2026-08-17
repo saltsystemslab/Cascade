@@ -387,6 +387,15 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
         ));
     }
 
+    std::size_t msg_off_scan_workspace_sz = 0;
+    {
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            nullptr, msg_off_scan_workspace_sz,
+            static_cast<p_sz_t*>(nullptr), static_cast<p_sz_t*>(nullptr),
+            part_sz // Over-provisioned: message-offset sum-scans are over `p_ + 1` entries and `p_` isn't available here.
+        ));
+    }
+
     return std::max({init_rank_workspace_sz, exponentiation_workspace_size, scan_workspace_sz, compaction_workspace_sz});
 }
 
@@ -912,6 +921,31 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     }
 
 
+    // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
+    {
+        p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
+        p_sz_t* const cursor = msg_off + (p_ + 1);  // Cursor pointers to iterate over the actual message content per destination-partition.
+        idx_t* const msg_rec = reinterpret_cast<idx_t*>(K_sorted);  // Target recipient suffixes for the messages.
+        idx_t* const msg_rank = msg_rec + part_sz;  // Global ranks sent with the messages.
+
+        CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
+        count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_ranked, beta_ranked, part_sz, ctx_, msg_off);
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            workspace, workspace_sz,
+            msg_off, cursor,
+            p_ + 1,
+            stream[buf_id]
+        ));
+
+        emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, cursor);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         for(auto* s : p_assembly.slab)
@@ -1194,6 +1228,31 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 stream[buf_id]
             ));
         }
+    }
+
+
+    // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
+    {
+        p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
+        p_sz_t* const cursor = msg_off + (p_ + 1);  // Cursor pointers to iterate over the actual message content per destination-partition.
+        idx_t* const msg_rec = K_sorted;   // Target recipient suffixes for the messages.
+        idx_t* const msg_rank = K_sorted + part_sz; // Global ranks sent with the messages.
+
+        CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
+        count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_re_ranked, beta_re_ranked, part_sz, ctx_, msg_off);
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            workspace, workspace_sz,
+            msg_off, cursor,
+            p_ + 1,
+            stream[buf_id]
+        ));
+
+        emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, cursor);
+        CUDA_CHECK(cudaGetLastError());
     }
 
 
