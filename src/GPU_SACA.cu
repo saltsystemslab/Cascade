@@ -372,11 +372,12 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 
     std::size_t compaction_workspace_sz = 0;
     {
-        auto in_zip  = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr)));
-        auto zip_out = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr)));
+        auto in_zip  = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr), static_cast<p_id_t*>(nullptr)));
+        auto zip_out = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr), static_cast<p_id_t*>(nullptr)));
         CUDA_CHECK(cub::DevicePartition::Flagged(
             nullptr, compaction_workspace_sz,
-            in_zip, static_cast<uint8_t*>(nullptr),
+            in_zip,
+            static_cast<uint8_t*>(nullptr),
             zip_out,
             static_cast<idx_t*>(nullptr),
             part_sz
@@ -485,6 +486,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         std::cerr << "\tWriter-pool size: " << writer_c_ << "\n";
         std::cerr << "\tSlab-pool size: " << slab_c_ << "\n";
         std::cerr << "\tSlab-capacity:  " << chunk_cap_ << "\n";
+        std::cerr << "\tSlab-pool memory: " << slab_pool_memory() << "B\n";
 #endif
     }
 }
@@ -788,7 +790,8 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
     Prefix_Key* K_sorted = nullptr; // Sorted prefix-keys.
-    idx_t* SA_sorted = nullptr; // Sorted suffixes.
+    idx_t* SA_sorted = nullptr; // Suffixes corresponding to the sorted prefix-keys.
+    p_id_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
     Prefix_Key* K_ranked = nullptr; // Ranked keys.
     idx_t* SA_ranked = nullptr; // Suffixes in ranked order (bar the active | retired split).
     p_id_t* beta_ranked = nullptr;  // Backward tags corresponding to the ranked suffixes.
@@ -855,7 +858,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
             K_sorted = key.Current(), K_ranked = key.Alternate();
             SA_sorted = suf.Alternate(), SA_ranked = suf.Current();
-            beta_ranked = beta_buf[buf_id][0];
+            beta_sorted = beta_buf[buf_id][0], beta_ranked = beta_buf[buf_id][1];
         }
     }
 
@@ -885,9 +888,9 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         {
             CUDA_CHECK(cub::DevicePartition::Flagged(
                 workspace, workspace_sz,
-                thrust::make_zip_iterator(thrust::make_tuple(static_cast<const idx_t*>(key_rank), static_cast<idx_t*>(SA_sorted))),
+                thrust::make_zip_iterator(thrust::make_tuple(key_rank, SA_sorted, beta_sorted)),
                 is_active,
-                thrust::make_zip_iterator(thrust::make_tuple(reinterpret_cast<idx_t*>(K_ranked), SA_ranked)),
+                thrust::make_zip_iterator(thrust::make_tuple(reinterpret_cast<idx_t*>(K_ranked), SA_ranked, beta_ranked)),
                 active_set_sz_d + p_id,
                 part_sz,
                 stream[buf_id]
@@ -1055,7 +1058,8 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
     idx_t* K_sorted = nullptr;  // Sorted keys.
-    idx_t* SA_sorted = nullptr; // Sorted suffixes.
+    idx_t* SA_sorted = nullptr; // Suffixes corresponding to the sorted keys.
+    p_id_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
     idx_t* K_re_ranked = nullptr;   // Re-ranked keys.
     idx_t* SA_re_ranked = nullptr;  // Suffixes in re-ranked order (bar the active | retired split).
     p_id_t* beta_re_ranked = nullptr;   // Backward tags corresponding to the re-ranked suffixes.
@@ -1122,7 +1126,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
             K_sorted = key.Current(), K_re_ranked = key.Alternate();
             SA_sorted = suf.Alternate(), SA_re_ranked = suf.Current();
-            beta_re_ranked = beta_buf[buf_id][0];
+            beta_sorted = beta_buf[buf_id][0], beta_re_ranked = beta_buf[buf_id][1];
         }
     }
 
@@ -1169,9 +1173,9 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         {
             CUDA_CHECK(cub::DevicePartition::Flagged(
                 workspace, workspace_sz,
-                thrust::make_zip_iterator(thrust::make_tuple(static_cast<const idx_t*>(K_sorted), static_cast<idx_t*>(SA_sorted))),
+                thrust::make_zip_iterator(thrust::make_tuple(K_sorted, SA_sorted, beta_sorted)),
                 is_active,
-                thrust::make_zip_iterator(thrust::make_tuple(K_re_ranked, SA_re_ranked)),
+                thrust::make_zip_iterator(thrust::make_tuple(K_re_ranked, SA_re_ranked, beta_re_ranked)),
                 active_set_sz_d + p_id,
                 part_sz,
                 stream[buf_id]
