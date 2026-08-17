@@ -924,8 +924,8 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
         p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
-        idx_t* const msg_rec = reinterpret_cast<idx_t*>(K_sorted);  // Target recipient suffixes for the messages.
-        idx_t* const msg_rank = msg_rec + part_sz;  // Global ranks sent with the messages.
+        idx_t* const msg_target = reinterpret_cast<idx_t*>(K_sorted);   // Target recipient suffixes for the messages.
+        idx_t* const msg_rank = msg_target + part_sz;  // Global ranks sent with the messages.
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
         count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
@@ -940,7 +940,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         ));
 
         emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, msg_off);
+            (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, P_off[p_id], msg_target, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1233,7 +1233,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
         p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
-        idx_t* const msg_rec = K_sorted;   // Target recipient suffixes for the messages.
+        idx_t* const msg_target = K_sorted; // Target recipient suffixes for the messages.
         idx_t* const msg_rank = K_sorted + part_sz; // Global ranks sent with the messages.
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
@@ -1249,7 +1249,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         ));
 
         emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, msg_off);
+            (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, P_off[p_id], msg_target, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
     }
 

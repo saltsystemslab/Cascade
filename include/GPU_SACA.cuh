@@ -419,7 +419,7 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
     if(i >= n)
         return;
 
-    if(bit_layout::suffix_of(SA[i]) < ctx)  // No valid potential recipient for next generation.
+    if(bit_layout::suffix_of(SA[i]) < ctx)  // No valid target recipient for next generation.
         return;
 
     atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + beta[i], static_cast<unsigned int>(1));
@@ -427,11 +427,11 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
 
 
 // Emits the rank-propagation messages from cohort `SA` (of size `n`) into
-// `msg_rec` (recipient, computed from the sender and the current generation's
-// context-size `ctx`) and `msg_rank` (global rank, computed from local rank `K`
-// and this partition's global offset `p_off` into the final SA). Backward
-// routing tag for each sender from `SA` is in the corresponding entry in
-// `beta`. Messages are collated by destination partitions using the per-
+// `msg_target` (target recipient, computed from the sender and the current
+// generation's context-size `ctx`) and `msg_rank` (global rank, computed from
+// local rank `K` and this partition's global offset `p_off` into the final SA).
+// Backward routing tag for each sender from `SA` is in the corresponding entry
+// in `beta`. Messages are collated by destination partitions using the per-
 // partition append-offsets in `msg_off`.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
@@ -440,7 +440,7 @@ __global__
 void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA,
                             const p_id_t* const __restrict__ beta,
                             const idx_t n, const idx_t ctx, const idx_t p_off,
-                            idx_t* const __restrict__ msg_rec, idx_t* const __restrict__ msg_rank,
+                            idx_t* const __restrict__ msg_target, idx_t* const __restrict__ msg_rank,
                             p_sz_t* const __restrict__ msg_off)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -448,11 +448,11 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
         return;
 
     const auto j = bit_layout::suffix_of((SA[i]));  // Suffix.
-    if(j < ctx) // No valid potential recipient for next generation.
+    if(j < ctx) // No valid target recipient for next generation.
         return;
 
     const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + beta[i], static_cast<unsigned int>(1));  // Where to put the `beta[i]`'th partition's next incoming message.
-    msg_rec[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));   // Potential recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
+    msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));   // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
     msg_rank[slot] = p_off + K[i];  // `j`'s global rank.
 }
 
