@@ -10,6 +10,8 @@ Staging_Slab::Staging_Slab():
       key_(nullptr)
     , suf_(nullptr)
     , beta_(nullptr)
+    , msg_dest_(nullptr)
+    , msg_rank_(nullptr)
 {}
 
 
@@ -18,6 +20,8 @@ Staging_Slab::~Staging_Slab()
     CUDA_CHECK(deallocate_host(key_));
     CUDA_CHECK(deallocate_host(suf_));
     CUDA_CHECK(deallocate_host(beta_));
+    CUDA_CHECK(deallocate_host(msg_dest_));
+    CUDA_CHECK(deallocate_host(msg_rank_));
 }
 
 
@@ -26,6 +30,8 @@ void Staging_Slab::allocate(idx_t sz)
     CUDA_CHECK(pinned_allocate_host(key_, sz));
     CUDA_CHECK(pinned_allocate_host(suf_, sz));
     CUDA_CHECK(pinned_allocate_host(beta_, sz));
+    CUDA_CHECK(pinned_allocate_host(msg_dest_, sz));
+    CUDA_CHECK(pinned_allocate_host(msg_rank_, sz));
 }
 
 

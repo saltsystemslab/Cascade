@@ -510,7 +510,7 @@ void GPU_SACA<T_sym_>::setup_staging()
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 {
-    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(p_id_t));
+    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(p_id_t) + MESSAGE_BYTES);
 }
 
 
