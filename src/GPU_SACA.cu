@@ -409,9 +409,9 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     //      3. `cub::DoubleBuffer` permutation-indices, generated and transformed (2 x `p_sz_t`);
     //      4. `cub::DoubleBuffer` backward routing tags, input and output (2 x `p_id_t`);
     //      5. activeness-flag, output (1 x `uint8_t`).
-    // Message-collation requires `~2p` counts (per-partition offset and cursor).
+    // Message-collation requires `p + 1` counts (per-partition offset).
     // `cub` itself requires a workspace for sort and scan.
-    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + 2(p + 1) * sizeof(p_sz_t) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + (p + 1) * sizeof(p_sz_t) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
     const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
@@ -423,7 +423,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t)) + 2 * (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -447,7 +447,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
             CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
-            CUDA_CHECK(cudaMalloc(&msg_off_buf[b], 2 * (p_ + 1) * sizeof(p_sz_t)));
+            CUDA_CHECK(cudaMalloc(&msg_off_buf[b], (p_ + 1) * sizeof(p_sz_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
@@ -924,7 +924,6 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
         p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
-        p_sz_t* const cursor = msg_off + (p_ + 1);  // Cursor pointers to iterate over the actual message content per destination-partition.
         idx_t* const msg_rec = reinterpret_cast<idx_t*>(K_sorted);  // Target recipient suffixes for the messages.
         idx_t* const msg_rank = msg_rec + part_sz;  // Global ranks sent with the messages.
 
@@ -935,13 +934,13 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
         CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
             workspace, workspace_sz,
-            msg_off, cursor,
+            msg_off, msg_off,
             p_ + 1,
             stream[buf_id]
         ));
 
         emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, cursor);
+            (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1234,7 +1233,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
         p_sz_t* const msg_off = msg_off_buf[buf_id];    // Offsets for messages into message buffers per destination-partition.
-        p_sz_t* const cursor = msg_off + (p_ + 1);  // Cursor pointers to iterate over the actual message content per destination-partition.
         idx_t* const msg_rec = K_sorted;   // Target recipient suffixes for the messages.
         idx_t* const msg_rank = K_sorted + part_sz; // Global ranks sent with the messages.
 
@@ -1245,13 +1243,13 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
         CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
             workspace, workspace_sz,
-            msg_off, cursor,
+            msg_off, msg_off,
             p_ + 1,
             stream[buf_id]
         ));
 
         emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, cursor);
+            (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, P_off[p_id], msg_rec, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
     }
 

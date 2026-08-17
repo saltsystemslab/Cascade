@@ -136,7 +136,7 @@ private:
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
         p_sz_t* perm_buf[STREAM_C][2];      // Input and output buffers for sort's permutation-indices, per stream; required for sorting with physically disjoint keys.
         p_id_t* beta_buf[STREAM_C][2];      // Input and output buffers for the backward routing tags, per stream.
-        p_sz_t* msg_off_buf[STREAM_C];      // Buffer for message offsets per destination-partition, followed by a cursor array to iterate through the actual messages, per stream.
+        p_sz_t* msg_off_buf[STREAM_C];      // Buffer for message offsets per destination-partition, per stream.
         void* workspace_buf[STREAM_C];      // Scratch space for `cub` radix-sort and scan, per stream.
         std::size_t workspace_sz;           // Size of the `cub` workspace.
 
@@ -432,7 +432,7 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
 // and this partition's global offset `p_off` into the final SA). Backward
 // routing tag for each sender from `SA` is in the corresponding entry in
 // `beta`. Messages are collated by destination partitions using the per-
-// partition append-offsets in `cursor`.
+// partition append-offsets in `msg_off`.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
@@ -441,7 +441,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
                             const p_id_t* const __restrict__ beta,
                             const idx_t n, const idx_t ctx, const idx_t p_off,
                             idx_t* const __restrict__ msg_rec, idx_t* const __restrict__ msg_rank,
-                            p_sz_t* const __restrict__ cursor)
+                            p_sz_t* const __restrict__ msg_off)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -451,7 +451,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
     if(j < ctx) // No valid potential recipient for next generation.
         return;
 
-    const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(cursor) + beta[i], static_cast<unsigned int>(1));   // Where to put the `beta[i]`'th partition's next incoming message.
+    const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + beta[i], static_cast<unsigned int>(1));  // Where to put the `beta[i]`'th partition's next incoming message.
     msg_rec[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));   // Potential recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
     msg_rank[slot] = p_off + K[i];  // `j`'s global rank.
 }
