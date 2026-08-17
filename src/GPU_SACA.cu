@@ -47,6 +47,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , key_bits_(0)
     , P_id(nullptr)
     , rho(nullptr)
+    , ctx_(0)
     , null_d(nullptr)
     , workspace_sz(0)
 {
@@ -717,6 +718,14 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
 template <typename T_sym_>
+void GPU_SACA<T_sym_>::set_context(const idx_t ctx)
+{
+    ctx_ = ctx;
+    backend_->set_context(ctx_);
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
     INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(0, 0, n_));
@@ -724,7 +733,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
-        backend_->set_context(ell);
+        set_context(ell);
         drive_pipeline<true>();
     }
 
@@ -1306,7 +1315,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
         {
             // PROFILE_SCOPE("cpu_gather"); // TODO: relocate properly.
-            backend_->set_stride(k);
+            set_context(2 * k);
         }
 
         // Sort-and-rank each partition.

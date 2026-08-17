@@ -32,7 +32,7 @@ private:
     const idx_t n_; // Text-size.
     const idx_t secondary_bits_;    // Bit-width of the secondary-key of a suffix: `\ceil(\log_2(n))`.
     idx_t k_;   // Current stride (half of the context this generation is resolving) of the suffixes in the algorithm execution.
-    idx_t ctx_; // Current context this generation is resolving.
+    idx_t ctx_; // Context-size the current generation is resolving.
     const p_id_t* const P_id;   // Partition-IDs.
 
 
@@ -48,10 +48,6 @@ public:
 
     Partition_Backend(const Partition_Backend&) = delete;
     Partition_Backend& operator=(const Partition_Backend&) = delete;
-
-    // Sets the stride to `k` for the rank-gather operations during partition-
-    // reading.
-    void set_stride(const idx_t k) { k_ = k; ctx_ = 2 * k; }
 
     // Sets the context to `ctx` for the backward-tag fetch operations during
     // prefix-key reading.

@@ -70,6 +70,8 @@ private:
 
     idx_t* rho; // Global rank of the suffixes.
 
+    idx_t ctx_; // Context-size the current generation is resolving.
+
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
     cudaStream_t stream[STREAM_C];  // CUDA streams for triple-buffered overlap of PCIe transfers and kernel executions.
 
@@ -171,6 +173,9 @@ private:
 
     // Partitions the suffixes based on the selected pivots.
     void partition();
+
+    // Sets the context-size that the current generation is resolving to `ctx`.
+    void set_context(idx_t ctx);
 
     // Ranks the suffixes in their partitions based on the prefixes associated
     // to them during partitioning.
