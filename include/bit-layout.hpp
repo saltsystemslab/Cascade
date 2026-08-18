@@ -19,6 +19,7 @@ namespace gpu_saca::bit_layout
 constexpr idx_t WORD_BITS = 64;
 constexpr idx_t TAG_BITS = 16;  // Forward-tag: a partition-ID.
 constexpr idx_t VAL_BITS = WORD_BITS - TAG_BITS;    // 48: suffix-indices and global ranks up to ~2.8e14.
+constexpr idx_t SUF_BITS = VAL_BITS;
 
 static_assert(TAG_BITS + VAL_BITS == WORD_BITS, "fields must tile a full word");
 static_assert(sizeof(p_id_t) * 8 <= TAG_BITS, "tag field must hold be able to hold `p_id_t`");

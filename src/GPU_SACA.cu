@@ -848,7 +848,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
                 stream[buf_id]
             ));
 
-            // Shuffle keys and backward tags per the forward-tag-sorted permutation.
+            // Shuffle keys and backward tags per the forward-tag-order permutation.
             shuffle_kernel<Prefix_Key, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (key.Alternate(), key.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
@@ -877,7 +877,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
                 stream[buf_id]
             ));
 
-            // Shuffle suffixes and backward tags per the packed-prefix-sorted permutation.
+            // Shuffle suffixes and backward tags per the packed-prefix-order permutation.
             shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
@@ -1144,6 +1144,33 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     idx_t* msg_rank = nullptr;  // Global ranks sent with the messages.
 
 
+    // Sort the partition by suffix indices and consume the received messages.
+    {
+        iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+            workspace, workspace_sz,
+            suf, perm,
+            part_sz,
+            0, static_cast<int>(bit_layout::SUF_BITS),
+            stream[buf_id]
+        ));
+
+        // Shuffle keys and backward tags per the suffix-index-order permutation.
+        shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (key.Alternate(), key.Current(), perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+        key.selector ^= 1;
+
+        shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+        beta.selector ^= 1;
+    }
+
+
     // Sort the partition by (primary, secondary, tertiary): two phase radix sort.
     {
         // Sort by the tertiary (forward tag).
@@ -1162,12 +1189,11 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 stream[buf_id]
             ));
 
-            // Shuffle keys and backward tags per the forward-tag-sorted permutation.
+            // Shuffle keys and backward tags per the forward-tag-order permutation.
             shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (key.Alternate(), key.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
             key.selector ^= 1;
-
 
             shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
@@ -1192,7 +1218,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 stream[buf_id]
             ));
 
-            // Shuffle suffixes and backward tags per the (primary, secondary)-sorted permutation.
+            // Shuffle suffixes and backward tags per the (primary, secondary)-order permutation.
             shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
