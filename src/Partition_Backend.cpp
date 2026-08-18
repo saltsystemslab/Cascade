@@ -2,6 +2,7 @@
 #include "Partition_Backend.hpp"
 #include "bit-layout.hpp"
 #include "isa-instrument.hpp"
+#include "utility.cuh"
 #include "tests.hpp"
 
 #include <cstdlib>
@@ -11,7 +12,8 @@ namespace gpu_saca
 {
 
 Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, idx_t* const rho, idx_t n, const idx_t secondary_bits, const p_id_t* const P_id):
-      plan_(P_cap, fixed_bytes, sizeof(Prefix_Key))
+      p_(P_cap.size())
+    , plan_(P_cap, fixed_bytes, sizeof(Prefix_Key))
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
     , rho_(rho)
@@ -19,7 +21,15 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
     , secondary_bits_(secondary_bits)
     , k_(0)
     , P_id(P_id)
-{}
+{
+    CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
+}
+
+
+Partition_Backend::~Partition_Backend()
+{
+    CUDA_CHECK(deallocate_host(msg_off_));
+}
 
 
 void Partition_Backend::read_prefixes(Staging_Slab& s) const

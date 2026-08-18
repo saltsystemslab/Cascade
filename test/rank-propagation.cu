@@ -12,7 +12,7 @@ namespace gpu_saca::test
 {
 
 template <typename T_sym_>
-bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self, const std::vector<p_sz_t>& msg_off)
+bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self, const p_sz_t* const msg_off)
 {
     const auto p = self->p_;
     const auto msg_count = msg_off[p - 1];
@@ -108,9 +108,9 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
 
 // Template instantiations for the required instances.
 
-template bool validate_messages(const Staging_Slab&, const GPU_SACA<char>* self, const std::vector<p_sz_t>&);
-template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint8_t>* self, const std::vector<p_sz_t>&);
-template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint16_t>* self, const std::vector<p_sz_t>&);
-template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint32_t>* self, const std::vector<p_sz_t>&);
+template bool validate_messages(const Staging_Slab&, const GPU_SACA<char>* self, const p_sz_t*);
+template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint8_t>* self, const p_sz_t*);
+template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint16_t>* self, const p_sz_t*);
+template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint32_t>* self, const p_sz_t*);
 
 }

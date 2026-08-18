@@ -520,8 +520,6 @@ void GPU_SACA<T_sym_>::setup_staging()
         FS.enqueue(s_id);
 
     part_assembly = std::make_unique<Partition_Assembly[]>(p_);
-    for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        part_assembly[p_id].msg_off.resize(p_ + 1);
 }
 
 
@@ -957,6 +955,8 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
+        CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+
         for(auto* s : p_assembly.slab)
         {
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), reinterpret_cast<idx_t*>(K_ranked) + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -965,8 +965,6 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + s->off(), s->size() * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
-
-        CUDA_CHECK(cudaMemcpyAsync(p_assembly.msg_off.data(), msg_off, (p_ + 1) * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 
@@ -1054,13 +1052,10 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         Staging_Slab* s;
                         W.wait_dequeue(s);  // Get a processed slab.
 #ifdef TESTS
+                        if(!test::validate_messages(*s, this, backend_->msg_off(s->p_id())))
                         {
-                            const auto& p_assembly = part_assembly[s->p_id()];
-                            if(!test::validate_messages(*s, this, p_assembly.msg_off))
-                            {
-                                std::cerr << "Message consistency verification: " << "Fails" << ". Aborting.\n";
-                                std::exit(EXIT_FAILURE);
-                            }
+                            std::cerr << "Message consistency verification: " << "Fails" << ". Aborting.\n";
+                            std::exit(EXIT_FAILURE);
                         }
 #endif
                         backend_->write(*s);    // Drain the slab.
@@ -1315,6 +1310,8 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
+        CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+
         for(auto* s : p_assembly.slab)
         {
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -1323,8 +1320,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + s->off(), s->size() * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
-
-        CUDA_CHECK(cudaMemcpyAsync(p_assembly.msg_off.data(), msg_off, (p_ + 1) * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 

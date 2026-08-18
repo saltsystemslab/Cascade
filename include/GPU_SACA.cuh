@@ -224,7 +224,7 @@ private:
 
     // Provide access to private members for verification tests.
 
-    friend bool test::validate_messages<T_sym_>(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, const std::vector<p_sz_t>& msg_off);
+    friend bool test::validate_messages<T_sym_>(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, const p_sz_t* msg_off);
 
 
 public:

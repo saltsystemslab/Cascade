@@ -24,9 +24,13 @@ class Partition_Backend
 {
 private:
 
+    const p_id_t p_;    // Count of partitions.
     const Residency_Plan plan_; // Host-residency plan for the partitions.
     RAM_Backend ram_;   // Storage for the resident partition-units.
     Disk_Backend disk_; // Storage for the spilled partition-units.
+
+    p_sz_t* msg_off_;   // Storage for the exclusive-ending offsets of the destination-partitions into the messages produced by a partition.
+                        // All partitions are packed flat together, so has `p x p` entries.
 
     idx_t* rho_;    // Global ranks of the suffixes.
     const idx_t n_; // Text-size.
@@ -49,9 +53,15 @@ public:
     Partition_Backend(const Partition_Backend&) = delete;
     Partition_Backend& operator=(const Partition_Backend&) = delete;
 
+    ~Partition_Backend();
+
     // Sets the context to `ctx` for the backward-tag fetch operations during
     // prefix-key reading.
     void set_context(const idx_t ctx) { ctx_ = ctx; k_ = ctx / 2; }
+
+    // Returns the exclusive-ending offsets of the destination-partitions into
+    // the messages produced by the `p_id`'th partition.
+    auto msg_off(const p_id_t p_id) const { return msg_off_ + p_id * p_; }
 
     // Returns the `p_id`'th partition's resident suffixes, if any.
     idx_t* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }

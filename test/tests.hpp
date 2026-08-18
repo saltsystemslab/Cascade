@@ -80,7 +80,7 @@ bool is_correct_SA(const idx_t* SA, const T_sym_* T, idx_t n);
 // the corresponding partition) of groups of messages, collated by destination
 // partitions.
 template <typename T_sym_>
-bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, const std::vector<p_sz_t>& msg_off);
+bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, const p_sz_t* msg_off);
 
 }
 
