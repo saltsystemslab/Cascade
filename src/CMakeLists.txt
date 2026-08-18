@@ -7,7 +7,7 @@
 set(PROJECT_SRC
         GPU_SACA.cu
         Suffix_Buffer.cpp
-        Staging_Slab.cu
+        Staging_Slab.cpp
         Direct_File.cpp
         Spill_Store.cpp
         Disk_Backend.cpp
