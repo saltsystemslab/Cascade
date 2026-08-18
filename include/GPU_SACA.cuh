@@ -11,6 +11,7 @@
 #include "Read_Task.hpp"
 #include "bit-layout.hpp"
 #include "env.hpp"
+#include "tests.hpp"
 
 #include "concurrentqueue/blockingconcurrentqueue.h"
 
@@ -91,6 +92,8 @@ private:
         idx_t writer_c_;    // |w|: writer-threads count.
 
         std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
+
+        // TODO: the following staging data structures need to move to their dedicated class.
 
         template <typename T> using blocking_q_t = moodycamel::BlockingConcurrentQueue<T>;
         blocking_q_t<Read_Task> RT; // Chunk-read tasks.
@@ -217,6 +220,11 @@ private:
 
     // Allocates enough space into `SA` and concatenates the partitions into it.
     void concatenate_partitions(idx_t*& SA);
+
+
+    // Provide access to private members for verification tests.
+
+    friend bool test::validate_messages<T_sym_>(const Partition_Assembly& p_assembly, const GPU_SACA<T_sym_>* self);
 
 
 public:

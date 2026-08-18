@@ -41,7 +41,7 @@ bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p
         for(idx_t i = 0; i < sz; ++i)
         {
             const auto j = bit_layout::suffix_of(suf_buf[i]);
-            const auto phi = (j + ell < n ? P_id[j + ell] : 0);
+            const auto phi = (j + ell < n ? P_id[j + ell] : p_id_t(0));
             if(j >= n || P_id[j] != p_id || present[j] || pre_buf[i] != Prefix_Key::pack_prefix(T_h + j) || bit_layout::tag_of(suf_buf[i]) != phi)
                 content_match = false;
 

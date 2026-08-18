@@ -1290,6 +1290,14 @@ void CUDART_CB GPU_SACA<T_sym_>::on_partition_download(void* const arg)
     auto* const p_assembly = cb_arg->p_assembly;
     const auto s_id = cb_arg->s_id;
 
+#ifdef TESTS
+    if(!test::validate_messages(*p_assembly, self))
+    {
+        std::cerr << "Message consistency verification: " << "Fails" << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+#endif
+
     for(auto* s : p_assembly->slab) // The processed slabs move to the write queue.
         self->W.enqueue(s);
 

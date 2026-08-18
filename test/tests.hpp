@@ -11,6 +11,16 @@
 #include <vector>
 
 
+// Forward declarations.
+
+namespace gpu_saca
+{
+    struct Partition_Assembly;
+
+    template <typename T_sym_> class GPU_SACA;
+}
+
+
 namespace gpu_saca::test
 {
 
@@ -64,6 +74,11 @@ bool is_permutation(const idx_t* SA, idx_t n);
 // Returns `true` iff `SA` is the suffix array of the text `T` of size `n`.
 template <typename T_sym_>
 bool is_correct_SA(const idx_t* SA, const T_sym_* T, idx_t n);
+
+// Returns `true` iff the messages produced from the partition assembled in
+// `p_assembly` are consistent according to the driver class `self`.
+template <typename T_sym_>
+bool validate_messages(const Partition_Assembly& p_assembly, const GPU_SACA<T_sym_>* self);
 
 }
 

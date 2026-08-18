@@ -10,6 +10,7 @@ set(TESTS_SRC
         disk-backend.cpp
         ranking.cpp
         rank-propagation.cpp
+        rank-propagation.cu
         end-to-end.cpp
 )
 
