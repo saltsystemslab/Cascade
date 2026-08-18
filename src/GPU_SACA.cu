@@ -1048,6 +1048,16 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                     {
                         Staging_Slab* s;
                         W.wait_dequeue(s);  // Get a processed slab.
+#ifdef TESTS
+                        {
+                            const auto& p_assembly = part_assembly[s->p_id()];
+                            if(!test::validate_messages(*s, this, p_assembly.msg_off))
+                            {
+                                std::cerr << "Message consistency verification: " << "Fails" << ". Aborting.\n";
+                                std::exit(EXIT_FAILURE);
+                            }
+                        }
+#endif
                         backend_->write(*s);    // Drain the slab.
                         F.enqueue(s);   // This slab is free now.
                     }
@@ -1289,14 +1299,6 @@ void CUDART_CB GPU_SACA<T_sym_>::on_partition_download(void* const arg)
     auto* const self = cb_arg->self;
     auto* const p_assembly = cb_arg->p_assembly;
     const auto s_id = cb_arg->s_id;
-
-#ifdef TESTS
-    if(!test::validate_messages(*p_assembly, self))
-    {
-        std::cerr << "Message consistency verification: " << "Fails" << ". Aborting.\n";
-        std::exit(EXIT_FAILURE);
-    }
-#endif
 
     for(auto* s : p_assembly->slab) // The processed slabs move to the write queue.
         self->W.enqueue(s);

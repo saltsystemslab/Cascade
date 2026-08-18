@@ -7,16 +7,15 @@
 #include "types.hpp"
 #include "Packed_Prefix.hpp"
 #include "Partition_Backend.hpp"
+#include "Staging_Slab.hpp"
 
 #include <vector>
 
 
-// Forward declarations.
+// Forward declarations; specifically for constructs from CUDA-headers.
 
 namespace gpu_saca
 {
-    struct Partition_Assembly;
-
     template <typename T_sym_> class GPU_SACA;
 }
 
@@ -75,10 +74,13 @@ bool is_permutation(const idx_t* SA, idx_t n);
 template <typename T_sym_>
 bool is_correct_SA(const idx_t* SA, const T_sym_* T, idx_t n);
 
-// Returns `true` iff the messages produced from the partition assembled in
-// `p_assembly` are consistent according to the driver class `self`.
+// Returns `true` iff the messages present in the staging slab `s` are
+// consistent according to the driver class `self`. `msg_off` contains the
+// exclusive-end offsets (across the whole collection of messages produced from
+// the corresponding partition) of groups of messages, collated by destination
+// partitions.
 template <typename T_sym_>
-bool validate_messages(const Partition_Assembly& p_assembly, const GPU_SACA<T_sym_>* self);
+bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, const std::vector<p_sz_t>& msg_off);
 
 }
 
