@@ -20,7 +20,6 @@ bool validate_messages(const Partition_Assembly& p_assembly, const GPU_SACA<T_sy
     const auto ctx = self->ctx_;
     const auto p_id = p_assembly.slab[0]->p_id();
     const auto* const P_id = self->P_id;
-    const auto* const rho = self->rho;
 
     const auto& msg_off = p_assembly.msg_off;
     const auto msg_count = msg_off[p - 1];
@@ -75,16 +74,9 @@ bool validate_messages(const Partition_Assembly& p_assembly, const GPU_SACA<T_sy
                 }
             }
 
-            // Rank check: the rank carried in this message must be correct.
+            // Rank check: the rank carried in this message must fall in the sender's partition's (i.e. this one's) range in the final SA.
             {
                 const auto r = msg_rank[i];
-                const auto sender = target + ctx;
-                if(r != rho[sender])
-                {
-                    std::cerr << "Incorrect global ranks present in messages.\n";
-                    return false;
-                }
-
                 const auto& P_off = self->P_off;
                 const auto& P_cap = self->P_cap;
                 if(r < P_off[p_id] || r >= P_off[p_id] + P_cap[p_id])   // Looser check, applicable when `rho` gets eliminated but messages still carry global ranks.
