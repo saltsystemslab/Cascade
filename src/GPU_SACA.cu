@@ -1,4 +1,5 @@
 
+#include "GPU_SACA.hpp"
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.hpp"
 #include "Packed_Prefix_Decomposer.cuh"

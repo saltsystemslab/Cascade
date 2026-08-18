@@ -1,8 +1,7 @@
 
-#include "GPU_SACA.cuh"
+#include "GPU_SACA.hpp"
 #include "types.hpp"
 #include "utility.hpp"
-#include "utility.cuh"
 #include "tests.hpp"
 
 #include <cstddef>

@@ -231,6 +231,7 @@ target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
 target_link_libraries(core PRIVATE CUDA::cudart)
+target_link_libraries(tests PRIVATE CUDA::cudart)
 
 # Link to OpenMP for host-side parallel tasks.
 target_link_libraries(core PRIVATE OpenMP::OpenMP_CXX)
