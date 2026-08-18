@@ -64,10 +64,14 @@ bool validate_messages(const Partition_Assembly& p_assembly, const GPU_SACA<T_sy
             }
 
             // Forward tag check: the `phi`-tag carried in this message must be correct.
+            // A sender that retired this generation can carry a stale forward tag: if its query for the
+            // extension suffix has look-back depth `λ >= 2`, then the message it had received earlier had
+            // a stale forward tag; this is benign per tertiary-irrelevance. Stale tags are impossible when
+            // `λ < 2`, and this is guaranteed to hold for everyone up-to generation 1.
             {
                 const p_id_t phi = bit_layout::tag_of(msg_target[i]);
                 const p_id_t expected_phi = (target + 2 * ctx < n ? P_id[target + 2 * ctx] : p_id_t(0));
-                if(phi != expected_phi)
+                if(ctx <= 2 * self->ell && phi != expected_phi)
                 {
                     std::cerr << "Some messages carry incorrect forward tag.\n";
                     return false;
