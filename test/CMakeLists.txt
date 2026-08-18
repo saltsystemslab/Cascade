@@ -1,10 +1,6 @@
 
 # =============================================================================
 
-# This controls the `-I` (include paths) switch of the compiler invocation.
-set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
-
-
 # Define the targets.
 
 # Bundle the source files into a variable.
@@ -22,4 +18,4 @@ add_library(tests STATIC ${TESTS_SRC})
 
 
 # Set the include directories for the targets.
-target_include_directories(tests PRIVATE ${INCLUDE_DIR})
+target_include_directories(tests PRIVATE ${INCLUDE_DIR} ${TESTS_INCLUDE} ${EXT_INCLUDE})

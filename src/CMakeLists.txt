@@ -1,11 +1,6 @@
 
 # =============================================================================
 
-# This controls the `-I` (include paths) switch of the compiler invocation.
-set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
-set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
-
-
 # Define the targets.
 
 # Bundle the core source files into a variable.
