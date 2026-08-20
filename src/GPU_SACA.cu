@@ -747,12 +747,6 @@ void GPU_SACA<T_sym_>::initial_rank()
         drive_pipeline<true>();
     }
 
-    // Drop the prefix-keys (used in seeding) from the backend.
-    {
-        PROFILE_SCOPE("drop_prefixes");
-        backend_->drop_prefixes();
-    }
-
 #ifdef TESTS
     // std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
 #endif
@@ -1076,6 +1070,8 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             idx_t s_id;                     FS.wait_dequeue(s_id);      // Get a free device-stream.
             Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
             const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
+
+            if constexpr(init_rank_)    backend_->retire_prefix_and_open_key(p_id); // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
 
             if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
             else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
@@ -1420,6 +1416,12 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
+    // Open the inboxes that initial-ranking didn't need to write to.
+    {
+        PROFILE_SCOPE("open_deferred_inboxes");
+        backend_->open_deferred_inboxes();
+    }
+
     idx_t iter = 1;
     for(idx_t k = ell; k < n_; k *= 2, ++iter)
     {

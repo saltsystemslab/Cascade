@@ -55,6 +55,12 @@ public:
 
     ~Partition_Backend();
 
+    /// Opens the inbox-files of the parity first written at generation 1.
+    void open_deferred_inboxes();
+
+    // Retires the `p_id`'th partition's prefix-file and opens its key-file.
+    void retire_prefix_and_open_key(p_id_t p_id);
+
     // Sets the context to `ctx` for the backward-tag fetch operations during
     // prefix-key reading.
     void set_context(const idx_t ctx) { ctx_ = ctx; k_ = ctx / 2; }

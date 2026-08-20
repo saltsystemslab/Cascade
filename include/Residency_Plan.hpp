@@ -37,6 +37,10 @@ public:
     // Returns whether the `p_id`'th partition's initial prefixes are host-
     // resident.
     bool prefix(const p_id_t p_id) const { return prefix_[p_id]; }
+
+    // Returns whether each partition's data (suffixes and keys) are host-
+    // resident.
+    const auto& data() const { return data_; }
 };
 
 }

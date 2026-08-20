@@ -10,6 +10,7 @@
 #include "Spill_Store.hpp"
 #include "Residency_Plan.hpp"
 
+#include <cstdint>
 #include <vector>
 
 namespace gpu_saca
@@ -25,6 +26,17 @@ private:
     std::vector<Direct_File> key_;  // Key-files of the partitions.
     std::vector<Direct_File> prefix_;   // Prefix-key files of the partitions.
 
+    std::vector<Direct_File> msg_tgt_tag_[2];   // Message-target files of the partitions' inboxes, per generation-parity.
+    std::vector<Direct_File> msg_rank_[2];  // Message-rank files of the partitions' inboxes, per generation-parity.
+
+    Spill_Store* const spill_;  // Spill-store to open the deferred files from.
+    const std::vector<idx_t> P_cap_;    // Partition capacities.
+    const std::vector<uint8_t> data_resident_;  // Whether each partition's data is host-resident.
+
+
+    // Returns the inbox-parity a generation with index `gen` writes to.
+    static constexpr std::size_t write_parity(const idx_t gen) { return (gen & 1) ^ 1; }
+
 public:
 
     // Constructs a disk-backend for partitions with capacities `P_cap`, by
@@ -34,6 +46,12 @@ public:
 
     Disk_Backend(const Disk_Backend&) = delete;
     Disk_Backend& operator=(const Disk_Backend&) = delete;
+
+    // Opens the inbox-files of the parity first written at generation 1.
+    void open_deferred_inboxes();
+
+    // Retires the `p_id`'th partition's prefix-file, and opens its key-file.
+    void retire_prefix_and_open_key(p_id_t p_id);
 
     // Returns the `p_id`'th partition's suffix-file.
     Direct_File& suf(const p_id_t p_id) { return suf_[p_id]; }

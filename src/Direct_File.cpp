@@ -136,6 +136,8 @@ void Direct_File::unlink()
 
     if(!path_.empty() && ::unlink(path_.c_str()) != 0)
         exit("unlink");
+
+    path_.clear();
 }
 
 }

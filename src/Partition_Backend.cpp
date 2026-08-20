@@ -32,6 +32,18 @@ Partition_Backend::~Partition_Backend()
 }
 
 
+void Partition_Backend::open_deferred_inboxes()
+{
+    disk_.open_deferred_inboxes();
+}
+
+
+void Partition_Backend::retire_prefix_and_open_key(const p_id_t p_id)
+{
+    disk_.retire_prefix_and_open_key(p_id);
+}
+
+
 void Partition_Backend::read_prefixes(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
