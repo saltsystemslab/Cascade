@@ -174,6 +174,8 @@ endif()
 add_subdirectory(src)
 add_subdirectory(test)
 
+add_subdirectory(benchmark)
+
 
 # Set some CUDA-specific properties.
 set_property(TARGET core            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
