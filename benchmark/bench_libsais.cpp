@@ -133,6 +133,117 @@ int run(const Args& arg)
 }
 
 
+int verify(const Args& a)
+{
+    gpu_saca::bench::Verify_Record v;
+    v.sa_path = a.sa;
+    v.run_id = a.run_id.empty() ? gpu_saca::bench::make_run_id("verify", a.corpus, a.n) : a.run_id;
+
+    const auto emit = [&](const std::string& detail)
+    {
+        v.detail = detail;
+
+        if(!v.write(a.results_dir))
+        {
+            std::fprintf(stderr, "FATAL: could not write verify record\n");
+            return 1;
+        }
+
+        std::fprintf(stderr, "%s\n", v.to_json().c_str());
+
+        return 0;
+    };
+
+    gpu_saca::bench::Buffer<uint16_t> T;
+    gpu_saca::bench::File_Prop id;
+    std::string err;
+
+    if(!gpu_saca::bench::load_prefix(a.input, a.n, T, id, err, false))
+        return emit(err);
+
+    gpu_saca::bench::Buffer<uint64_t> SA;
+    if(!read_SA(a.sa, SA, T.n, err))
+        return emit(err);
+
+    v.n = SA.n;
+    const int64_t n = SA.n;
+
+    // Tier 1 check: permutation.
+    {
+        std::vector<bool> seen(static_cast<size_t>(n), false);
+
+        for(int64_t i = 0; i < n; ++i)
+        {
+            const int64_t s = SA.p[i];
+
+            if(s < 0 || s >= n || seen[static_cast<size_t>(s)])
+            {
+                v.permutation = "fail";
+                v.first_mismatch = i;
+                return emit("SA is not a permutation at index " + std::to_string(i));
+            }
+
+            seen[static_cast<size_t>(s)] = true;
+        }
+
+        v.permutation = "pass";
+    }
+
+    // Tier 2 check: order. Performed via the ISA.
+    {
+        gpu_saca::bench::Buffer<int64_t> ISA;
+        if(!ISA.allocate(n))
+            return emit("allocation failed for ISA");
+
+        for(int64_t i = 0; i < n; ++i)
+            ISA.p[SA.p[i]] = i;
+
+        const auto rank_next = [&](int64_t s) -> int64_t { return (s + 1 < n) ? ISA.p[s + 1] : int64_t(-1); };
+
+        for(int64_t i = 1; i < n; ++i)
+        {
+            const int64_t p = SA.p[i - 1];
+            const int64_t q = SA.p[i];
+
+            const uint16_t tp = T.p[p], tq = T.p[q];
+            const bool ok = (tp < tq) || (tp == tq && rank_next(p) < rank_next(q));
+            if(!ok)
+            {
+                v.order = "fail";
+                v.first_mismatch = i;
+                return emit("order violated at index " + std::to_string(i));
+            }
+        }
+
+        v.order = "pass";
+    }
+
+    // Tier 3 check: cross-reference against another method's SA.
+    if(!a.against.empty())
+    {
+        v.crossref_against = a.against;
+
+        gpu_saca::bench::Buffer<uint64_t> B;
+        if(!read_SA(a.against, B, n, err))
+        {
+            v.crossref = "fail";
+            return emit(err);
+        }
+
+        for(int64_t i = 0; i < n; ++i)
+            if(SA.p[i] != B.p[i])
+            {
+                v.crossref = "fail";
+                v.first_mismatch = i;
+                return emit("cross-reference mismatch at index " + std::to_string(i));
+            }
+
+        v.crossref = "pass";
+    }
+
+    return emit("");
+}
+
 }
 
 
@@ -151,5 +262,5 @@ int main(int argc, char ** argv)
 
     return (a.mode == "run") ?
                 run(a) :
-                0;
+                verify(a);
 }
