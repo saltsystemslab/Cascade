@@ -119,4 +119,70 @@ inline bool read_SA(const std::string& path, gpu_saca::bench::Buffer<uint64_t>& 
     return true;
 }
 
+
+inline bool parse(const int argc, char** const argv, Args& args, std::string& err)
+{
+    if(argc < 2)
+    {
+        err = "usage:   bench_baseline {run|verify} --input P --n N [--threads T] [--fs F] [--sa-out P]"
+                            " [--cache warm|cold|as-is] [--corpus NAME]"
+                            " [--results-dir D] [--run-id ID]";
+        return false;
+    }
+
+    args.mode = argv[1];
+    if(args.mode != "run" && args.mode != "verify")
+    {
+        err = "unknown mode: " + args.mode;
+        return false;
+    }
+
+    for(int i = 2; i < argc; ++i)
+    {
+        const std::string k = argv[i];
+        const bool has_val = (i + 1 < argc);
+        const std::string v = has_val ? argv[i + 1] : "";
+
+        if(!has_val)
+        {
+            err = "missing value for " + k;
+            return false;
+        }
+
+        ++i;
+
+        if     (k == "--input")         args.input       = v;
+        else if(k == "--sa")            args.sa          = v;
+        else if(k == "--against")       args.against     = v;
+        else if(k == "--sa-out")        args.sa_out      = v;
+        else if(k == "--corpus")        args.corpus      = v;
+        else if(k == "--cache")         args.cache       = v;
+        else if(k == "--results-dir")   args.results_dir = v;
+        else if(k == "--run-id")        args.run_id      = v;
+        else if(k == "--n")             args.n           = std::strtoll(v.c_str(), nullptr, 10);
+        else if(k == "--threads")       args.threads     = std::strtoll(v.c_str(), nullptr, 10);
+        else if(k == "--fs")            args.fs          = std::strtoll(v.c_str(), nullptr, 10);
+        else
+        {
+            err = "unknown argument: " + k;
+            return false;
+        }
+    }
+
+    if(args.cache != "warm" && args.cache != "cold" && args.cache != "as-is")
+    {
+        err = "--cache must be warm, cold or as-is";
+        return false;
+    }
+
+    if(args.input.empty() || args.corpus.empty())
+    {
+        err = "--input and --corpus are required";
+        return false;
+    }
+
+    return true;
+}
+
+
 }
