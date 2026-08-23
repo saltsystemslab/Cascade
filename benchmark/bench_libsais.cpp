@@ -3,11 +3,11 @@
 
 Benchmark harness:
 
-    bench_baseline run    --input P --n N [--threads T] [--fs F] [--sa-out P]
+    bench_libsais run    --input P --n N [--threads T] [--fs F] [--sa-out P]
                           [--cache warm|cold|as-is] [--corpus NAME]
                           [--results-dir D] [--run-id ID]
 
-    bench_baseline verify --input P --n N --sa P [--against P]
+    bench_libsais verify --input P --n N --sa P [--against P]
                           [--results-dir D] [--run-id ID]
 --*/
 
@@ -22,9 +22,15 @@ Benchmark harness:
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <vector>
+
 
 #ifndef BENCH_REPO_COMMIT
     #define BENCH_REPO_COMMIT "unknown"
+#endif
+
+#ifndef BENCH_BUILD_TYPE
+    #define BENCH_BUILD_TYPE "unknown"
 #endif
 
 
@@ -42,6 +48,7 @@ int run(const Args& arg)
     rec.method              = "libsais16x64";
     rec.method_version      = LIBSAIS_VERSION_STRING;
     rec.commit              = BENCH_REPO_COMMIT;
+    rec.build_type          = BENCH_BUILD_TYPE;
     rec.input_path          = arg.input;
     rec.corpus              = arg.corpus;
     rec.threads             = arg.threads;

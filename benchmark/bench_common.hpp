@@ -1,7 +1,14 @@
 
+#ifndef BENCH_COMMON_HPP
+#define BENCH_COMMON_HPP
+
+
+
 #include "corpus.hpp"
 
+#include <cstdint>
 #include <string>
+#include <cstdlib>
 #include <chrono>
 #include <ctime>
 #include <fcntl.h>
@@ -46,7 +53,7 @@ inline bool write_SA(const std::string& path, const uint64_t* const SA, int64_t 
     }
 
 
-    const auto bytes_to_write = static_cast<size_t>(n) * sizeof(int64_t);
+    const auto bytes_to_write = static_cast<size_t>(n) * sizeof(uint64_t);
     std::size_t bytes_written = 0;
     while(bytes_written < bytes_to_write)   // `pwrite` writes at most ~2GB.
     {
@@ -124,7 +131,7 @@ inline bool parse(const int argc, char** const argv, Args& args, std::string& er
 {
     if(argc < 2)
     {
-        err = "usage:   bench_baseline {run|verify} --input P --n N [--threads T] [--fs F] [--sa-out P]"
+        err = "usage:   <bench_baseline> {run|verify} --input P --n N [--threads T] [--fs F] [--sa-out P]"
                             " [--cache warm|cold|as-is] [--corpus NAME]"
                             " [--results-dir D] [--run-id ID]";
         return false;
@@ -184,5 +191,8 @@ inline bool parse(const int argc, char** const argv, Args& args, std::string& er
     return true;
 }
 
-
 }
+
+
+
+#endif

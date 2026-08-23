@@ -85,6 +85,7 @@ struct Run_Record
     std::string method; // Method name.
     std::string method_version; // Method's version.
     std::string commit; // Method's commit used in the driver.
+    std::string build_type; // Build type: release or something else.
 
     // Input
 

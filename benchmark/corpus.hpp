@@ -49,8 +49,8 @@ struct Buffer
 // File-properties to cheaply decide whether file-bytes may have changed.
 struct File_Prop
 {
-    ::__off_t size = 0;
-    ::__off_t mtime = 0;
+    int64_t size = 0;
+    int64_t mtime = 0;
 };
 
 

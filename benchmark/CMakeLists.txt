@@ -2,7 +2,7 @@
 # =============================================================================
 
 # Benchmark harness.
-# `cmake --build . --target bench_baseline`.
+# `cmake --build . --target <bench_baseline>`.
 
 include(FetchContent)
 
@@ -56,6 +56,10 @@ endif()
 # ======== Driver ========
 #
 add_executable(bench_libsais bench_libsais.cpp)
+
+target_compile_definitions(bench_libsais PRIVATE
+    BENCH_REPO_COMMIT="${REPO_COMMIT}"
+    BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
 
 target_link_libraries(bench_libsais PRIVATE bench_record libsais)
 target_compile_options(bench_libsais PRIVATE ${COMPILE_FLAGS})
