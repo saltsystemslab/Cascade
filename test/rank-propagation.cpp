@@ -106,9 +106,8 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
             // Rank check: the rank carried in this message must fall in the sender's partition's (i.e. this one's) range in the final SA.
             {
                 const auto r = msg_rank[i];
-                const auto& P_off = self->P_off;
                 const auto& P_cap = self->P_cap;
-                if(r < P_off[p_id] || r >= P_off[p_id] + P_cap[p_id])   // Looser check, applicable when `rho` gets eliminated but messages still carry global ranks.
+                if(r >= P_cap[p_id])
                 {
                     is_valid = false;
                     std::cerr << "Messages carry incorrect out-of-range ranks from senders.\n";

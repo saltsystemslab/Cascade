@@ -45,9 +45,6 @@ private:
     // So the buffers are sized to whichever of the two demands is larger.
     static constexpr std::size_t DEV_KEY_BYTES = (sizeof(Prefix_Key) > 2 * sizeof(idx_t) ? sizeof(Prefix_Key) : 2 * sizeof(idx_t));
 
-    // Size of a message; contains: a destination suffix and its secondary rank (global for now).
-    static constexpr std::size_t MESSAGE_BYTES = sizeof(idx_t) + sizeof(idx_t);
-
     // Assumed worst-case ratio of actual max partition-size to the target
     // estimated during pivots-selection.
     static constexpr double PART_SZ_IMBALANCE_SLACK = 1.20;
