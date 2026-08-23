@@ -254,20 +254,24 @@ int main(int argc, char** argv)
     // example();
 
     (void)argc, (void)argv;
-    caps_sa::Parser input(argv[1]);
 
-    std::string T;
-    while(input.read_next_seq())
-        T += std::string_view(input.seq(), input.seq_len());
+    const std::string file_path(argv[1]);
+    const auto sym_count = gpu_saca::util::file_size<uint8_t>(file_path);
+    auto const T = gpu_saca::util::allocate<char>(sym_count);
+    const auto n = sym_count;
 
-    const auto n = T.length();
+    {
+        std::ifstream is(file_path, std::ios::binary);
+        is.read(reinterpret_cast<char*>(T), sym_count * sizeof(T));
+    }
+
     std::cerr << "Sequence length: " << n << "\n";
 
     {
         std::vector<uint32_t> SA(n);
 
         const auto t_0 = caps_sa::timer::now();
-        bench_libcubwt(T.c_str(), n, SA.data());
+        bench_libcubwt(T, n, SA.data());
         const auto t_1 = caps_sa::timer::now();
 
         std::cerr << "Built the SA using `libcubwt`. Time taken: " << caps_sa::timer::duration(t_1 - t_0) << " seconds.\n";
