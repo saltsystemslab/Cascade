@@ -94,8 +94,9 @@ public:
     void allocate(idx_t sz);
 
     // Tags the slab with the partition-chunk it's carrying (from partition-ID
-    // `p_id`, at its offset `off`, with `sz`-many elements).
-    void assign(p_id_t p_id, idx_t off, idx_t sz);
+    // `p_id`, at range `[off, off + sz)`, and the message- chunk it's carrying
+    // (at range `[msg_off, msg_off + msg_sz)`).
+    void assign(p_id_t p_id, idx_t off, idx_t sz, p_sz_t msg_off, p_sz_t msg_sz);
 };
 
 

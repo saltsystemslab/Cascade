@@ -997,18 +997,24 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                 continue;
 
             active_part_c++;
-            const idx_t part_chunk_c = (Active_sz[p_id] + chunk_cap_ - 1) / chunk_cap_; // Number of chunks / slabs required for this partition.
-            total_chunk += part_chunk_c;
+
+            const auto active_set_sz = Active_sz[p_id];
+            const auto inbox_sz = backend_->inbox_size(p_id);
+            const idx_t content_chunk_c = (active_set_sz + chunk_cap_ - 1) / chunk_cap_;    // Number of slabs required for this partition's content.
+            const idx_t msg_chunk_c = (inbox_sz + chunk_cap_ - 1) / chunk_cap_; // Number of slabs required for this partition's inbox.
+            const idx_t chunk_c = std::max(content_chunk_c, msg_chunk_c); // Number of slabs required in aggregate to hold this partition.
+            total_chunk += chunk_c;
 
             // Prepare skeleton chain of chunks of this partition.
-            part_assembly[p_id].slab.assign(part_chunk_c, nullptr);
-            part_assembly[p_id].chunks_to_read.store(part_chunk_c, std::memory_order_relaxed);
+            part_assembly[p_id].slab.assign(chunk_c, nullptr);
+            part_assembly[p_id].chunks_to_read.store(chunk_c, std::memory_order_relaxed);
 
-            for(idx_t c = 0; c < part_chunk_c; ++c) // Post a read-task for each chunk of this partition.
+            for(idx_t c = 0; c < chunk_c; ++c) // Post a read-task for each chunk of this partition.
             {
                 const auto chunk_off = c * chunk_cap_;
-                const auto chunk_sz = std::min(chunk_cap_, Active_sz[p_id] - chunk_off);
-                RT.enqueue(Read_Task{p_id, c, chunk_off, chunk_sz});
+                const auto content_chunk_sz = (chunk_off < active_set_sz ? std::min(chunk_cap_, active_set_sz - chunk_off) : 0);
+                const auto msg_chunk_sz = (chunk_off < inbox_sz ? std::min<p_sz_t>(chunk_cap_, inbox_sz - chunk_off) : 0);
+                RT.enqueue(Read_Task{p_id, c, chunk_off, content_chunk_sz, static_cast<p_sz_t>(chunk_off), msg_chunk_sz});
             }
         }
     }
@@ -1032,9 +1038,12 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                             F.wait_dequeue(s);      // Get a free slab for the chunk.
                         }
 
-                        s->assign(rt.p_id, rt.off, rt.sz);
+                        s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
                         if constexpr(init_rank_)    backend_->read_prefixes(*s);
                         else                        backend_->read_keys(*s);
+
+                        if(s->msg_sz() > 0)
+                            backend_->read_messages(*s);
 
                         auto& p_assembly = part_assembly[rt.p_id];
                         p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.

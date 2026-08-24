@@ -46,9 +46,9 @@ void Staging_Slab::allocate(idx_t sz)
 }
 
 
-void Staging_Slab::assign(const p_id_t p_id, const idx_t off, const idx_t sz)
+void Staging_Slab::assign(const p_id_t p_id, const idx_t off, const idx_t sz, const p_sz_t msg_off, const p_sz_t msg_sz)
 {
-    p_id_ = p_id, off_ = off, sz_ = sz;
+    p_id_ = p_id, off_ = off, sz_ = sz, msg_off_ = msg_off, msg_sz_ = msg_sz;
 }
 
 }
