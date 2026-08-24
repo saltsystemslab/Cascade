@@ -39,6 +39,9 @@ private:
     // {
         static constexpr p_sz_t OV_CAP = 64 * MSG_ALIGN;        // Capacity of a destination-partition's block-overflow buffer, in messages.
 
+        std::size_t inbox_write_parity_;    // Inbox-parity this generation writes to.
+        std::size_t inbox_read_parity_; // Inbox-parity this generation reads from.
+
         std::vector<std::atomic<p_sz_t>> msg_count_[2]; // Size of each destination-partition's inbox, including the buffered messages; per generation-parity.
         std::vector<std::atomic<p_sz_t>> msg_written_[2];   // Messages actually written to the backend, per destination; per generation-parity.
 
@@ -102,12 +105,12 @@ public:
     auto msg_off(const p_id_t p_id) const { return msg_off_ + p_id * p_; }
 
     // Returns the size of the `q`'th inbox at the generation last written to.
-    p_sz_t msg_count(const p_id_t q) const { return msg_count_[disk_.write_parity_][q]; }
+    p_sz_t msg_count(const p_id_t q) const { return msg_count_[inbox_write_parity_][q]; }
 
     // Returns the actual count of message-entries written to the `q`'th inbox's
     // backend; this can exceed `msg_count(q)` due to disk-block alignment
     // requirements.
-    p_sz_t msg_written(const p_id_t q) const { return msg_written_[disk_.write_parity_][q]; }
+    p_sz_t msg_written(const p_id_t q) const { return msg_written_[inbox_write_parity_][q]; }
 
     // Returns the `p_id`'th partition's resident suffixes, if any.
     idx_t* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }

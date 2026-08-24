@@ -21,6 +21,8 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
     , msg_off_(nullptr)
+    , inbox_write_parity_(write_parity(0))
+    , inbox_read_parity_(read_parity(0))
     , ov_tgt_(p_, nullptr)
     , ov_rank_(p_, nullptr)
     , ov_sz_(p_, 0)
@@ -176,7 +178,7 @@ void Partition_Backend::write_messages(const Staging_Slab& s)
 
 void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s, const p_sz_t l, const p_sz_t r)
 {
-    const auto parity = disk_.write_parity_;
+    const auto parity = inbox_write_parity_;
     msg_count_[parity][p_id].fetch_add(r - l, std::memory_order_relaxed);
 
     const auto base = s.off();  // `s` contains the index-range `[base, base + s.size())` of the source-partition's data.
@@ -226,7 +228,7 @@ void Partition_Backend::flush_overflow(const p_id_t p_id, const bool final)
     if(to_write == 0)
         return;
 
-    const auto parity = disk_.write_parity_;
+    const auto parity = inbox_write_parity_;
     const auto write_off = msg_written_[parity][p_id].fetch_add(to_write, std::memory_order_relaxed);
     disk_.msg_tgt_tag(p_id).write_at(ov_tgt_[p_id], to_write * sizeof(idx_t), write_off * sizeof(idx_t));
     disk_.msg_rank(p_id).write_at(ov_rank_[p_id], to_write * sizeof(msg_rank_t), write_off * sizeof(msg_rank_t));
@@ -244,6 +246,7 @@ void Partition_Backend::flush_overflow(const p_id_t p_id, const bool final)
 
 void Partition_Backend::open_generation(const idx_t gen)
 {
+    inbox_write_parity_ = write_parity(gen), inbox_read_parity_ = read_parity(gen);
     disk_.set_generation(gen);
 
     const auto parity = write_parity(gen);
@@ -268,7 +271,7 @@ void Partition_Backend::close_generation()
 
 idx_t Partition_Backend::inbox_mass() const
 {
-    const auto parity = disk_.write_parity_;
+    const auto parity = inbox_write_parity_;
     idx_t sz = 0;
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
         sz += msg_count_[parity][p_id];

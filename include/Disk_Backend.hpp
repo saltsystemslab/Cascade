@@ -24,8 +24,6 @@ class Partition_Backend;
 // Partitions' storage backend in disk.
 class Disk_Backend
 {
-    friend class Partition_Backend;
-
 private:
 
     std::vector<Direct_File> suf_;  // Suffix-files of the partitions.
@@ -44,18 +42,6 @@ private:
     std::size_t write_parity_;  // Generation-parity currently being written to.
     std::size_t read_parity_;   // Generation-parity currently being read from.
 
-
-    // Returns the `p_id`'th partition's inbox message-target file for the
-    // generation-parity currently being written.
-    auto& msg_tgt_tag(const p_id_t p_id) { return msg_tgt_tag_[write_parity_][p_id]; }
-
-    // Returns the `p_id`'th partition's inbox message-rank file for the
-    // generation-parity currently being written.
-    auto& msg_rank(const p_id_t p_id) { return msg_rank_[write_parity_][p_id]; }
-
-    // Sets the current generation's index for the backend.
-    void set_generation(const idx_t gen) { write_parity_ = write_parity(gen), read_parity_ = read_parity(gen); }
-
 public:
 
     // Constructs a disk-backend for partitions with capacities `P_cap`, by
@@ -73,10 +59,21 @@ public:
     void retire_prefix_and_open_key(p_id_t p_id);
 
     // Returns the `p_id`'th partition's suffix-file.
-    Direct_File& suf(const p_id_t p_id) { return suf_[p_id]; }
+    auto& suf(const p_id_t p_id) { return suf_[p_id]; }
 
     // Returns the `p_id`'th partition's prefix-keys-file.
-    Direct_File& prefix(const p_id_t p_id) { return prefix_[p_id]; }
+    auto& prefix(const p_id_t p_id) { return prefix_[p_id]; }
+
+    // Returns the `p_id`'th partition's inbox message-target file for the
+    // generation-parity currently being written.
+    auto& msg_tgt_tag(const p_id_t p_id) { return msg_tgt_tag_[write_parity_][p_id]; }
+
+    // Returns the `p_id`'th partition's inbox message-rank file for the
+    // generation-parity currently being written.
+    auto& msg_rank(const p_id_t p_id) { return msg_rank_[write_parity_][p_id]; }
+
+    // Sets the current generation's index for the backend.
+    void set_generation(const idx_t gen) { write_parity_ = write_parity(gen), read_parity_ = read_parity(gen); }
 
     // Reads `sz`-many initial prefixes of the `p_id`'th partition, from its
     // offset `off`, into `dst`.
