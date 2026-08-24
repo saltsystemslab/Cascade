@@ -10,6 +10,7 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
       spill_(&spill)
     , P_cap_(P_cap)
     , data_resident_(plan.data())
+    , write_parity_(0)
 {
     const auto p = P_cap_.size();
     suf_.reserve(p), key_.reserve(p), prefix_.reserve(p);

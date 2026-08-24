@@ -729,10 +729,11 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::set_context(const idx_t ctx)
+void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
 {
     ctx_ = ctx;
     backend_->set_context(ctx_);
+    backend_->open_generation(gen);
 }
 
 
@@ -744,7 +745,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
-        set_context(ell);
+        set_context(ell, 0);
         drive_pipeline<true>();
     }
 
@@ -1054,7 +1055,8 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                             std::exit(EXIT_FAILURE);
                         }
 #endif
-                        backend_->write(*s);    // Drain the slab.
+                        backend_->write(*s);    // Drain the slab's partition-content.
+                        backend_->write_messages(*s);   // Drain the slab's messages.
                         F.enqueue(s);   // This slab is free now.
                     }
                 }
@@ -1089,6 +1091,8 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
         for(auto& r : readers)  r.join();
         for(auto& w : writers)  w.join();
+
+        backend_->close_generation();
     }
 }
 
@@ -1423,18 +1427,18 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         backend_->open_deferred_inboxes();
     }
 
-    idx_t iter = 1;
-    for(idx_t k = ell; k < n_; k *= 2, ++iter)
+    idx_t gen = 1;
+    for(idx_t k = ell; k < n_; k *= 2, ++gen)
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));
 
-        INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(iter, k, std::accumulate(Active_sz.cbegin(), Active_sz.cend(), idx_t(0))));
+        INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(gen, k, std::accumulate(Active_sz.cbegin(), Active_sz.cend(), idx_t(0))));
         const auto t_0 = gpu_saca::timer::now();
 
         // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
         {
             // PROFILE_SCOPE("cpu_gather"); // TODO: relocate properly.
-            set_context(2 * k);
+            set_context(2 * k, gen);
         }
 
         // Sort-and-rank each partition.

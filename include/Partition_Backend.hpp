@@ -11,8 +11,11 @@
 #include "Spill_Store.hpp"
 #include "Direct_File.hpp"
 #include "Residency_Plan.hpp"
+#include "Spin_Lock.hpp"
+#include "message.hpp"
 
 #include <cstddef>
+#include <atomic>
 #include <vector>
 
 
@@ -32,12 +35,38 @@ private:
     p_sz_t* msg_off_;   // Storage for the exclusive-ending offsets of the destination-partitions into the messages produced by a partition.
                         // All partitions are packed flat together, so has `p x p` entries.
 
+    // Per-destination-partition inbox state.
+    // {
+        static constexpr p_sz_t OV_CAP = 64 * MSG_ALIGN;        // Capacity of a destination-partition's block-overflow buffer, in messages.
+
+        std::vector<std::atomic<p_sz_t>> msg_count_[2]; // Size of each destination-partition's inbox, including the buffered messages; per generation-parity.
+        std::vector<std::atomic<p_sz_t>> msg_written_[2];   // Messages actually written to the backend, per destination; per generation-parity.
+
+        std::vector<idx_t*> ov_tgt_;    // Block-overflow buffers for message-targets, per destination.
+        std::vector<msg_rank_t*> ov_rank_;  // Rank-buffers, parallel to `ov_tgt_`.
+        std::vector<p_sz_t> ov_sz_; // Messages currently buffered (due to block-alignment overhanging), per destination.
+        std::vector<util::Spin_Lock> ov_lock_;  // Mutually-exclusive lock to the overflow buffers, per destination.
+    // }
+
     idx_t* rho_;    // Global ranks of the suffixes.
     const idx_t n_; // Text-size.
     const idx_t secondary_bits_;    // Bit-width of the secondary-key of a suffix: `\ceil(\log_2(n))`.
     idx_t k_;   // Current stride (half of the context this generation is resolving) of the suffixes in the algorithm execution.
     idx_t ctx_; // Context-size the current generation is resolving.
     const p_id_t* const P_id;   // Partition-IDs.
+
+
+    // Flushes the `p_id`'th inbox's block-overflow buffer. `final` denotes
+    // whether this is the last flush invoked on the buffer or not.
+    void flush_overflow(p_id_t p_id, bool final);
+
+    // Buffers the index-range `[l, r)` of slab `s`'s messages into the
+    // `p_id`'th inbox's block-overflow buffer, flushing when required.
+    void buffer_overhang(p_id_t p_id, const Staging_Slab& s, p_sz_t l, p_sz_t r);
+
+    // Appends the `[l, r)` slot-range of the slab `s`'s messages, destined for
+    // the `p_id`'th inbox.
+    void append_messages(p_id_t p_id, const Staging_Slab& s, p_sz_t l, p_sz_t r);
 
 
 public:
@@ -65,7 +94,7 @@ public:
     // prefix-key reading.
     void set_context(const idx_t ctx) { ctx_ = ctx; k_ = ctx / 2; }
 
-    // Returns the exclusive-ending offsets of the destination-partitions into
+    // Returns the (exclusive) ending-offsets of the destination-partitions into
     // the messages produced by the `p_id`'th partition.
     auto msg_off(const p_id_t p_id) const { return msg_off_ + p_id * p_; }
 
@@ -104,6 +133,16 @@ public:
 
     // Writes the staging slab `s`'s chunk to the backend.
     void write(const Staging_Slab& s);
+
+    // Writes the messages staged in slab `s` to their destination inboxes.
+    void write_messages(const Staging_Slab& s);
+
+    // Prepares the inboxes for generation `gen`.
+    void open_generation(idx_t gen);
+
+    // Flushes every destination partition's block-overflow buffer. To be
+    // invoked once at a generation's ending barrier.
+    void close_generation();
 
     // Drops the prefix-key files from the backend.
     void drop_prefixes();

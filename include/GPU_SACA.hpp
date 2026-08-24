@@ -176,8 +176,9 @@ private:
     // Partitions the suffixes based on the selected pivots.
     void partition();
 
-    // Sets the context-size that the current generation is resolving to `ctx`.
-    void set_context(idx_t ctx);
+    // Sets the context-size that the current generation is resolving to `ctx`
+    // and the generation's index to `gen`.
+    void set_context(idx_t ctx, idx_t gen);
 
     // Ranks the suffixes in their partitions based on the prefixes associated
     // to them during partitioning.

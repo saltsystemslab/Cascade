@@ -11,14 +11,19 @@
 #include "Residency_Plan.hpp"
 
 #include <cstdint>
+#include <cstddef>
 #include <vector>
 
 namespace gpu_saca
 {
 
+class Partition_Backend;
+
+
 // Partitions' storage backend in disk.
 class Disk_Backend
 {
+    friend class Partition_Backend;
 
 private:
 
@@ -33,9 +38,24 @@ private:
     const std::vector<idx_t> P_cap_;    // Partition capacities.
     const std::vector<uint8_t> data_resident_;  // Whether each partition's data is host-resident.
 
+    // TODO: all the following generation-parity logic need to move upwards in the hierarchy: to partition-backend or somewhere else.
+
+    std::size_t write_parity_;  // Generation-parity currently being written to.
+
 
     // Returns the inbox-parity a generation with index `gen` writes to.
     static constexpr std::size_t write_parity(const idx_t gen) { return (gen & 1) ^ 1; }
+
+    // Returns the `p_id`'th partition's inbox message-target file for the
+    // generation-parity currently being written.
+    auto& msg_tgt_tag(const p_id_t p_id) { return msg_tgt_tag_[write_parity_][p_id]; }
+
+    // Returns the `p_id`'th partition's inbox message-rank file for the
+    // generation-parity currently being written.
+    auto& msg_rank(const p_id_t p_id) { return msg_rank_[write_parity_][p_id]; }
+
+    // Sets the current generation's index for the backend.
+    void set_generation(const idx_t gen) { write_parity_ = write_parity(gen); }
 
 public:
 
