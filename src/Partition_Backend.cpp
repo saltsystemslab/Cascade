@@ -246,7 +246,7 @@ void Partition_Backend::open_generation(const idx_t gen)
 {
     disk_.set_generation(gen);
 
-    const auto parity = Disk_Backend::write_parity(gen);
+    const auto parity = write_parity(gen);
     std::memset(msg_off_, 0, p_ * p_* sizeof(p_sz_t));
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {

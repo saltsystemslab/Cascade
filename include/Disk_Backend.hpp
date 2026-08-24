@@ -9,6 +9,7 @@
 #include "Packed_Prefix.hpp"
 #include "Spill_Store.hpp"
 #include "Residency_Plan.hpp"
+#include "message.hpp"
 
 #include <cstdint>
 #include <cstddef>
@@ -41,10 +42,8 @@ private:
     // TODO: all the following generation-parity logic need to move upwards in the hierarchy: to partition-backend or somewhere else.
 
     std::size_t write_parity_;  // Generation-parity currently being written to.
+    std::size_t read_parity_;   // Generation-parity currently being read from.
 
-
-    // Returns the inbox-parity a generation with index `gen` writes to.
-    static constexpr std::size_t write_parity(const idx_t gen) { return (gen & 1) ^ 1; }
 
     // Returns the `p_id`'th partition's inbox message-target file for the
     // generation-parity currently being written.
@@ -55,7 +54,7 @@ private:
     auto& msg_rank(const p_id_t p_id) { return msg_rank_[write_parity_][p_id]; }
 
     // Sets the current generation's index for the backend.
-    void set_generation(const idx_t gen) { write_parity_ = write_parity(gen); }
+    void set_generation(const idx_t gen) { write_parity_ = write_parity(gen), read_parity_ = read_parity(gen); }
 
 public:
 
