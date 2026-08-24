@@ -94,6 +94,13 @@ void Disk_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, 
 }
 
 
+void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz_t sz, idx_t* const tgt, msg_rank_t* const rank) const
+{
+    msg_tgt_tag_[read_parity_][p_id].read_at(tgt, sz * sizeof(idx_t), off * sizeof(idx_t));
+    msg_rank_[read_parity_][p_id].read_at(rank, sz * sizeof(msg_rank_t), off * sizeof(msg_rank_t));
+}
+
+
 void Disk_Backend::write(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const suf, const idx_t* const key)
 {
     suf_[p_id].write_at(suf, sz * sizeof(idx_t), off * sizeof(idx_t));

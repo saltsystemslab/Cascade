@@ -145,6 +145,10 @@ public:
     // respectively.
     void read_prefix_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, Prefix_Key* key) const;
 
+    // Reads into the staging slab `s` its chunk of its partition's inbox
+    // messages for the current generation.
+    void read_messages(Staging_Slab& s) const;
+
     // Writes the staging slab `s`'s chunk to the backend.
     void write(const Staging_Slab& s);
 
@@ -157,6 +161,10 @@ public:
     // Flushes every destination partition's block-overflow buffer. To be
     // invoked once at a generation's ending barrier.
     void close_generation();
+
+    // Returns the message-count in the `p_id'`th partition's inbox for the
+    // current generation (written to at the preceding generation).
+    p_sz_t inbox_size(p_id_t p_id) const;
 
     // Returns the total size of the inboxes at the generation last written to.
     idx_t inbox_mass() const;

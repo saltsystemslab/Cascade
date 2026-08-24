@@ -28,6 +28,8 @@ private:
     msg_rank_t* msg_rank_;  // Ranks carried within the rank-propagation messages.
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
     idx_t off_; // Offset of the content of this slab within the corresponding partition.
+    p_sz_t msg_off_;    // Offset of this slab's chunk into its partition's inbox.
+    p_sz_t msg_sz_; // Count of inbox messages in this slab's chunk.
     idx_t sz_;  // Number of elements in the slab.
 
 public:
@@ -77,6 +79,12 @@ public:
     // Returns the offset of the content of this slab within the corresponding
     // partition.
     auto off() const { return off_; }
+
+    // Returns offset of this slab's chunk into its partition's inbox.
+    auto msg_off() const { return msg_off_; }
+
+    // Returns count of inbox messages in this slab's chunk.
+    auto msg_sz() const { return msg_sz_; }
 
     // Returns the number of elements in the slab.
     auto size() const { return sz_; }

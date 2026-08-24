@@ -87,6 +87,10 @@ public:
     // into `dst`.
     void read_key(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
 
+    // Reads `sz`-many messages of the `p_id`'th partition's inbox for the
+    // current generation, from its offset `off`, into `tgt` and `rank`.
+    void read_messages(p_id_t p_id, p_sz_t off, p_sz_t sz, idx_t* tgt, msg_rank_t* rank) const;
+
     // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
     // offset `off`, from `suf` and `key`.
     void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const idx_t* key);

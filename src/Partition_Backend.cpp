@@ -146,6 +146,14 @@ void Partition_Backend::read_prefix_chunk(const p_id_t p_id, const idx_t off, co
 }
 
 
+void Partition_Backend::read_messages(Staging_Slab& s) const
+{
+    INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+
+    disk_.read_messages(s.p_id(), s.msg_off(), s.msg_sz(), s.msg_target(), s.msg_rank());
+}
+
+
 void Partition_Backend::write(const Staging_Slab& s)
 {
     const auto p_id = s.p_id();
@@ -266,6 +274,12 @@ void Partition_Backend::close_generation()
         const std::lock_guard<util::Spin_Lock> lock(ov_lock_[p_id]);
         flush_overflow(p_id, true);
     }
+}
+
+
+p_sz_t Partition_Backend::inbox_size(const p_id_t p_id) const
+{
+    return msg_count_[inbox_read_parity_][p_id];
 }
 
 
