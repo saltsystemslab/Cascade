@@ -187,6 +187,9 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
+    // Returns the active set size.
+    idx_t active_set_size() const;
+
     // Drives a complete pipeline for all the partitions: chunked reading from
     // the backend, sort-and-rank in the device, and chunked write-back to the
     // backend. `init_rank_` determines whether the pipeline is being executed

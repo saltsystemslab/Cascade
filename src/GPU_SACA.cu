@@ -729,6 +729,17 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
 template <typename T_sym_>
+idx_t GPU_SACA<T_sym_>::active_set_size() const
+{
+    idx_t unsorted = 0;
+    for(const auto a : Active_sz)
+        unsorted += a;
+
+    return unsorted;
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
 {
     ctx_ = ctx;
@@ -770,10 +781,9 @@ void GPU_SACA<T_sym_>::initial_rank()
 #ifdef STATS
     {
         p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `ell`).
-        idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
+        const auto unsorted = active_set_size();    // Count of suffixes with non-unique ranks.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            sorted_part += (Active_sz[p_id] == 0),
-            unsorted += Active_sz[p_id];
+            sorted_part += (Active_sz[p_id] == 0);
 
         std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
@@ -1432,6 +1442,23 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));
 
+#ifdef STATS
+        {
+            const idx_t msg_count = backend_->inbox_mass();
+            const idx_t active = active_set_size();
+            std::cerr <<    "Total inbox-size for generation " << gen << ": " << msg_count << "; number of recipients: " << active_set_size() <<
+                            ". Amplification: " << (static_cast<double>(msg_count) / active) << "x.\n";
+        }
+#endif
+
+#ifdef TESTS
+        if(!test::validate_inbox_mass(*backend_))
+        {
+            std::cerr << "Inbox-mass validation failed for generation " << gen << ". Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+#endif
+
         INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(gen, k, std::accumulate(Active_sz.cbegin(), Active_sz.cend(), idx_t(0))));
         const auto t_0 = gpu_saca::timer::now();
 
@@ -1467,10 +1494,9 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Check for early-exit.
         {
             p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `2k`).
-            idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
+            const auto unsorted = active_set_size();    // Count of suffixes with non-unique ranks.
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                sorted_part += (Active_sz[p_id] == 0),
-                unsorted += Active_sz[p_id];
+                sorted_part += (Active_sz[p_id] == 0);
 #ifdef STATS
             std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << ". Time taken in iteration: " << gpu_saca::timer::duration(t_1 - t_0) << "s."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";

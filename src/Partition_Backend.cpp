@@ -6,6 +6,7 @@
 #include "isa-instrument.hpp"
 #include "tests.hpp"
 
+#include <cstring>
 #include <mutex>
 #include <cstdlib>
 #include <algorithm>
@@ -246,6 +247,7 @@ void Partition_Backend::open_generation(const idx_t gen)
     disk_.set_generation(gen);
 
     const auto parity = Disk_Backend::write_parity(gen);
+    std::memset(msg_off_, 0, p_ * p_* sizeof(p_sz_t));
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
         msg_count_[parity][p_id] = 0, msg_written_[parity][p_id] = 0;
@@ -261,6 +263,17 @@ void Partition_Backend::close_generation()
         const std::lock_guard<util::Spin_Lock> lock(ov_lock_[p_id]);
         flush_overflow(p_id, true);
     }
+}
+
+
+idx_t Partition_Backend::inbox_mass() const
+{
+    const auto parity = disk_.write_parity_;
+    idx_t sz = 0;
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        sz += msg_count_[parity][p_id];
+
+    return sz;
 }
 
 

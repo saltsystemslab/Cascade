@@ -82,6 +82,9 @@ bool is_correct_SA(const idx_t* SA, const T_sym_* T, idx_t n);
 template <typename T_sym_>
 bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, const p_sz_t* msg_off);
 
+// Returns `true` iff the sender-recipient message volumes agree at `backend`.
+bool validate_inbox_mass(const Partition_Backend& backend);
+
 }
 
 

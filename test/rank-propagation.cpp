@@ -4,10 +4,9 @@
 #include "GPU_SACA.hpp"
 #include "Staging_Slab.hpp"
 #include "bit-layout.hpp"
+#include "message.hpp"
 
 #include "omp.h"
-
-#include <cstdint>
 
 
 namespace gpu_saca::test
@@ -118,6 +117,44 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
     }
 
     return is_valid;
+}
+
+
+bool validate_inbox_mass(const Partition_Backend& backend)
+{
+    const auto p = backend.p();
+
+    std::vector<idx_t> inbox_sz(p, 0);
+    for(p_id_t s = 0; s < p; ++s)   // Source partition.
+    {
+        const auto* const msg_off = backend.msg_off(s);
+        for(p_id_t t = 0; t < p; ++t)   // Sink partition.
+        {
+            const auto p2q = (t == 0 ? msg_off[t] : msg_off[t] - msg_off[t - 1]);
+            inbox_sz[t] += p2q;
+        }
+    }
+
+
+    for(p_id_t t = 0; t < p; ++t)
+    {
+        const auto msg_count = backend.msg_count(t);
+        const auto msg_written = backend.msg_written(t);
+
+        if(inbox_sz[t] != msg_count)
+        {
+            std::cerr << "For partition " << t << ", its senders sent " << inbox_sz[t] << " messages, whereas it received " << backend.msg_count(t) << ".\n";
+            return false;
+        }
+
+        if(msg_written % MSG_ALIGN != 0 || msg_written - msg_count >= MSG_ALIGN)
+        {
+            std::cerr << "For partition " << t << ", size of written inbox violates disk-block alignment constraints.";
+            return false;
+        }
+    }
+
+    return true;
 }
 
 

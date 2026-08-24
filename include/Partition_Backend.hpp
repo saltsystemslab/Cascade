@@ -84,6 +84,9 @@ public:
 
     ~Partition_Backend();
 
+    // Returns the count of partitions.
+    auto p() const { return p_; }
+
     /// Opens the inbox-files of the parity first written at generation 1.
     void open_deferred_inboxes();
 
@@ -97,6 +100,14 @@ public:
     // Returns the (exclusive) ending-offsets of the destination-partitions into
     // the messages produced by the `p_id`'th partition.
     auto msg_off(const p_id_t p_id) const { return msg_off_ + p_id * p_; }
+
+    // Returns the size of the `q`'th inbox at the generation last written to.
+    p_sz_t msg_count(const p_id_t q) const { return msg_count_[disk_.write_parity_][q]; }
+
+    // Returns the actual count of message-entries written to the `q`'th inbox's
+    // backend; this can exceed `msg_count(q)` due to disk-block alignment
+    // requirements.
+    p_sz_t msg_written(const p_id_t q) const { return msg_written_[disk_.write_parity_][q]; }
 
     // Returns the `p_id`'th partition's resident suffixes, if any.
     idx_t* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }
@@ -143,6 +154,9 @@ public:
     // Flushes every destination partition's block-overflow buffer. To be
     // invoked once at a generation's ending barrier.
     void close_generation();
+
+    // Returns the total size of the inboxes at the generation last written to.
+    idx_t inbox_mass() const;
 
     // Drops the prefix-key files from the backend.
     void drop_prefixes();
