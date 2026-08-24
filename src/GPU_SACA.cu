@@ -1093,6 +1093,20 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
             const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
 
+#ifdef TESTS
+            {
+                idx_t read_msg = 0;
+                for(auto* s : p_assembly->slab)
+                    read_msg += s->msg_sz();
+
+                if(read_msg != backend_->inbox_size(p_id))
+                {
+                    std::cerr << "Read inbox size at current generation does not equal to written inbox size at previous generation. Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+            }
+#endif
+
             if constexpr(init_rank_)    backend_->retire_prefix_and_open_key(p_id); // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
 
             if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
@@ -1453,7 +1467,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
 #ifdef STATS
         {
-            const idx_t msg_count = backend_->inbox_mass();
+            const idx_t msg_count = backend_->inbox_mass_last_gen();
             const idx_t active = active_set_size();
             std::cerr <<    "Total inbox-size for generation " << gen << ": " << msg_count << "; number of recipients: " << active_set_size() <<
                             ". Amplification: " << (static_cast<double>(msg_count) / active) << "x.\n";

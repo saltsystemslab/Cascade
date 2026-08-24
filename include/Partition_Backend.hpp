@@ -166,8 +166,8 @@ public:
     // current generation (written to at the preceding generation).
     p_sz_t inbox_size(p_id_t p_id) const;
 
-    // Returns the total size of the inboxes at the generation last written to.
-    idx_t inbox_mass() const;
+    // Returns the total size of the inboxes written to at the last generation.
+    idx_t inbox_mass_last_gen() const;
 
     // Drops the prefix-key files from the backend.
     void drop_prefixes();

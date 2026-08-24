@@ -283,7 +283,7 @@ p_sz_t Partition_Backend::inbox_size(const p_id_t p_id) const
 }
 
 
-idx_t Partition_Backend::inbox_mass() const
+idx_t Partition_Backend::inbox_mass_last_gen() const
 {
     const auto parity = inbox_write_parity_;
     idx_t sz = 0;
