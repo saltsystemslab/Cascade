@@ -48,7 +48,7 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
             msg_tgt_tag_[parity].emplace_back(spill.open(p_id, msg_tgt_tag_role(parity), Direct_File::Mode::read_write));
             msg_rank_[parity].emplace_back(spill.open(p_id, msg_rank_role(parity), Direct_File::Mode::read_write));
 
-            const auto cap = P_cap_[p_id] + p * MSG_ALIGN;
+            const auto cap = P_cap_[p_id] + MSG_ALIGN;
             msg_tgt_tag_[parity].back().preallocate(cap * sizeof(idx_t));
             msg_rank_[parity].back().preallocate(cap * sizeof(msg_rank_t));
 
@@ -68,7 +68,7 @@ void Disk_Backend::open_deferred_inboxes()
         msg_tgt_tag_[parity][p_id] = spill_->open(p_id, msg_tgt_tag_role(parity), Direct_File::Mode::read_write);
         msg_rank_[parity][p_id] = spill_->open(p_id, msg_rank_role(parity), Direct_File::Mode::read_write);
 
-        const auto cap = P_cap_[p_id] + p * MSG_ALIGN;
+        const auto cap = P_cap_[p_id] + MSG_ALIGN;
         msg_tgt_tag_[parity][p_id].preallocate(cap * sizeof(idx_t));
         msg_rank_[parity][p_id].preallocate(cap * sizeof(msg_rank_t));
     }
