@@ -27,22 +27,19 @@ public:
     // Returns `sz` rounded up to the closest multiple of `DISK_BLOCK`.
     static std::size_t block_up(const std::size_t sz) { return (sz + DISK_BLOCK - 1) & ~(DISK_BLOCK - 1); }
 
+    // Returns `true` iff the address `ptr` is disk-block aligned.
+    static bool is_block_aligned(const void* ptr);
 
 private:
 
     int fd_;    // Open file-descriptor.
     std::string path_;  // Filesystem path of the file.
 
-
-    // Returns `true` iff the address `ptr` is disk-block aligned.
-    static bool is_block_aligned(const void* ptr);
-
     // Returns `true` iff the size `sz` is disk-block aligned.
     static bool is_block_aligned(std::size_t sz);
 
     // Exits the executions due to reason `op`.
     void exit(const char* const op) const;
-
 
 public:
 

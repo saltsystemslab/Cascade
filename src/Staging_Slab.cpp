@@ -1,6 +1,9 @@
 
 #include "Staging_Slab.hpp"
+#include "Direct_File.hpp"
 #include "utility.cuh"
+
+#include <cstdlib>
 
 
 namespace gpu_saca
@@ -27,11 +30,19 @@ Staging_Slab::~Staging_Slab()
 
 void Staging_Slab::allocate(idx_t sz)
 {
+    // TODO: fix the following allocations by disk-block-aligning them and omit the failure-mode exit.
     CUDA_CHECK(pinned_allocate_host(key_, sz));
     CUDA_CHECK(pinned_allocate_host(suf_, sz));
     CUDA_CHECK(pinned_allocate_host(beta_, sz));
     CUDA_CHECK(pinned_allocate_host(msg_target_, sz));
     CUDA_CHECK(pinned_allocate_host(msg_rank_, sz));
+
+    const auto aligned = [](const auto* const addr){ return Direct_File::is_block_aligned(addr); };
+    if(!aligned(key_) || !aligned(key_) || !aligned(msg_target_) || !aligned(msg_rank_))
+    {
+        std::cerr << "Staging slabs' allocations are not disk-block aligned. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 
