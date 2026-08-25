@@ -479,8 +479,8 @@ void GPU_SACA<T_sym_>::setup_staging_config()
     {
         writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
         reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, omp_get_max_threads()));
-        if(reader_c_ + writer_c_ + 1 > static_cast<idx_t>(omp_get_max_threads()))
-            std::cerr << "Warning: the staging workers (readers, writers, and dispatcher) oversubscribes the " << omp_get_max_threads() << "available CPU-threads.\n";
+        if(reader_c_ + writer_c_ + STREAM_C > static_cast<idx_t>(omp_get_max_threads()))
+            std::cerr << "Warning: the staging workers (readers, writers, and dispatchers) oversubscribes the " << omp_get_max_threads() << "available CPU-threads.\n";
 
         INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_));
     }
@@ -517,9 +517,6 @@ void GPU_SACA<T_sym_>::setup_staging()
         s.allocate(chunk_cap_);
         F.enqueue(&s);
     }
-
-    for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
-        FS.enqueue(s_id);
 
     part_assembly = std::make_unique<Partition_Assembly[]>(p_);
 }
@@ -819,6 +816,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
     const auto part_sz = Active_sz[p_id];   // Size of this partition.
     auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
+    auto ws_sz = workspace_sz;              // Size of the workspace; `cub` takes it via a non-const reference.
     auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
 
     constexpr std::size_t BLOCK_SZ = 256;
@@ -846,7 +844,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
             // Sort the forward tags.
             CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 suf, perm,  // The forward tag is packed in suffix.
                 part_sz,
                 static_cast<int>(bit_layout::TAG_SHIFT), static_cast<int>(bit_layout::WORD_BITS),
@@ -874,7 +872,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
             // Sort the packed-prefixes.
             CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 key, perm,
                 part_sz,
                 Prefix_Key_Decomposer{},
@@ -912,7 +910,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 key_group_rank, key_rank,
                 cub::Max(),
                 part_sz,
@@ -924,7 +922,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         // Group non-unique rank keys and suffixes to the head and the rest to the tail of the partition.
         {
             CUDA_CHECK(cub::DevicePartition::Flagged(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 thrust::make_zip_iterator(thrust::make_tuple(key_rank, SA_sorted, beta_sorted)),
                 is_active,
                 thrust::make_zip_iterator(thrust::make_tuple(reinterpret_cast<idx_t*>(K_ranked), SA_ranked, beta_ranked)),
@@ -948,7 +946,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
-            workspace, workspace_sz,
+            workspace, ws_sz,
             msg_off, msg_off,
             p_ + 1,
             stream[buf_id]
@@ -1091,45 +1089,52 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     }
 
 
-    // Current thread itself is the GPU-dispatcher thread. It dispatches device-tasks by repeatedly:
-    // pulling a complete assembly and a free device-stream, and then dispatching these to the device
-    // (with an attached callback to add processed slabs to write-queue and free the device-stream).
+    std::vector<std::thread> dispatchers;   // Dispatchers-pool; one dispatcher per device-stream.
+    std::atomic<int64_t> dp_remain(active_part_c);  // Count of partitions left to dispatch to the device.
+    // Launch dispatchers threads-pool to dispatch the device-tasks, by repeatedly
+    // pulling a complete assembly, dispatching it to its device-stream, and then
+    // handing it over to the writers after device-execution.
     {
-        for(p_id_t dispatched = 0; dispatched < active_part_c; ++dispatched)
-        {
-            idx_t s_id;                     FS.wait_dequeue(s_id);      // Get a free device-stream.
-            Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
-            const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
-
-#ifdef TESTS
-            {
-                idx_t read_msg = 0;
-                for(auto* s : p_assembly->slab)
-                    read_msg += s->msg_sz();
-
-                if(read_msg != backend_->inbox_size(p_id))
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            dispatchers.emplace_back(
+                [&, s_id]
                 {
-                    std::cerr << "Read inbox size at current generation does not equal to written inbox size at previous generation. Aborting.\n";
-                    std::exit(EXIT_FAILURE);
-                }
-            }
+                    while(dp_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
+                        const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
+#ifdef TESTS
+                        {
+                            idx_t read_msg = 0;
+                            for(auto* s : p_assembly->slab)
+                                read_msg += s->msg_sz();
+
+                            if(read_msg != backend_->inbox_size(p_id))
+                            {
+                                std::cerr << "Read inbox size at current generation does not equal to written inbox size at previous generation. Aborting.\n";
+                                std::exit(EXIT_FAILURE);
+                            }
+                        }
 #endif
+                        if constexpr(init_rank_)    // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
+                            backend_->retire_prefix_and_open_key(p_id);
 
-            if constexpr(init_rank_)    backend_->retire_prefix_and_open_key(p_id); // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
+                        if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
+                        else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
 
-            if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
-            else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
+                        CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
 
-            CUDA_CHECK(cudaLaunchHostFunc(stream[s_id], on_partition_download, new Partition_Download_Callback_Args{this, p_assembly, s_id}));
-        }
+                        for(auto* s : p_assembly->slab) // The processed slabs now move to the write queue.
+                            W.enqueue(s);
+                    }
+                }
+            );
     }
 
 
     // Wait for the pipeline to finish.
     {
-        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
-            CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-
+        for(auto& d : dispatchers)  d.join();   // Dispatchers feed the write-queue, so they must drain before the writers.
         for(auto& r : readers)  r.join();
         for(auto& w : writers)  w.join();
 
@@ -1166,6 +1171,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     const auto part_sz = Active_sz[p_id];   // Size of the active-set of this partition.
     auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
+    auto ws_sz = workspace_sz;              // Size of the workspace; `cub` takes it via a non-const reference.
     auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
 
     constexpr std::size_t BLOCK_SZ = 256;
@@ -1189,7 +1195,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            workspace, workspace_sz,
+            workspace, ws_sz,
             suf, perm,
             part_sz,
             0, static_cast<int>(bit_layout::SUF_BITS),
@@ -1220,7 +1226,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
             // Sort the forward tags.
             CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 suf, perm,  // The tertiary (forward tag) is packed in suffix.
                 part_sz,
                 static_cast<int>(bit_layout::TAG_SHIFT), static_cast<int>(bit_layout::WORD_BITS),
@@ -1249,7 +1255,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
             // Sort the (primary, secondary) ranks.
             CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 key, perm,
                 part_sz,
                 0, static_cast<int>(key_bits_),
@@ -1286,7 +1292,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 key_group_rank, key_group_rank,
                 cub::Max(),
                 part_sz,
@@ -1294,7 +1300,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             ));
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 primary_key_group_rank, primary_key_group_rank,
                 cub::Max(),
                 part_sz,
@@ -1315,7 +1321,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Group non-unique rank keys and suffixes to the head and the rest to the tail of the partition.
         {
             CUDA_CHECK(cub::DevicePartition::Flagged(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 thrust::make_zip_iterator(thrust::make_tuple(K_sorted, SA_sorted, beta_sorted)),
                 is_active,
                 thrust::make_zip_iterator(thrust::make_tuple(K_re_ranked, SA_re_ranked, beta_re_ranked)),
@@ -1339,7 +1345,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
-            workspace, workspace_sz,
+            workspace, ws_sz,
             msg_off, msg_off,
             p_ + 1,
             stream[buf_id]
@@ -1364,22 +1370,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + s->off(), s->size() * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
         }
     }
-}
-
-
-template <typename T_sym_>
-void CUDART_CB GPU_SACA<T_sym_>::on_partition_download(void* const arg)
-{
-    auto* const cb_arg = static_cast<Partition_Download_Callback_Args*>(arg);
-    auto* const self = cb_arg->self;
-    auto* const p_assembly = cb_arg->p_assembly;
-    const auto s_id = cb_arg->s_id;
-
-    for(auto* s : p_assembly->slab) // The processed slabs move to the write queue.
-        self->W.enqueue(s);
-
-    self->FS.enqueue(s_id);   // This stream is now free to process a new partition.
-    delete cb_arg;
 }
 
 

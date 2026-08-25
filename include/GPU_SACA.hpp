@@ -98,7 +98,6 @@ private:
         blocking_q_t<Read_Task> RT; // Chunk-read tasks.
         blocking_q_t<Staging_Slab*> F;  // Free slabs.
         blocking_q_t<Partition_Assembly*> R;    // Slabs with chunks read from partition-backend, ready to be uploaded to device.
-        blocking_q_t<idx_t> FS; // IDs of the free device-streams.
         blocking_q_t<Staging_Slab*> W;  // Slabs with chunks downloaded from device, ready to be written to partition-backend.
 
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
@@ -110,17 +109,6 @@ private:
 
         // Returns the total memory used by the slab-pool.
         std::size_t slab_pool_memory() const;
-
-        struct Partition_Download_Callback_Args // Argument bundle for the host-callback at download of a partition's chunks from the device.
-        {
-            GPU_SACA* const self;
-            Partition_Assembly* const p_assembly;   // Assembly / chain of slabs making up the corresponding partition.
-            const idx_t s_id;   // ID of the CUDA stream processing the partition.
-        };
-
-        // Host-callback once a partition's chunks get downloaded back from the
-        // device.
-        static void CUDART_CB on_partition_download(void* arg);
     // }
 
     // Sampling parameters.
