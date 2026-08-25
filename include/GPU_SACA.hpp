@@ -132,6 +132,11 @@ private:
 
         uint8_t* is_active_buf[STREAM_C];   // Activeness-marker buffers for suffixes, per stream.
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
+
+        idx_t* P_off_d;                     // Exclusive cumulative size of the partitions; temporary, for verification purposes.
+        uint8_t* served_d[STREAM_C];        // Per-suffix marker of whether an inbox message is found for it, per stream.
+        idx_t* join_stat_d;                 // Counters across partitions in a generation: count of messages disagreeing with global ISA, and active suffixes with no messaged received;
+                                            // temporary, for verification purposes.
     // }
 
 

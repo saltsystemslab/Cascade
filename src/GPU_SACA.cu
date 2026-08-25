@@ -74,9 +74,11 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
         workspace_buf[b] = nullptr;
         is_active_buf[b] = nullptr;
         msg_off_buf[b] = nullptr;
+        served_d[b] = nullptr;
     }
 
     active_set_sz_d = nullptr;
+    P_off_d = nullptr, join_stat_d = nullptr;
 }
 
 
@@ -104,9 +106,11 @@ GPU_SACA<T_sym_>::~GPU_SACA()
         CUDA_CHECK(cudaFree(workspace_buf[b]));
         CUDA_CHECK(cudaFree(is_active_buf[b]));
         CUDA_CHECK(cudaFree(msg_off_buf[b]));
+        CUDA_CHECK(cudaFree(served_d[b]));
     }
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
+    CUDA_CHECK(cudaFree(P_off_d));  CUDA_CHECK(cudaFree(join_stat_d));
 }
 
 
@@ -450,9 +454,12 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
             CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
             CUDA_CHECK(cudaMalloc(&msg_off_buf[b], (p_ + 1) * sizeof(p_sz_t)));
+            CUDA_CHECK(cudaMalloc(&served_d[b], P_sz_max * sizeof(uint8_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
+        // CUDA_CHECK(cudaMalloc(&P_off_d, p_ * sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(&join_stat_d, 2 * sizeof(idx_t)));
     }
 
     return true;
@@ -701,6 +708,11 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
             P_off[p_id] = P_off[p_id - 1] + P_cap[p_id - 1];
 
         Active_sz = P_cap;
+        {
+            // TODO: temporary for verification purposes.
+            CUDA_CHECK(cudaMalloc(&P_off_d, p_ * sizeof(idx_t)));
+            CUDA_CHECK(cudaMemcpy(P_off_d, P_off.data(), p_ * sizeof(idx_t), cudaMemcpyHostToDevice));
+        }
 
 #ifdef STATS
         std::cerr << "Partition-size stats:\n";
@@ -1517,6 +1529,9 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         // Sort-and-rank each partition.
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
+#ifdef TESTS
+            CUDA_CHECK(cudaMemset(join_stat_d, 0, 2 * sizeof(idx_t)));
+#endif
             drive_pipeline<false>();
         }
 
@@ -1525,6 +1540,27 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             PROFILE_SCOPE("update_global_ranks");
             update_global_ranks();
         }
+
+#ifdef TESTS
+        {
+            idx_t join_stat[2];
+            CUDA_CHECK(cudaMemcpy(join_stat, join_stat_d, 2 * sizeof(idx_t), cudaMemcpyDeviceToHost));
+            if(join_stat[0] > 0)
+            {
+                std::cerr << "Messages carrying rank-values inconsistent with the global ISA: " << join_stat[0] << ". Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+
+            // Number of suffixes requiring poison-pills.
+            std::cerr <<    "Active suffixes with no received messages: " << join_stat[1] <<
+                            " (" << (join_stat[1] * 100.0 / active_set_size()) << "%).\n";
+            if(gen == 1 && join_stat[1] > 0)
+            {
+                std::cerr << "Generation 1 has suffixes with no received messages: impossible by design. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+        }
+#endif
 
         // Resize the partitions to their active-set size.
         // NB: this compaction must land *after* the preceding global rankings have been updated.
