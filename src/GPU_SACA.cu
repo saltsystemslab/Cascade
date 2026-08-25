@@ -1186,6 +1186,9 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
     idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
     msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
+    idx_t* inbox_target = nullptr;  // Message-targets in the inbox of this partition.
+    msg_rank_t* inbox_rank = nullptr;   // Message-ranks in the inbox of this partition.
+    const auto inbox_sz = backend_->inbox_size(p_id);   // Size of the inbox.
 
 
     // Sort the partition by suffix indices and consume the received messages.
@@ -1212,6 +1215,28 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
         CUDA_CHECK(cudaGetLastError());
         beta.selector ^= 1;
+    }
+
+
+    // Asynchronously upload this partition's inbox to the device.
+    {
+        inbox_target = key.Alternate();
+        inbox_rank = reinterpret_cast<msg_rank_t*>(inbox_target + inbox_sz);
+
+        const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
+        if(inbox_sz * MESSAGE_BYTES > P_sz_max * DEV_KEY_BYTES)
+        {
+            std::cerr <<    "Device-space for partition does not have enough space for its messages."
+                            " This is impossible due to the injectivity of rank-propagation messaging in a generation. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        for(auto* s : p_assembly.slab)
+            if(s->msg_sz() > 0)
+            {
+                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->msg_off(), s->msg_target(), s->msg_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->msg_off(), s->msg_rank(), s->msg_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            }
     }
 
 
