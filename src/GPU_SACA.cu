@@ -1045,6 +1045,14 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         if(s->msg_sz() > 0)
                             backend_->read_messages(*s);
 
+#ifdef TESTS
+                        if(!test::validate_inbox_routing(*s, P_id, n_))
+                        {
+                            std::cerr << "Inboxes contain messages routed to wrong partitions. Aborting.\n";
+                            std::exit(EXIT_FAILURE);
+                        }
+#endif
+
                         auto& p_assembly = part_assembly[rt.p_id];
                         p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
                         if(p_assembly.chunks_to_read.fetch_sub(1, std::memory_order_acq_rel) == 1)  // Last chunk read off for this partition; chunked-assembly is ready for the device.

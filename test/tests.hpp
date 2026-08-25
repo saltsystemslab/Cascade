@@ -85,6 +85,12 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, cons
 // Returns `true` iff the sender-recipient message volumes agree at `backend`.
 bool validate_inbox_mass(const Partition_Backend& backend);
 
+// Returns `true` iff all the messages in the slab `s` are addressed to `s`'s
+// corresponding partition, i.e. their destination partition-IDs, computed from
+// `P_id`, equal to the slab's partition-ID. There are `n` possible recipient
+// suffixes.
+bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* P_id, idx_t n);
+
 }
 
 
