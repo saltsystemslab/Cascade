@@ -8,6 +8,8 @@
 #include "Packed_Prefix.hpp"
 #include "bit-layout.hpp"
 
+#include "cub/cub.cuh"
+
 
 namespace gpu_saca
 {
@@ -234,6 +236,79 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
     const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + beta[i], static_cast<unsigned int>(1));  // Where to put the `beta[i]`'th partition's next incoming message.
     msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));   // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
     msg_rank[slot] = K[i];  // `j`'s local rank.
+}
+
+
+// Locates each message's (target in `msg_tgt` and rank in `msg_rank`) recipient
+// in the suffix-ordered active set `SA` (of size `n`). If found, marks the
+// recipient as served at `served`, and checks the message's payload against the
+// rank-array `K` (supplied from global ISA).
+// Grid organization: one thread per message.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
+                            const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K, const idx_t n,
+                            const idx_t secondary_bits, const idx_t* const __restrict__ P_off, const p_id_t p,
+                            uint8_t* const __restrict__ served, idx_t* const __restrict__ mismatch_c)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= msg_c)
+        return;
+
+    const auto tgt = bit_layout::suffix_of(msg_tgt[i]); // Recipient suffix of the message.
+    idx_t low = 0, high = n;
+    while(low < high)   // Locate `tgt` in the suffix-ordered active-set.
+    {
+        const auto mid = low + (high - low) / 2;
+        const auto j = bit_layout::suffix_of(SA[mid]);
+        if(j < tgt)
+            low = mid + 1;
+        else
+            high = mid;
+    }
+
+    if(low == n || bit_layout::suffix_of(SA[low]) != tgt)   // Recipient has already retired.
+        return;
+
+    // Following are for temporary verification purposes.
+    {
+        served[low] = 1;
+
+        const auto secondary_global = K[low] & ((idx_t(1) << secondary_bits) - 1);
+        const p_id_t fwd_tag = bit_layout::tag_of(SA[low]); // Recipient's forward tag, filled in from the global ISA.
+        p_id_t p_low = 0, p_high = p - 1;
+        while(p_low < p_high)   // Locate the sender's global rank in the partitions' ranges.
+        {
+            const p_id_t mid = p_low + (p_high - p_low + 1) / 2;
+            if(P_off[mid] <= secondary_global)
+                p_low = mid;
+            else
+                p_high = mid - 1;
+        }
+
+        const auto exp_local_rank = secondary_global - P_off[p_low];  // Expected local rank of the sender in its partition.
+        const p_id_t fwd_tag_rcvd = bit_layout::tag_of(msg_tgt[i]);   // Sender's forward tag from the preceding generation.
+        if(exp_local_rank != msg_rank[i] || fwd_tag_rcvd != fwd_tag)
+            atomicAdd(reinterpret_cast<unsigned long long*>(mismatch_c), 1ull);
+    }
+}
+
+
+// Counts the number of zero-entries in `served` (of size `n`) and puts the
+// count in `unserved_c`.
+template <idx_t BLOCK_SZ>
+__global__
+void count_unserved_suffixes_kernel(const uint8_t* const __restrict__ served, const idx_t n, idx_t* const __restrict__ unserved_c)
+{
+    typedef cub::BlockReduce<idx_t, BLOCK_SZ> Block_Reduce;
+    __shared__ typename Block_Reduce::TempStorage temp;
+
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    const idx_t unserved = (i < n && served[i] == 0 ? 1 : 0);
+    const auto block_c = Block_Reduce(temp).Sum(unserved);
+    if(threadIdx.x == 0 && block_c > 0)
+        atomicAdd(reinterpret_cast<unsigned long long*>(unserved_c), static_cast<unsigned long long>(block_c));
 }
 
 }

@@ -1249,6 +1249,29 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->msg_off(), s->msg_target(), s->msg_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->msg_off(), s->msg_rank(), s->msg_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
             }
+
+#ifdef TESTS
+        {
+            CUDA_CHECK(cudaMemsetAsync(served_d[buf_id], 0, part_sz * sizeof(uint8_t), stream[buf_id]));
+            if(inbox_sz > 0)
+            {
+                const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+                join_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                    (
+                        inbox_target, inbox_rank, inbox_sz,
+                        suf.Current(), key.Current(), part_sz,
+                        secondary_bits_, P_off_d, p_,
+                        served_d[buf_id], join_stat_d
+                    );
+                CUDA_CHECK(cudaGetLastError());
+            }
+
+            const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+            count_unserved_suffixes_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (served_d[buf_id], part_sz, join_stat_d + 1);
+            CUDA_CHECK(cudaGetLastError());
+        }
+#endif
     }
 
 
