@@ -15,7 +15,7 @@
 namespace gpu_saca
 {
 
-Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, idx_t* const rho, idx_t n, const idx_t secondary_bits, const p_id_t* const P_id):
+Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, idx_t* const rho, idx_t n, const p_id_t* const P_id):
       p_(P_cap.size())
     , plan_(P_cap, fixed_bytes, sizeof(Prefix_Key))
     , ram_(P_cap, plan_)
@@ -29,7 +29,6 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
     , ov_lock_(p_)
     , rho_(rho)
     , n_(n)
-    , secondary_bits_(secondary_bits)
     , k_(0)
     , P_id(P_id)
 {
@@ -122,7 +121,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
             const idx_t v = (j + k_ < n_ ? rho_[j + k_] : 0);   // Secondary rank, packed with previous generation's forward tag of the extension suffix.
             const auto phi = bit_layout::tag_of(v); // Forward tag of `j` for this generation.
             suf[i] = bit_layout::pack(j, phi);  // Writeback suffix to slab with its forward tag packed in.
-            key[i] = (key[i] << secondary_bits_) | bit_layout::rank_of(v);
+            key[i] = bit_layout::key(key[i], bit_layout::rank_of(v));
             beta[i] = (j >= ctx_ ? P_id[j - ctx_] : 0); // Backward tag.
         }
     }

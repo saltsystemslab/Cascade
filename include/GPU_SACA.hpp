@@ -54,9 +54,6 @@ private:
 
     p_id_t p_;  // Number of partitions for the SA.
 
-    const idx_t secondary_bits_;    // Bit-width of the secondary-key of a suffix: `\ceil(\log_2(n))`.
-    idx_t key_bits_;    // Bit-width of the packed (primary, secondary) key of a suffix — primary: `\ceil(\log_2(P_sz_max))`, secondary: `\ceil(\log_2(n))`.
-
     static constexpr idx_t ell = ELL_WORDS * sizeof(idx_t) / sizeof(T_sym_);    // Prefix-size of the initial sort-keys.
     static constexpr idx_t K = K_WORDS * sizeof(idx_t) / sizeof(T_sym_);    // Prefix-size of pivots.
 

@@ -128,16 +128,14 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 
 // Ranks the distinct key groups and primary-key groups from the sorted arrays
 // `K` and `SA` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
-// respectively, and marks the keys' activeness-flags into `is_active`. The low
-// `secondary_bits` bits of a key are its secondary, and the rest are primary.
-// The first entry of a group is ranked by its offset into `K`, whereas the rest
-// of the entries in the group are ranked `0`.
+// respectively, and marks the keys' activeness-flags into `is_active`. The
+// first entry of a group is ranked by its offset into `K`, whereas the rest of
+// the entries in the group are ranked `0`.
 // Grid organization: one thread per key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
 void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
-                                                                            const idx_t secondary_bits,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
                                                                             uint8_t* const __restrict__ is_active)
 {
@@ -156,7 +154,7 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
     else
     {
         const bool key_tie = tied(i, i - 1);
-        const bool primary_key_tie = ((K[i] >> secondary_bits) == (K[i - 1] >> secondary_bits));
+        const bool primary_key_tie = (bit_layout::primary_of(K[i]) == bit_layout::primary_of(K[i - 1]));
         key_group_rank[i] = (!key_tie ? i : 0);
         primary_key_group_rank[i] = (!primary_key_tie ? i : 0);
     }
@@ -175,14 +173,13 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
 template <idx_t BLOCK_SZ>
 __global__
 void refine_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n,
-                                const idx_t secondary_bits,
                                 const idx_t* const __restrict__ key_group_rank, const idx_t* const __restrict__ primary_key_group_rank)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    K[i] = (K[i] >> secondary_bits) + (key_group_rank[i] - primary_key_group_rank[i]);
+    K[i] = bit_layout::primary_of(K[i]) + (key_group_rank[i] - primary_key_group_rank[i]);
 }
 
 
@@ -251,7 +248,7 @@ template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
                             const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K, const idx_t n,
-                            const idx_t secondary_bits, const idx_t* const __restrict__ P_off, const p_id_t p,
+                            const idx_t* const __restrict__ P_off, const p_id_t p,
                             uint8_t* const __restrict__ recv_st, idx_t* const __restrict__ mismatch_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -277,7 +274,7 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
     {
         recv_st[low] = (is_poison_pill(msg_rank[i]) ? 2 : 1);
 
-        const auto secondary_global = K[low] & ((idx_t(1) << secondary_bits) - 1);
+        const auto secondary_global = bit_layout::secondary_of(K[low]);
         const p_id_t fwd_tag = bit_layout::tag_of(SA[low]); // Recipient's forward tag, filled in from the global ISA.
         p_id_t p_low = 0, p_high = p - 1;
         while(p_low < p_high)   // Locate the sender's global rank in the partitions' ranges.

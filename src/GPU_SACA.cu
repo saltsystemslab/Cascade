@@ -45,8 +45,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
       n_(n)
     , T_h_(T)
     , p_(0)
-    , secondary_bits_(util::math::bits_for(n_))
-    , key_bits_(0)
     , P_id(nullptr)
     , rho(nullptr)
     , ctx_(0)
@@ -306,13 +304,6 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
         p_sz_max = next_p_sz_max;
     }
 
-    // Cap partition-sizes so the 64-bit packed (primary, secondary) key of suffixes does not overflow.
-    {
-        const idx_t p_sz_max_from_packing = (secondary_bits_ == 0 ? std::numeric_limits<idx_t>::max() :
-                                                (secondary_bits_ == 64 ? 1 :
-                                                    static_cast<idx_t>((idx_t(1) << (64 - secondary_bits_)) / PART_SZ_IMBALANCE_SLACK)));
-        p_sz_max = std::min(p_sz_max, p_sz_max_from_packing);
-    }
 
     const idx_t p_min_from_budget = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
     idx_t p_min = p_min_from_budget;
@@ -354,6 +345,13 @@ bool GPU_SACA<T_sym_>::partition_sizes_fit() const
         return false;
     }
 
+    constexpr auto max_key = idx_t(1) << std::max(bit_layout::PRIMARY_BITS, bit_layout::SECONDARY_BITS);
+    if(P_sz_max > max_key)
+    {
+        std::cerr <<    "Maximum partition-size " << P_sz_max << " exceeds hard-constraint " << max_key <<
+                        " set by local-rank width.\n";
+        return false;
+    }
 
     return true;
 }
@@ -601,7 +599,7 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_, P_id);
+            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, P_id);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -749,17 +747,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         std::cerr << "Partition-size stats:\n";
         util::Collection_Stats::get_collection_stat(P_cap).print();
 #endif
-    }
-
-    // Determine bit-width of primary-keys of suffixes.
-    {
-        const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
-        key_bits_ = secondary_bits_ + util::math::bits_for(P_sz_max);
-        if(key_bits_ > 64)
-        {
-            std::cerr << "Packed (primary, secondary) key needs " << key_bits_ << ". The skew in partitioning is adversarial. Aborting.\n";
-            std::exit(EXIT_FAILURE);
-        }
     }
 
 #ifdef TESTS
@@ -1293,7 +1280,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                     (
                         inbox_target, inbox_rank, inbox_sz,
                         suf.Current(), key.Current(), part_sz,
-                        secondary_bits_, P_off_d, p_,
+                        P_off_d, p_,
                         recv_st_d[buf_id], join_stat_d
                     );
                 CUDA_CHECK(cudaGetLastError());
@@ -1351,7 +1338,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 workspace, ws_sz,
                 key, perm,
                 part_sz,
-                0, static_cast<int>(key_bits_),
+                0, bit_layout::KEY_BITS,
                 stream[buf_id]
             ));
 
@@ -1381,7 +1368,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K_sorted, SA_sorted, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank, is_active);
+                (K_sorted, SA_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -1405,7 +1392,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Refine rankings to finer resolution based on the in-primary-key-group offsets of different key groups.
         {
             refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K_sorted, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank);
+                (K_sorted, part_sz, key_group_rank, primary_key_group_rank);
             CUDA_CHECK(cudaGetLastError());
         }
 

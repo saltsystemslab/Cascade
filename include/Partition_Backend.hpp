@@ -53,7 +53,6 @@ private:
 
     idx_t* rho_;    // Global ranks of the suffixes.
     const idx_t n_; // Text-size.
-    const idx_t secondary_bits_;    // Bit-width of the secondary-key of a suffix: `\ceil(\log_2(n))`.
     idx_t k_;   // Current stride (half of the context this generation is resolving) of the suffixes in the algorithm execution.
     idx_t ctx_; // Context-size the current generation is resolving.
     const p_id_t* const P_id;   // Partition-IDs.
@@ -77,10 +76,9 @@ public:
     // Constructs a backend for partitions with capacities `P_cap`. It spills to
     // spill-store `spill` whenever the memory budget of the host (less its
     // fixed allocation cost `fixed_bytes) cannot hold some data. The global-
-    // ranks array `rho` of size `n` and the secondary-key bit-width
-    // `secondary_bits` are used to extend the ranks of the suffixes while they
-    // are read off the backend. Partition-ID map `P_id` feeds the routing tags.
-    Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t fixed_bytes, idx_t* rho, idx_t n, idx_t secondary_bits, const p_id_t* P_id);
+    // ranks array `rho` of size `n` is used to extend the ranks of the suffixes
+    // while they are read off the backend. Partition-ID map `P_id` feeds the routing tags.
+    Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t fixed_bytes, idx_t* rho, idx_t n, const p_id_t* P_id);
 
     Partition_Backend(const Partition_Backend&) = delete;
     Partition_Backend& operator=(const Partition_Backend&) = delete;
