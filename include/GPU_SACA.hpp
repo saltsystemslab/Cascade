@@ -134,7 +134,7 @@ private:
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
 
         idx_t* P_off_d;                     // Exclusive cumulative size of the partitions; temporary, for verification purposes.
-        uint8_t* served_d[STREAM_C];        // Per-suffix marker of whether an inbox message is found for it, per stream.
+        uint8_t* recv_st_d[STREAM_C];       // Per-suffix message-receipt state; 0: no message, 1: received a regular one, 2: received a poison-pill; per stream.
         idx_t* join_stat_d;                 // Counters across partitions in a generation: count of messages disagreeing with global ISA, and active suffixes with no messaged received;
                                             // temporary, for verification purposes.
     // }

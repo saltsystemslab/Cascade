@@ -6,6 +6,7 @@
 
 #include "types.hpp"
 #include "Direct_File.hpp"
+#include "cross-compile.hpp"
 
 #include <algorithm>
 
@@ -13,12 +14,34 @@
 namespace gpu_saca
 {
 
+namespace
+{
+
+// The MSB of a message's rank carries its finality, aka the poison-pill status.
+constexpr inline msg_rank_t MSG_POISON_PILL_BIT = static_cast<msg_rank_t>(1) << (8 * sizeof(msg_rank_t) - 1);
+constexpr inline msg_rank_t MSG_RANK_MASK = MSG_POISON_PILL_BIT - 1;    // Mask to extract actual rank-value from a message's rank field.
+
+}
+
 // Size of a message.
 constexpr inline std::size_t MESSAGE_BYTES = sizeof(idx_t) + sizeof(msg_rank_t);
 
 // Size-granularity at which a destination-partition's message-group starts;
 // required for `O_DIRECT` alignment purposes.
 constexpr inline std::size_t MSG_ALIGN = Direct_File::DISK_BLOCK / std::min<idx_t>(sizeof(idx_t), sizeof(msg_rank_t));
+
+
+// Returns `true` iff the message-rank `r` is a poison-pill.
+CUDA_SPECIFIER
+inline bool is_poison_pill(const msg_rank_t r) { return r & MSG_POISON_PILL_BIT; }
+
+// Returns a poison-pill wrapping the message-rank `r`.
+CUDA_SPECIFIER
+inline msg_rank_t poison_pill(const msg_rank_t r) { return r | MSG_POISON_PILL_BIT; }
+
+// Returns the actual rank-value wrapped in the message-rank `r`.
+CUDA_SPECIFIER
+inline msg_rank_t extract_rank(const msg_rank_t r) { return r & MSG_RANK_MASK; }
 
 // Returns the inbox-parity a generation with index `gen` writes to.
 static constexpr inline std::size_t write_parity(const idx_t gen) { return (gen & 1) ^ 1; }

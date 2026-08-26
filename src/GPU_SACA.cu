@@ -74,7 +74,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
         workspace_buf[b] = nullptr;
         is_active_buf[b] = nullptr;
         msg_off_buf[b] = nullptr;
-        served_d[b] = nullptr;
+        recv_st_d[b] = nullptr;
     }
 
     active_set_sz_d = nullptr;
@@ -106,7 +106,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
         CUDA_CHECK(cudaFree(workspace_buf[b]));
         CUDA_CHECK(cudaFree(is_active_buf[b]));
         CUDA_CHECK(cudaFree(msg_off_buf[b]));
-        CUDA_CHECK(cudaFree(served_d[b]));
+        CUDA_CHECK(cudaFree(recv_st_d[b]));
     }
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
@@ -260,16 +260,22 @@ void GPU_SACA<T_sym_>::select_pivots()
 template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
-    // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sort, plus one flag byte to mark its activeness in subsequent steps.
+    // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sorts, one activeness-flag byte, and one message-receipt status byte.
     // 2 x (key + suffix + permutation-index + backward tag) ping-pong + activeness flag.
-    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t);
+    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t) + sizeof(uint8_t);
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
     const double imb_slack = env::get_f64("GPU_SACA_IMBALANCE_SLACK").value_or(PART_SZ_IMBALANCE_SLACK);
     const std::size_t budget = raw_budget / imb_slack;  // The actual partition-sizes, to be found out later, can be larger due to the probabilistic nature of pivoting.
 
-    idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);   // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
+    idx_t p_sz_max; // Maximum supported suffix-count per partition.
+    {
+        const idx_t from_device_mem = budget / (STREAM_C * bytes_per_suf);    // Max count so that `STREAM_C` partitions can fit concurrently in the worst-case.
+        const idx_t from_msgs = MSG_RANK_MASK + 1;  // Max count so that local-ranks carried in rank-propagation messages do not overflow.
+        p_sz_max = std::min(from_device_mem, from_msgs);
+    }
+
     while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.
     {
         const auto req_workspace_sz = cub_workspace_size(p_sz_max);
@@ -414,10 +420,11 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
     //      3. `cub::DoubleBuffer` permutation-indices, generated and transformed (2 x `p_sz_t`);
     //      4. `cub::DoubleBuffer` backward routing tags, input and output (2 x `p_id_t`);
-    //      5. activeness-flag, output (1 x `uint8_t`).
+    //      5. activeness-flag, output (1 x `uint8_t`);
+    //      6. message-receipt status, output (1 x `uint8_t`).
     // Message-collation requires `p + 1` counts (per-partition offset).
     // `cub` itself requires a workspace for sort and scan.
-    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + sizeof(uint8_t)) + (p + 1) * sizeof(p_sz_t) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + 2 * sizeof(uint8_t)) + (p + 1) * sizeof(p_sz_t) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
     const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
@@ -429,7 +436,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + 2 * sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -454,12 +461,11 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
             CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
             CUDA_CHECK(cudaMalloc(&msg_off_buf[b], (p_ + 1) * sizeof(p_sz_t)));
-            CUDA_CHECK(cudaMalloc(&served_d[b], P_sz_max * sizeof(uint8_t)));
+            CUDA_CHECK(cudaMalloc(&recv_st_d[b], P_sz_max * sizeof(uint8_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
-        // CUDA_CHECK(cudaMalloc(&P_off_d, p_ * sizeof(idx_t)));
-        CUDA_CHECK(cudaMalloc(&join_stat_d, 2 * sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(&join_stat_d, 3 * sizeof(idx_t)));
     }
 
     return true;
@@ -965,7 +971,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         ));
 
         emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, msg_target, msg_rank, msg_off);
+            (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, active_set_sz_d + p_id, msg_target, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1252,7 +1258,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
 #ifdef TESTS
         {
-            CUDA_CHECK(cudaMemsetAsync(served_d[buf_id], 0, part_sz * sizeof(uint8_t), stream[buf_id]));
+            CUDA_CHECK(cudaMemsetAsync(recv_st_d[buf_id], 0, part_sz * sizeof(uint8_t), stream[buf_id]));
             if(inbox_sz > 0)
             {
                 const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
@@ -1261,14 +1267,14 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                         inbox_target, inbox_rank, inbox_sz,
                         suf.Current(), key.Current(), part_sz,
                         secondary_bits_, P_off_d, p_,
-                        served_d[buf_id], join_stat_d
+                        recv_st_d[buf_id], join_stat_d
                     );
                 CUDA_CHECK(cudaGetLastError());
             }
 
             const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
-            count_unserved_suffixes_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (served_d[buf_id], part_sz, join_stat_d + 1);
+            count_message_receipts_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (recv_st_d[buf_id], part_sz, join_stat_d + 1, join_stat_d + 2);
             CUDA_CHECK(cudaGetLastError());
         }
 #endif
@@ -1412,7 +1418,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         ));
 
         emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, msg_target, msg_rank, msg_off);
+            (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, active_set_sz_d + p_id, msg_target, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1518,6 +1524,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         backend_->open_deferred_inboxes();
     }
 
+#ifdef TESTS
+    idx_t prev_gen_poison_pill_c = 0;
+#endif
+
     idx_t gen = 1;
     for(idx_t k = ell; k < n_; k *= 2, ++gen)
     {
@@ -1553,7 +1563,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
 #ifdef TESTS
-            CUDA_CHECK(cudaMemset(join_stat_d, 0, 2 * sizeof(idx_t)));
+            CUDA_CHECK(cudaMemset(join_stat_d, 0, 3 * sizeof(idx_t)));
 #endif
             drive_pipeline<false>();
         }
@@ -1566,22 +1576,25 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
 #ifdef TESTS
         {
-            idx_t join_stat[2];
-            CUDA_CHECK(cudaMemcpy(join_stat, join_stat_d, 2 * sizeof(idx_t), cudaMemcpyDeviceToHost));
+            idx_t join_stat[3];
+            CUDA_CHECK(cudaMemcpy(join_stat, join_stat_d, 3 * sizeof(idx_t), cudaMemcpyDeviceToHost));
             if(join_stat[0] > 0)
             {
                 std::cerr << "Messages carrying rank-values inconsistent with the global ISA: " << join_stat[0] << ". Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
 
-            // Number of suffixes requiring poison-pills.
-            std::cerr <<    "Active suffixes with no received messages: " << join_stat[1] <<
-                            " (" << (join_stat[1] * 100.0 / active_set_size()) << "%).\n";
-            if(gen == 1 && join_stat[1] > 0)
+            const auto cohort = active_set_size();
+            std::cerr <<    "Active suffixes with no received messages: " << join_stat[1] << " (" << (join_stat[1] * 100.0 / cohort) << "%);"
+                            " received poison-pill: " << join_stat[2] << " (" << (join_stat[2] * 100.0 / cohort) << "%);\n";
+            if(prev_gen_poison_pill_c < join_stat[1])
             {
-                std::cerr << "Generation 1 has suffixes with no received messages: impossible by design. Aborting.\n";
+                std::cerr << "Unserved suffixes (" << join_stat[1] << ") exceed the pills available from the preceding generation ("
+                          << prev_gen_poison_pill_c << "). Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
+
+            prev_gen_poison_pill_c = join_stat[2];
         }
 #endif
 
