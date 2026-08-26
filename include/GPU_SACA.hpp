@@ -67,6 +67,7 @@ private:
     std::vector<idx_t> P_cap;   // Full initial sizes of the partitions.
     std::vector<idx_t> Active_sz;   // Active-set sizes of the suffix partitions.
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
+    std::vector<idx_t> cohort_sz;   // Full cohort size per generation.
 
     idx_t* rho; // Global rank of the suffixes.
 

@@ -760,6 +760,8 @@ void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
     ctx_ = ctx;
     backend_->set_context(ctx_);
     backend_->open_generation(gen);
+
+    cohort_sz.push_back(active_set_size());
 }
 
 
@@ -1574,6 +1576,13 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             update_global_ranks();
         }
 
+        // Resize the partitions to their active-set size.
+        // NB: this compaction must land *after* the preceding global rankings have been updated.
+        {
+            PROFILE_SCOPE("collect_active_set_sizes");
+            CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
+        }
+
 #ifdef TESTS
         {
             idx_t join_stat[3];
@@ -1584,7 +1593,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 std::exit(EXIT_FAILURE);
             }
 
-            const auto cohort = active_set_size();
+            const auto cohort = cohort_sz[gen];
             std::cerr <<    "Active suffixes with no received messages: " << join_stat[1] << " (" << (join_stat[1] * 100.0 / cohort) << "%);"
                             " received poison-pill: " << join_stat[2] << " (" << (join_stat[2] * 100.0 / cohort) << "%);\n";
             if(prev_gen_poison_pill_c < join_stat[1])
@@ -1595,15 +1604,16 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             }
 
             prev_gen_poison_pill_c = join_stat[2];
+
+            const auto retired = cohort_sz[gen] - active_set_size();
+            if(join_stat[1] + join_stat[2] > retired)   // Every unserved and pill-receiver must've retired this generation.
+            {
+                std::cerr << "Pill-receivers (" << join_stat[2] << ") plus unserved (" << join_stat[1]
+                          << ") exceed this generation's retirees (" << retired << "). Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
         }
 #endif
-
-        // Resize the partitions to their active-set size.
-        // NB: this compaction must land *after* the preceding global rankings have been updated.
-        {
-            PROFILE_SCOPE("collect_active_set_sizes");
-            CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
-        }
 
         const auto t_1 = gpu_saca::timer::now();
         (void)t_0, (void)t_1;
