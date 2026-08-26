@@ -224,7 +224,7 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
 // delineates the active-retired set split of the cohort.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
-template <idx_t BLOCK_SZ>
+template <bool packed_key_, idx_t BLOCK_SZ>
 __global__
 void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA,
                             const p_id_t* const __restrict__ beta,
@@ -241,7 +241,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
         return;
 
     const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + beta[i], static_cast<unsigned int>(1));  // Where to put the `beta[i]`'th partition's next incoming message.
-    const msg_rank_t primary = bit_layout::primary_of(K[i]);
+    const msg_rank_t primary = packed_key_ ? bit_layout::primary_of(K[i]) : K[i];
     msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));   // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
     msg_rank[slot] = (i < *active_sz ? primary : poison_pill(primary)); // `j`'s local rank.
 }

@@ -984,7 +984,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             stream[buf_id]
         ));
 
-        emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+        emit_messages_kernel<false, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (reinterpret_cast<const idx_t*>(K_ranked), SA_ranked, beta_ranked, part_sz, ctx_, active_set_sz_d + p_id, msg_target, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
     }
@@ -1434,7 +1434,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             stream[buf_id]
         ));
 
-        emit_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+        emit_messages_kernel<true, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (K_re_ranked, SA_re_ranked, beta_re_ranked, part_sz, ctx_, active_set_sz_d + p_id, msg_target, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
 
