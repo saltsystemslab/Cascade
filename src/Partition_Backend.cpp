@@ -99,6 +99,10 @@ void Partition_Backend::read_keys(Staging_Slab& s, const std::vector<idx_t>& P_o
     {
         INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().gather_ns);
 
+#ifdef TESTS
+        idx_t prev_suf = 0, prev_key = 0;
+#endif
+
         for(idx_t i = 0; i < s.size(); ++i)
         {
 #ifdef TESTS
@@ -110,11 +114,13 @@ void Partition_Backend::read_keys(Staging_Slab& s, const std::vector<idx_t>& P_o
                 std::exit(EXIT_FAILURE);
             }
 
-            if(i > 0 && !test::validate_target_coherence(suf[i - 1], key[i - 1], suf[i], key[i]))
+            if(i > 0 && !test::validate_target_coherence(prev_suf, prev_key, suf[i], key[i]))
             {
                 std::cerr << "Target coherence invariant broken. Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
+
+            prev_suf = suf[i], prev_key = key[i];
 #endif
 
             const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
