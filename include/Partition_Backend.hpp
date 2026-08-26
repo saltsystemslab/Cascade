@@ -132,7 +132,7 @@ public:
     // Reads the staging slab `s`'s chunk of suffixes and their corresponding
     // ranks from the backend into it, and folds in their secondary keys into
     // the ranks, transforming the ranks into full keys.
-    void read_keys(Staging_Slab& s) const;
+    void read_keys(Staging_Slab& s, const std::vector<idx_t>& P_off) const;
 
     // Reads `sz` suffixes and their corresponding ranks of the `p_id`'th
     // partition, from its offset `off`, into `suf` and `key` respectively.

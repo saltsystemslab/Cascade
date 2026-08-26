@@ -84,7 +84,7 @@ void Partition_Backend::read_prefixes(Staging_Slab& s) const
 }
 
 
-void Partition_Backend::read_keys(Staging_Slab& s) const
+void Partition_Backend::read_keys(Staging_Slab& s, const std::vector<idx_t>& P_off) const
 {
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());
@@ -120,8 +120,21 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
             const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
             const idx_t v = (j + k_ < n_ ? rho_[j + k_] : 0);   // Secondary rank, packed with previous generation's forward tag of the extension suffix.
             const auto phi = bit_layout::tag_of(v); // Forward tag of `j` for this generation.
+            const auto r_global = bit_layout::rank_of(v);   // Secondary value in global rank.
+            p_id_t low = 0, high = p_ - 1;
+            while(low < high)
+            {
+                const auto mid = low + (high - low + 1) / 2;
+                if(P_off[mid] <= r_global)
+                    low = mid;
+                else
+                    high = mid - 1;
+            }
+
+            const auto r_local = r_global - P_off[low]; // Secondary value in local rank.
+
             suf[i] = bit_layout::pack(j, phi);  // Writeback suffix to slab with its forward tag packed in.
-            key[i] = bit_layout::key(key[i], bit_layout::rank_of(v));
+            key[i] = bit_layout::key(key[i], r_local);
             beta[i] = (j >= ctx_ ? P_id[j - ctx_] : 0); // Backward tag.
         }
     }

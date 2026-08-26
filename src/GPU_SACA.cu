@@ -1070,7 +1070,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
                         s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
                         if constexpr(init_rank_)    backend_->read_prefixes(*s);
-                        else                        backend_->read_keys(*s);
+                        else                        backend_->read_keys(*s, P_off);
 
                         if(s->msg_sz() > 0)
                             backend_->read_messages(*s);
@@ -1280,7 +1280,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                     (
                         inbox_target, inbox_rank, inbox_sz,
                         suf.Current(), key.Current(), part_sz,
-                        P_off_d, p_,
                         recv_st_d[buf_id], join_stat_d
                     );
                 CUDA_CHECK(cudaGetLastError());

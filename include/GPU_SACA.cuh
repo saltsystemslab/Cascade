@@ -248,7 +248,6 @@ template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
                             const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K, const idx_t n,
-                            const idx_t* const __restrict__ P_off, const p_id_t p,
                             uint8_t* const __restrict__ recv_st, idx_t* const __restrict__ mismatch_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -274,19 +273,8 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
     {
         recv_st[low] = (is_poison_pill(msg_rank[i]) ? 2 : 1);
 
-        const auto secondary_global = bit_layout::secondary_of(K[low]);
         const p_id_t fwd_tag = bit_layout::tag_of(SA[low]); // Recipient's forward tag, filled in from the global ISA.
-        p_id_t p_low = 0, p_high = p - 1;
-        while(p_low < p_high)   // Locate the sender's global rank in the partitions' ranges.
-        {
-            const p_id_t mid = p_low + (p_high - p_low + 1) / 2;
-            if(P_off[mid] <= secondary_global)
-                p_low = mid;
-            else
-                p_high = mid - 1;
-        }
-
-        const auto exp_local_rank = secondary_global - P_off[p_low];  // Expected local rank of the sender in its partition.
+        const auto exp_local_rank = bit_layout::secondary_of(K[low]);   // Expected local rank of the sender in its partition.
         const p_id_t fwd_tag_rcvd = bit_layout::tag_of(msg_tgt[i]);   // Sender's forward tag from the preceding generation.
         if(exp_local_rank != extract_rank(msg_rank[i]) || fwd_tag_rcvd != fwd_tag)
             atomicAdd(reinterpret_cast<unsigned long long*>(mismatch_c), 1ull);
