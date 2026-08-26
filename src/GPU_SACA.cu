@@ -1527,7 +1527,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
     }
 
 #ifdef TESTS
-    idx_t prev_gen_poison_pill_c = 0;
+    idx_t prev_pill_c = 0, prev_unserved_c = 0;
 #endif
 
     idx_t gen = 1;
@@ -1594,16 +1594,20 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             }
 
             const auto cohort = cohort_sz[gen];
-            std::cerr <<    "Active suffixes with no received messages: " << join_stat[1] << " (" << (join_stat[1] * 100.0 / cohort) << "%);"
-                            " received poison-pill: " << join_stat[2] << " (" << (join_stat[2] * 100.0 / cohort) << "%);\n";
-            if(prev_gen_poison_pill_c < join_stat[1])
+            const auto unserved = join_stat[1];
+            const auto pill_c = join_stat[2];
+            std::cerr <<    "Active suffixes with no received messages: " << unserved << " (" << (unserved * 100.0 / cohort) << "%);"
+                            " received poison-pill: " << pill_c << " (" << (pill_c * 100.0 / cohort) << "%);\n";
+
+            // Coverage check: every unserved suffix must have a forwarded rank available from the preceding generation.
+            if(prev_pill_c + prev_unserved_c < unserved)
             {
-                std::cerr << "Unserved suffixes (" << join_stat[1] << ") exceed the pills available from the preceding generation ("
-                          << prev_gen_poison_pill_c << "). Aborting.\n";
+                std::cerr << "Unserved suffixes (" << unserved << ") exceed the forwarded pills available from the preceding generation ("
+                          << prev_pill_c << "). Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
 
-            prev_gen_poison_pill_c = join_stat[2];
+            prev_pill_c = join_stat[2], prev_unserved_c = join_stat[1];
 
             const auto retired = cohort_sz[gen] - active_set_size();
             if(join_stat[1] + join_stat[2] > retired)   // Every unserved and pill-receiver must've retired this generation.
