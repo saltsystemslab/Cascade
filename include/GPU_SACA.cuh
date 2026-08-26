@@ -321,6 +321,21 @@ void count_message_receipts_kernel(const uint8_t* const __restrict__ recv_st, co
     }
 }
 
+
+// Transforms the packed keys in `K` to unpacked primary keys.
+// Grid organization: one thread per key.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void unpack_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+    K[i] = bit_layout::primary_of(K[i]);
+}
+
 }
 
 
