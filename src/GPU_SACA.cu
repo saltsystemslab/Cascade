@@ -132,7 +132,15 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
-    {   PROFILE_SCOPE("partition");                 partition();    }
+    {
+        PROFILE_SCOPE("partition");
+        partition();
+        if(!partition_sizes_fit())
+        {
+            std::cerr << "Unsuitable partition-sizes for " << p_ << " partitions. Increase `K` and / or `GPU_SACA_P_TARGET`. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+    }
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
@@ -331,6 +339,23 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     const auto p_sz_bound = (n_ + p_min - 1) / p_min;   // Maximum supported size of a partition based on the minimum partition-count.
 
     return p_sz_bound;
+}
+
+
+template <typename T_sym_>
+bool GPU_SACA<T_sym_>::partition_sizes_fit() const
+{
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
+
+    if(P_sz_max > MSG_RANK_MASK + 1)    // Local-ranks carried in rank-propagation messages must not overflow.
+    {
+        std::cerr <<    "Maximum partition-size " << P_sz_max << " exceeds hard-constraint " << (MSG_RANK_MASK + 1) <<
+                        " set by local-rank bit-width in rank-propagation messages.\n";
+        return false;
+    }
+
+
+    return true;
 }
 
 

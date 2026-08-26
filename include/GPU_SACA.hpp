@@ -155,6 +155,10 @@ private:
     // occupy the available device-memory, their sizes must be evenly balanced.
     idx_t partition_size_upper_bound() const;
 
+    // Returns `true` iff the computed partition-sizes fit all hard-constraints
+    // from the implementation.
+    bool partition_sizes_fit() const;
+
     // Returns the required `cub` workspace-size in bytes, for sort and scan,
     // for `part_sz` many elements.
     static std::size_t cub_workspace_size(idx_t part_sz);
