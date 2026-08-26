@@ -237,7 +237,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
 
     const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + beta[i], static_cast<unsigned int>(1));  // Where to put the `beta[i]`'th partition's next incoming message.
     msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));   // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
-    msg_rank[slot] = (i >= *active_sz ? K[i] : poison_pill(K[i]));  // `j`'s local rank.
+    msg_rank[slot] = (i < *active_sz ? K[i] : poison_pill(K[i]));  // `j`'s local rank.
 }
 
 
