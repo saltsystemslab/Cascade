@@ -192,14 +192,15 @@ void refine_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n,
 
 
 // Counts the rank-propagation messages that each partition will receive at the
-// next generation from the cohort `SA` (of size `n`) into `msg_count`. The
+// next generation from the cohort `SA` (of size `n`) into `msg_count`. `K` has
+// the cohort's packed keys, required for detecting poison-pill forwarding. The
 // current generation resolved context-size `ctx`. The backward routing tag for
 // each sender from `SA` is in the corresponding entry in `beta`.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void count_message_destination_distribution_kernel( const idx_t* const __restrict__ SA,
+void count_message_destination_distribution_kernel( const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K,
                                                     const beta_t* const __restrict__ beta,
                                                     const idx_t n, const idx_t ctx,
                                                     p_sz_t* const __restrict__ msg_count)
@@ -207,6 +208,13 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
+
+    const auto j = bit_layout::suffix_of(SA[i]);
+    if(j >= ctx)    // Regular payload message.
+        atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + bit_layout::beta_cur_gen(beta[i]), static_cast<unsigned int>(1));
+
+    if(bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1))   // Poison-pill forwarding.
+        atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
 
     if(bit_layout::suffix_of(SA[i]) < ctx)  // No valid target recipient for next generation.
         return;

@@ -974,7 +974,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
         count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (SA_ranked, beta_ranked, part_sz, ctx_, msg_off);
+            (SA_ranked, reinterpret_cast<const idx_t*>(K_ranked), beta_ranked, part_sz, ctx_, msg_off);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
@@ -1424,7 +1424,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
         count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (SA_re_ranked, beta_re_ranked, part_sz, ctx_, msg_off);
+            (SA_re_ranked, K_re_ranked, beta_re_ranked, part_sz, ctx_, msg_off);
         CUDA_CHECK(cudaGetLastError());
 
         CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
