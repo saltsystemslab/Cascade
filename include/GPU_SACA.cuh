@@ -239,7 +239,8 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
 
 
 // Locates each message's (target in `msg_tgt` and rank in `msg_rank`) recipient
-// in the suffix-ordered active set `SA` (of size `n`). If found, fills the
+// in the suffix-ordered active set `SA` (of size `n`). If found, fills in the
+// secondary key of the recipient with the message's rank. Also fills the
 // receipt-state of the recipient `recv_st`, and checks the message's payload
 // against the rank-array `K` (supplied from global ISA).
 // Grid organization: one thread per message.
@@ -247,7 +248,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
 template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K, const idx_t n,
+                            const idx_t* const __restrict__ SA, idx_t* const __restrict__ K, const idx_t n,
                             uint8_t* const __restrict__ recv_st, idx_t* const __restrict__ mismatch_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -279,6 +280,9 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
         if(exp_local_rank != extract_rank(msg_rank[i]) || fwd_tag_rcvd != fwd_tag)
             atomicAdd(reinterpret_cast<unsigned long long*>(mismatch_c), 1ull);
     }
+
+    const auto key = bit_layout::update_secondary(K[low], extract_rank(msg_rank[i]));
+    K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key;
 }
 
 

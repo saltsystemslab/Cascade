@@ -46,7 +46,7 @@ constexpr idx_t SECONDARY_MASK = (idx_t(1) << SECONDARY_BITS) - 1;
 constexpr idx_t PRIMARY_MASK = ((idx_t(1) << PRIMARY_BITS) - 1) << SECONDARY_BITS;
 
 constexpr idx_t KEY_BITS = SECONDARY_BITS + PRIMARY_BITS;
-constexpr idx_t POISON_PILL_MASK = idx_t(1) << KEY_BITS;
+constexpr idx_t POISON_PILL_RECEIPT = idx_t(1) << KEY_BITS;
 
 
 // Returns the word packing `val` with forward tag `tag`.
@@ -73,11 +73,17 @@ CUDA_SPECIFIER inline idx_t primary_of(const idx_t key) { return (key & PRIMARY_
 // Returns the secondary key packed in the composite key `key`.
 CUDA_SPECIFIER inline idx_t secondary_of(const idx_t key) { return key & SECONDARY_MASK; }
 
-// Returns `true` iff the composite key `key` carries a poison pill.
-CUDA_SPECIFIER inline bool carries_poison_pill(const idx_t key) { return key & POISON_PILL_MASK; }
+// Returns `true` iff the composite key `key` had received a poison pill.
+CUDA_SPECIFIER inline bool received_poison_pill(const idx_t key) { return key & POISON_PILL_RECEIPT; }
 
 // Returns the composite key made from `primary` and `secondary`.
 CUDA_SPECIFIER inline idx_t key(const idx_t primary, const idx_t secondary) { return (primary << SECONDARY_BITS) | secondary; }
+
+// Returns the composite key `key` with its secondary updated to `secondary`.
+CUDA_SPECIFIER inline idx_t update_secondary(const idx_t key, const idx_t secondary) { return (key & ~SECONDARY_MASK) | secondary; }
+
+// Returns the composite key `key` marking it as having received a poison pill.
+CUDA_SPECIFIER inline idx_t mark_poison_pill_receipt(const idx_t key) { return key | POISON_PILL_RECEIPT; }
 
 
 // Returns `true` iff a text of size `n` partitioned into `p` parts fits the
