@@ -268,7 +268,7 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
     // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sorts, one activeness-flag byte, and one message-receipt status byte.
     // 2 x (key + suffix + permutation-index + backward tag) ping-pong + activeness flag.
-    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + sizeof(uint8_t) + sizeof(uint8_t);
+    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + sizeof(uint8_t) + sizeof(uint8_t);
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
@@ -459,7 +459,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(p_id_t)) + 2 * sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + 2 * sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -478,7 +478,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
                 CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * DEV_KEY_BYTES));
                 CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
                 CUDA_CHECK(cudaMalloc(&perm_buf[b][r], P_sz_max * sizeof(p_sz_t)));
-                CUDA_CHECK(cudaMalloc(&beta_buf[b][r], P_sz_max * sizeof(p_id_t)));
+                CUDA_CHECK(cudaMalloc(&beta_buf[b][r], P_sz_max * sizeof(beta_t)));
             }
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
@@ -832,7 +832,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
     cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
-    cub::DoubleBuffer<p_id_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
+    cub::DoubleBuffer<beta_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
 
 
     // Asynchronously upload this partition's chunks of suffixes and their prefix-keys to the device.
@@ -856,10 +856,10 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
     Prefix_Key* K_sorted = nullptr; // Sorted prefix-keys.
     idx_t* SA_sorted = nullptr; // Suffixes corresponding to the sorted prefix-keys.
-    p_id_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
+    beta_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
     Prefix_Key* K_ranked = nullptr; // Ranked keys.
     idx_t* SA_ranked = nullptr; // Suffixes in ranked order (bar the active | retired split).
-    p_id_t* beta_ranked = nullptr;  // Backward tags corresponding to the ranked suffixes.
+    beta_t* beta_ranked = nullptr;  // Backward tags corresponding to the ranked suffixes.
     idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
     msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
     p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
@@ -889,7 +889,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             CUDA_CHECK(cudaGetLastError());
             key.selector ^= 1;
 
-            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
             beta.selector ^= 1;
@@ -918,7 +918,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             CUDA_CHECK(cudaGetLastError());
             suf.selector ^= 1;
 
-            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
             beta.selector ^= 1;
@@ -1187,7 +1187,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     cub::DoubleBuffer<idx_t> key(reinterpret_cast<idx_t*>(key_buf[buf_id][0]), reinterpret_cast<idx_t*>(key_buf[buf_id][1]));
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
     cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
-    cub::DoubleBuffer<p_id_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
+    cub::DoubleBuffer<beta_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
 
 
     // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
@@ -1211,10 +1211,10 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     idx_t* K_sorted = nullptr;  // Sorted keys.
     idx_t* SA_sorted = nullptr; // Suffixes corresponding to the sorted keys.
-    p_id_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
+    beta_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
     idx_t* K_re_ranked = nullptr;   // Re-ranked keys.
     idx_t* SA_re_ranked = nullptr;  // Suffixes in re-ranked order (bar the active | retired split).
-    p_id_t* beta_re_ranked = nullptr;   // Backward tags corresponding to the re-ranked suffixes.
+    beta_t* beta_re_ranked = nullptr;   // Backward tags corresponding to the re-ranked suffixes.
     p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
     idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
     msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
@@ -1243,7 +1243,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         CUDA_CHECK(cudaGetLastError());
         key.selector ^= 1;
 
-        shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+        shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
         CUDA_CHECK(cudaGetLastError());
         beta.selector ^= 1;
@@ -1318,7 +1318,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             CUDA_CHECK(cudaGetLastError());
             key.selector ^= 1;
 
-            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
             beta.selector ^= 1;
@@ -1347,7 +1347,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             CUDA_CHECK(cudaGetLastError());
             suf.selector ^= 1;
 
-            shuffle_kernel<p_id_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
             CUDA_CHECK(cudaGetLastError());
             beta.selector ^= 1;

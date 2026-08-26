@@ -49,6 +49,10 @@ constexpr idx_t KEY_BITS = SECONDARY_BITS + PRIMARY_BITS;
 constexpr idx_t POISON_PILL_RECEIPT = idx_t(1) << KEY_BITS;
 
 
+constexpr idx_t BETA_BITS = 16; // Current generation's backward routing tag in low half of the pair, and preceding generation's one in high half.
+constexpr idx_t BETA_CUR_GEN_MASK = (idx_t(1) << BETA_BITS) - 1;
+
+
 // Returns the word packing `val` with forward tag `tag`.
 CUDA_SPECIFIER inline idx_t pack(const idx_t val, const idx_t tag) { return (tag << TAG_SHIFT) | val; }
 
@@ -84,6 +88,19 @@ CUDA_SPECIFIER inline idx_t update_secondary(const idx_t key, const idx_t second
 
 // Returns the composite key `key` marking it as having received a poison pill.
 CUDA_SPECIFIER inline idx_t mark_poison_pill_receipt(const idx_t key) { return key | POISON_PILL_RECEIPT; }
+
+// Returns the backward routing tag pair for a suffix whose payload-message and
+// forwarded poison-pill route to the `cur`'th partition and the `prev`'th
+// partitions, respectively.
+CUDA_SPECIFIER inline beta_t beta_pair(const p_id_t cur, const p_id_t prev) { return (static_cast<beta_t>(prev) << BETA_BITS) | cur; }
+
+// Returns the current generation's backward routing tag from the tag-pair
+// `beta`.
+CUDA_SPECIFIER inline p_id_t beta_cur_gen(const beta_t beta) { return beta & BETA_CUR_GEN_MASK; }
+
+// Returns the previous generation's backward routing tag from the tag-pair
+// `beta`.
+CUDA_SPECIFIER inline p_id_t beta_prev_gen(const beta_t beta) { return beta >> BETA_BITS; }
 
 
 // Returns `true` iff a text of size `n` partitioned into `p` parts fits the

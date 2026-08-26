@@ -23,7 +23,7 @@ private:
 
     Prefix_Key* key_;   // Keys; typed to the largest-width type used in sort (which is in initial-ranking).
     idx_t* suf_;    // Suffixes.
-    p_id_t* beta_;  // Backward routing tags.
+    beta_t* beta_;  // Backward routing tags.
     idx_t* msg_target_; // Target recipients of the rank-propagation messages, packed with the sender's forward tag.
     msg_rank_t* msg_rank_;  // Ranks carried within the rank-propagation messages.
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
