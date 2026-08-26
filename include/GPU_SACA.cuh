@@ -167,7 +167,8 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
 
 // Refines the primary-keys of the sorted array `K` (of size `n`) based on its
 // key groups' ranks `key_group_rank` and its primary-key groups' ranks
-// `primary_key_group_rank`, and writes back the refined *unpacked* primary-key.
+// `primary_key_group_rank`, while retaining the secondary-key and the pill-
+// receipt status.
 // Grid organization: one thread per key / suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
@@ -179,7 +180,9 @@ void refine_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n,
     if(i >= n)
         return;
 
-    K[i] = bit_layout::primary_of(K[i]) + (key_group_rank[i] - primary_key_group_rank[i]);
+    const auto primary = bit_layout::primary_of(K[i]) + (key_group_rank[i] - primary_key_group_rank[i]);    // Updated primary key.
+    const auto key = bit_layout::key(primary, bit_layout::secondary_of(K[i]));
+    K[i] = bit_layout::received_poison_pill(K[i]) ? bit_layout::mark_poison_pill_receipt(key) : key;
 }
 
 
@@ -233,8 +236,9 @@ void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* cons
         return;
 
     const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + beta[i], static_cast<unsigned int>(1));  // Where to put the `beta[i]`'th partition's next incoming message.
+    const msg_rank_t primary = bit_layout::primary_of(K[i]);
     msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));   // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
-    msg_rank[slot] = (i < *active_sz ? K[i] : poison_pill(K[i]));  // `j`'s local rank.
+    msg_rank[slot] = (i < *active_sz ? primary : poison_pill(primary)); // `j`'s local rank.
 }
 
 
