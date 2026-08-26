@@ -6,7 +6,6 @@
 
 #include <cuda_runtime.h>
 
-#include <cstdint>
 #include <iostream>
 #include <cstdlib>
 
@@ -54,6 +53,11 @@ namespace gpu_saca  // TODO: why are all the following in the parent namespace?
         std::cerr   << "[mem] " << where << ": free = "
                     << (free_mem / (1024.0*1024.0*1024.0)) << " GBs.\n";
     }
+
+
+    // Background worker function launched by CUDA driver to catch `__trap()`s from
+    // fatal error(s).
+    void CUDART_CB fatal_error_callback(void* user_data);
 }
 
 

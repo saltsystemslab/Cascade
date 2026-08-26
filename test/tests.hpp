@@ -8,6 +8,8 @@
 #include "Packed_Prefix.hpp"
 #include "Partition_Backend.hpp"
 #include "Staging_Slab.hpp"
+#include "bit-layout.hpp"
+#include "cross-compile.hpp"
 
 #include <vector>
 
@@ -90,6 +92,16 @@ bool validate_inbox_mass(const Partition_Backend& backend);
 // `P_id`, equal to the slab's partition-ID. There are `n` possible recipient
 // suffixes.
 bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* P_id, idx_t n);
+
+// Returns `true` if the target coherence invariant holds for the packed keys
+// (in device) `key_1` and `key_2`. The corresponding suffixes must be from the
+// same partition.
+CUDA_SPECIFIER
+inline bool validate_target_coherence(const idx_t key_1, const idx_t key_2)
+{
+    return bit_layout::primary_of(key_1) != bit_layout::primary_of(key_2) ||
+                (!((bit_layout::secondary_of(key_1) == bit_layout::secondary_of(key_2)) ^ (bit_layout::received_poison_pill(key_1) == bit_layout::received_poison_pill(key_2))));
+}
 
 }
 

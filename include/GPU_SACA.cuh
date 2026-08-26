@@ -8,6 +8,7 @@
 #include "Packed_Prefix.hpp"
 #include "bit-layout.hpp"
 #include "message.hpp"
+#include "tests.hpp"
 
 #include "cub/cub.cuh"
 
@@ -153,6 +154,10 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
     }
     else
     {
+#ifdef TESTS
+        if(!test::validate_target_coherence(K[i - 1], K[i]))
+            __trap();
+#endif
         const bool key_tie = tied(i, i - 1);
         const bool primary_key_tie = (bit_layout::primary_of(K[i]) == bit_layout::primary_of(K[i - 1]));
         key_group_rank[i] = (!key_tie ? i : 0);
