@@ -114,7 +114,7 @@ void Partition_Backend::read_keys(Staging_Slab& s, const std::vector<idx_t>& P_o
                 std::exit(EXIT_FAILURE);
             }
 
-            if(i > 0 && !test::validate_target_coherence(prev_suf, prev_key, suf[i], key[i]))
+            if(i > 0 && !test::validate_coherent_tags(prev_suf, prev_key, suf[i], key[i]))
             {
                 std::cerr << "Target coherence invariant broken. Aborting.\n";
                 std::exit(EXIT_FAILURE);

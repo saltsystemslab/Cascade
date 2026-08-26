@@ -67,7 +67,7 @@ bool validate_previous_gen_fwd_tag(idx_t suf, idx_t n, idx_t stride, const p_id_
 // Returns `true` iff the target coherence invariant holds for the suffixes
 // `j_1` and `j_2` with respective local ranks `r_1` and `r_2`. The suffixes
 // must be from the same partition.
-bool validate_target_coherence(idx_t j_1, idx_t r_1, idx_t j_2, idx_t r_2);
+bool validate_coherent_tags(idx_t j_1, idx_t r_1, idx_t j_2, idx_t r_2);
 
 // Returns `true` iff `SA` is a permutation of `[0, n)`.
 bool is_permutation(const idx_t* SA, idx_t n);
@@ -97,10 +97,11 @@ bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* P_id, idx_t n);
 // (in device) `key_1` and `key_2`. The corresponding suffixes must be from the
 // same partition.
 CUDA_SPECIFIER
-inline bool validate_target_coherence(const idx_t key_1, const idx_t key_2)
+inline bool validate_coherent_pill_receipts(const idx_t key_1, const idx_t key_2)
 {
-    return bit_layout::primary_of(key_1) != bit_layout::primary_of(key_2) ||
-                (!((bit_layout::secondary_of(key_1) == bit_layout::secondary_of(key_2)) ^ (bit_layout::received_poison_pill(key_1) == bit_layout::received_poison_pill(key_2))));
+    return  bit_layout::primary_of(key_1) != bit_layout::primary_of(key_2) ||
+            bit_layout::secondary_of(key_1) != bit_layout::secondary_of(key_2) ||
+            bit_layout::received_poison_pill(key_1) == bit_layout::received_poison_pill(key_2);
 }
 
 }

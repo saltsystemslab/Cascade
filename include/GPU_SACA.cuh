@@ -155,7 +155,7 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
     else
     {
 #ifdef TESTS
-        if(!test::validate_target_coherence(K[i - 1], K[i]))
+        if(!test::validate_coherent_pill_receipts(K[i - 1], K[i]))
             __trap();
 #endif
         const bool key_tie = tied(i, i - 1);
