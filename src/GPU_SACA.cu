@@ -46,13 +46,11 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
     , T_h_(T)
     , p_(0)
     , P_id(nullptr)
-    , rho(nullptr)
     , ctx_(0)
     , null_d(nullptr)
     , workspace_sz(0)
 {
     P_id = util::allocate<p_id_t>(n_);
-    rho = util::allocate<idx_t>(n_);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamCreate(stream + s));
@@ -72,11 +70,10 @@ GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
         workspace_buf[b] = nullptr;
         is_active_buf[b] = nullptr;
         msg_off_buf[b] = nullptr;
-        recv_st_d[b] = nullptr;
     }
 
     active_set_sz_d = nullptr;
-    P_off_d = nullptr, join_stat_d = nullptr;
+    unserved_c_d = nullptr;
 }
 
 
@@ -86,7 +83,6 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     CUDA_CHECK(cudaFree(null_d));
 
     util::deallocate(P_id);
-    util::deallocate(rho);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamDestroy(stream[s]));
@@ -104,11 +100,10 @@ GPU_SACA<T_sym_>::~GPU_SACA()
         CUDA_CHECK(cudaFree(workspace_buf[b]));
         CUDA_CHECK(cudaFree(is_active_buf[b]));
         CUDA_CHECK(cudaFree(msg_off_buf[b]));
-        CUDA_CHECK(cudaFree(recv_st_d[b]));
     }
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
-    CUDA_CHECK(cudaFree(P_off_d));  CUDA_CHECK(cudaFree(join_stat_d));
+    CUDA_CHECK(cudaFree(unserved_c_d));
 }
 
 
@@ -484,11 +479,10 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
             CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
             CUDA_CHECK(cudaMalloc(&msg_off_buf[b], (p_ + 1) * sizeof(p_sz_t)));
-            CUDA_CHECK(cudaMalloc(&recv_st_d[b], P_sz_max * sizeof(uint8_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
-        CUDA_CHECK(cudaMalloc(&join_stat_d, 3 * sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(&unserved_c_d, 3 * sizeof(idx_t)));
     }
 
     return true;
@@ -599,7 +593,7 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, P_id);
+            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), nullptr, n_, P_id);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -737,11 +731,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
             P_off[p_id] = P_off[p_id - 1] + P_cap[p_id - 1];
 
         Active_sz = P_cap;
-        {
-            // TODO: temporary for verification purposes.
-            CUDA_CHECK(cudaMalloc(&P_off_d, p_ * sizeof(idx_t)));
-            CUDA_CHECK(cudaMemcpy(P_off_d, P_off.data(), p_ * sizeof(idx_t), cudaMemcpyHostToDevice));
-        }
 
 #ifdef STATS
         std::cerr << "Partition-size stats:\n";
@@ -793,14 +782,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     // std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
 #endif
 
-
-    // Compute the initial global ranking.
-    {
-        PROFILE_SCOPE("update_global_ranks");
-        update_global_ranks();}
-
     // Resize the partitions to their active-set size.
-    // NB: this compaction must land *after* the preceding global rankings have been updated.
     {
         PROFILE_SCOPE("collect_active_set_sizes");
         CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
@@ -1281,7 +1263,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
         // Join the inbox to the partition.
         {
-            CUDA_CHECK(cudaMemsetAsync(recv_st_d[buf_id], 0, part_sz * sizeof(uint8_t), stream[buf_id]));
             if(inbox_sz > 0)
             {
                 const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
@@ -1289,7 +1270,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                     (
                         inbox_target, inbox_rank, inbox_sz,
                         suf.Current(), key.Current(), part_sz,
-                        recv_st_d[buf_id], join_stat_d
+                        nullptr, unserved_c_d
                     );
                 CUDA_CHECK(cudaGetLastError());
             }
@@ -1299,7 +1280,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         {
             const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
             count_message_receipts_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (recv_st_d[buf_id], part_sz, join_stat_d + 1, join_stat_d + 2);
+                (nullptr, part_sz, unserved_c_d + 1, unserved_c_d + 2);
             CUDA_CHECK(cudaGetLastError());
         }
 #endif
@@ -1482,82 +1463,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::update_global_ranks()
-{
-    for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        if(Active_sz[p_id] != 0)    // Skip partitions with empty active-sets.
-            update_global_rank(p_id);
-}
-
-
-template <typename T_sym_>
-void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
-{
-    const auto sz = Active_sz[p_id];
-    const auto rank_off = P_off[p_id];
-
-#ifdef ISA_INSTRUMENT
-    uint64_t read_ns = 0, scatter_ns = 0;
-#endif
-
-    if(backend_->resident_suf(p_id) != nullptr) // Resident fast path.
-    {
-        const auto* const suf = backend_->resident_suf(p_id);
-        const auto* const key = backend_->resident_key(p_id);
-
-        {
-            INSTRUMENT_TIMER(scatter_ns);
-
-            #pragma omp parallel for schedule(static)
-            for(idx_t i = 0; i < sz; ++i)
-            {
-                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
-                const auto phi = bit_layout::tag_of(suf[i]);    // Forward tag used at current generation.
-                const auto r_j = key[i];    // Local rank.
-                rho[j] = bit_layout::pack(rank_off + r_j, phi); // Global rank, packed with the tag (being made available for the next generation's consumer, if any).
-            }
-        }
-
-        INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_scatter_ns(scatter_ns));
-        return;
-    }
-
-    auto& s = S[0];
-    idx_t* const suf = s.suf();
-    idx_t* const key = reinterpret_cast<idx_t*>(s.key());
-    for(idx_t off = 0; off < sz;)
-    {
-        const idx_t to_read = std::min(chunk_cap_, sz - off);
-
-        // Read the chunk of suffixes and their keys from offset `off`.
-        {
-            INSTRUMENT_TIMER(read_ns);
-            backend_->read_chunk(p_id, off, to_read, suf, key);
-        }
-
-        // Update `rho`-entries corresponding to the chunk.
-        {
-            INSTRUMENT_TIMER(scatter_ns);
-
-            #pragma omp parallel for schedule(static)
-            for(idx_t i = 0; i < to_read; ++i)
-            {
-                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
-                const auto phi = bit_layout::tag_of(suf[i]);    // Forward tag used at current generation.
-                const auto r_j = key[i];    // Local rank.
-                rho[j] = bit_layout::pack(rank_off + r_j, phi); // Global rank, packed with the tag (being made available for the next generation's consumer, if any).
-            }
-        }
-
-        off += to_read;
-    }
-
-    INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_read_chunk_ns(read_ns));
-    INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_scatter_ns(scatter_ns));
-}
-
-
-template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
     // Open the inboxes that initial-ranking didn't need to write to.
@@ -1605,15 +1510,9 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
 #ifdef TESTS
-            CUDA_CHECK(cudaMemset(join_stat_d, 0, 3 * sizeof(idx_t)));
+            CUDA_CHECK(cudaMemset(unserved_c_d, 0, 3 * sizeof(idx_t)));
 #endif
             drive_pipeline<false>();
-        }
-
-        // Update global-ranks based on the updated local-ranks.
-        {
-            PROFILE_SCOPE("update_global_ranks");
-            update_global_ranks();
         }
 
         // Resize the partitions to their active-set size.
@@ -1626,7 +1525,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 #ifdef TESTS
         {
             idx_t join_stat[3];
-            CUDA_CHECK(cudaMemcpy(join_stat, join_stat_d, 3 * sizeof(idx_t), cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(join_stat, unserved_c_d, 3 * sizeof(idx_t), cudaMemcpyDeviceToHost));
             if(join_stat[0] > 0)
             {
                 std::cerr << "Messages carrying rank-values inconsistent with the global ISA: " << join_stat[0] << ". Aborting.\n";
@@ -1686,9 +1585,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
 {
-    SA = rho;
-    rho = nullptr;
-
     auto& s = S[0];
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());

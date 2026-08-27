@@ -66,8 +66,6 @@ private:
     std::vector<idx_t> P_off;   // Exclusive cumulative size of the partitions.
     std::vector<idx_t> cohort_sz;   // Full cohort size per generation.
 
-    idx_t* rho; // Global rank of the suffixes.
-
     idx_t ctx_; // Context-size the current generation is resolving.
 
     static constexpr idx_t STREAM_C = 3;    // Number of CUDA-streams to support multi-buffered overlap of PCIe transfers and kernel executions.
@@ -131,9 +129,7 @@ private:
         uint8_t* is_active_buf[STREAM_C];   // Activeness-marker buffers for suffixes, per stream.
         idx_t* active_set_sz_d; // Sizes of the new active-sets of the partitions.
 
-        idx_t* P_off_d;                     // Exclusive cumulative size of the partitions; temporary, for verification purposes.
-        uint8_t* recv_st_d[STREAM_C];       // Per-suffix message-receipt state; 0: no message, 1: received a regular one, 2: received a poison-pill; per stream.
-        idx_t* join_stat_d;                 // Counters across partitions in a generation: count of messages disagreeing with global ISA, and active suffixes with no messaged received;
+        idx_t* unserved_c_d;                // Counters across partitions in a generation: count of messages disagreeing with global ISA, and active suffixes with no messaged received;
                                             // temporary, for verification purposes.
     // }
 
@@ -204,13 +200,6 @@ private:
     // the partition's content before and after, and the `buf_id`'th device-
     // buffer set is used for device operations.
     void sort_and_re_rank_and_filter(p_id_t p_id, Partition_Assembly& p_assembly, idx_t buf_id);
-
-    // Updates the global ranks of the suffixes based on the current status of
-    // the partitions.
-    void update_global_ranks();
-
-    // Updates the global ranks of the suffixes in the `p_id`'th partition.
-    void update_global_rank(p_id_t p_id);
 
     // Keeps exponentiating the effective prefix-context of the suffixes until
     // the suffixes are fully sorted.
