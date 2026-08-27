@@ -598,7 +598,7 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), nullptr, n_, P_id);
+            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), p_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -764,7 +764,6 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
 {
     ctx_ = ctx;
-    backend_->set_context(ctx_);
     backend_->open_generation(gen);
 
     cohort_sz.push_back(active_set_size());

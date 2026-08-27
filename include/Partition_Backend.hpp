@@ -51,12 +51,6 @@ private:
         std::vector<util::Spin_Lock> ov_lock_;  // Mutually-exclusive lock to the overflow buffers, per destination.
     // }
 
-    idx_t* rho_;    // Global ranks of the suffixes.
-    const idx_t n_; // Text-size.
-    idx_t k_;   // Current stride (half of the context this generation is resolving) of the suffixes in the algorithm execution.
-    idx_t ctx_; // Context-size the current generation is resolving.
-    const p_id_t* const P_id;   // Partition-IDs.
-
 
     // Flushes the `p_id`'th inbox's block-overflow buffer. `final` denotes
     // whether this is the last flush invoked on the buffer or not.
@@ -78,7 +72,7 @@ public:
     // fixed allocation cost `fixed_bytes) cannot hold some data. The global-
     // ranks array `rho` of size `n` is used to extend the ranks of the suffixes
     // while they are read off the backend. Partition-ID map `P_id` feeds the routing tags.
-    Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t fixed_bytes, idx_t* rho, idx_t n, const p_id_t* P_id);
+    Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t fixed_bytes, p_id_t p);
 
     Partition_Backend(const Partition_Backend&) = delete;
     Partition_Backend& operator=(const Partition_Backend&) = delete;
@@ -93,10 +87,6 @@ public:
 
     // Retires the `p_id`'th partition's prefix-file and opens its key-file.
     void retire_prefix_and_open_key(p_id_t p_id);
-
-    // Sets the context to `ctx` for the backward-tag fetch operations during
-    // prefix-key reading.
-    void set_context(const idx_t ctx) { ctx_ = ctx; k_ = ctx / 2; }
 
     // Returns the (exclusive) ending-offsets of the destination-partitions into
     // the messages produced by the `p_id`'th partition.

@@ -1,10 +1,8 @@
 
 #include "Partition_Backend.hpp"
-#include "bit-layout.hpp"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "isa-instrument.hpp"
-#include "tests.hpp"
 
 #include <cstring>
 #include <mutex>
@@ -15,8 +13,8 @@
 namespace gpu_saca
 {
 
-Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, idx_t* const rho, idx_t n, const p_id_t* const P_id):
-      p_(P_cap.size())
+Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, const p_id_t p):
+      p_(p)
     , plan_(P_cap, fixed_bytes, sizeof(Prefix_Key))
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
@@ -27,10 +25,6 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
     , ov_rank_(p_, nullptr)
     , ov_sz_(p_, 0)
     , ov_lock_(p_)
-    , rho_(rho)
-    , n_(n)
-    , k_(0)
-    , P_id(P_id)
 {
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
 
