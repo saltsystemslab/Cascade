@@ -189,6 +189,10 @@ private:
     // for the initial-ranking phase.
     template <bool init_rank_> void drive_pipeline();
 
+    // Stages the slab-assembly `p_assembly`'s content for upload, with required
+    // compute / logic.
+    template <bool init_rank_> void stage_slabs(Partition_Assembly& p_assembly);
+
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
     // of the partition. The slab-assembly `p_assembly` contains the partition's

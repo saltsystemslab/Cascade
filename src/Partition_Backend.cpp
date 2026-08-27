@@ -70,79 +70,17 @@ void Partition_Backend::read_prefixes(Staging_Slab& s) const
     INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
 
     read_prefix_chunk(s.p_id(), s.off(), s.size(), s.suf(), s.key());
-
-    // Gather the backward routing tags of the read suffixes.
-    {
-        const idx_t* const suf = s.suf();
-        auto* const beta = s.beta();
-        for(idx_t i = 0; i < s.size(); ++i)
-        {
-            const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
-            beta[i] = bit_layout::beta_pair(j >= ctx_ ? P_id[j - ctx_] : 0, 0); // Backward tag pair.
-        }
-    }
 }
 
 
-void Partition_Backend::read_keys(Staging_Slab& s, const std::vector<idx_t>& P_off) const
+void Partition_Backend::read_keys(Staging_Slab& s) const
 {
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());
-    auto* const beta = s.beta();
 
     {
         INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
         read_chunk(s.p_id(), s.off(), s.size(), suf, key);
-    }
-
-    // Gather the secondary keys of the read suffixes and fold those in to the keys.
-    {
-        INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().gather_ns);
-
-#ifdef TESTS
-        idx_t prev_suf = 0, prev_key = 0;
-#endif
-
-        for(idx_t i = 0; i < s.size(); ++i)
-        {
-#ifdef TESTS
-            // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
-            // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
-            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, k_, P_id))
-            {
-                std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            if(i > 0 && !test::validate_coherent_tags(prev_suf, prev_key, suf[i], key[i]))
-            {
-                std::cerr << "Target coherence invariant broken. Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            prev_suf = suf[i], prev_key = key[i];
-#endif
-
-            const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
-            const idx_t v = (j + k_ < n_ ? rho_[j + k_] : 0);   // Secondary rank, packed with previous generation's forward tag of the extension suffix.
-            const auto phi = bit_layout::tag_of(v); // Forward tag of `j` for this generation.
-            const auto r_global = bit_layout::rank_of(v);   // Secondary value in global rank.
-            p_id_t low = 0, high = p_ - 1;
-            while(low < high)
-            {
-                const auto mid = low + (high - low + 1) / 2;
-                if(P_off[mid] <= r_global)
-                    low = mid;
-                else
-                    high = mid - 1;
-            }
-
-            const auto r_local = r_global - P_off[low]; // Secondary value in local rank.
-
-            suf[i] = bit_layout::pack(j, phi);  // Writeback suffix to slab with its forward tag packed in.
-            key[i] = bit_layout::key(key[i], r_local);
-            beta[i] = bit_layout::beta_pair(j >= ctx_ ? P_id[j - ctx_] : 0, j >= k_ ? P_id[j - k_] : 0);    // Backward tag pair.
-        }
     }
 }
 

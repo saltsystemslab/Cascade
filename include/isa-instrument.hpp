@@ -23,10 +23,10 @@ struct alignas(2 * util::L1_CACHE_LINE_SIZE)
     Reader_Stat
 {
     uint64_t read_ns = 0;   // Time spent in the backend `pread`.
-    uint64_t gather_ns = 0; // Time spent in the `rho`-probe fold.
+    uint64_t stage_ns = 0;  // Time spent in staging slabs with host-side compute.
     uint64_t wait_ns = 0;   // Time spent in blocked-waiting for a free staging-slab.
 
-    void reset() { read_ns = gather_ns = wait_ns = 0; }
+    void reset() { read_ns = stage_ns = wait_ns = 0; }
 };
 
 
@@ -93,7 +93,7 @@ public:
         uint64_t read_ns = 0, gather_ns = 0, wait_ns = 0;
         uint64_t gathers = 0, oob = 0;
         for(const auto& r : r_)
-            read_ns += r->read_ns, gather_ns += r->gather_ns, wait_ns += r->wait_ns;
+            read_ns += r->read_ns, gather_ns += r->stage_ns, wait_ns += r->wait_ns;
 
         std::cerr << "\n[ISA iter " << iter_ << ", context "<< k_ << ", active "<< active_ << "]\n";
         std::fprintf(stderr, "  drive_pipeline wall     %10.3f s\n", pipeline_ns_ / 1e9);

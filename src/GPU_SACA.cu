@@ -1067,7 +1067,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
                         s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
                         if constexpr(init_rank_)    backend_->read_prefixes(*s);
-                        else                        backend_->read_keys(*s, P_off);
+                        else                        backend_->read_keys(*s);
 
                         if(s->inbox_sz() > 0)
                             backend_->read_messages(*s);
@@ -1148,6 +1148,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         if constexpr(init_rank_)    // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
                             backend_->retire_prefix_and_open_key(p_id);
 
+                        stage_slabs<init_rank_>(*p_assembly);
                         if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
                         else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
 
@@ -1172,6 +1173,69 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 }
 
     INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_pipeline_ns(pipeline_ns));
+}
+
+
+template <typename T_sym_>
+template <bool init_rank_>
+void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
+{
+    INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().stage_ns);
+
+    const auto stride = ctx_ / 2;   // Previous generation's context.
+
+#ifdef TESTS
+    for(auto* s : p_assembly.slab)
+    {
+        const idx_t* const suf = s->suf();
+        const idx_t* const key = reinterpret_cast<const idx_t*>(s->key());
+
+        #pragma omp parallel for schedule(static) num_threads(compute_c)
+        for(idx_t i = 0; i < s->size(); ++i)
+            if constexpr(!init_rank_)
+            {
+                // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
+                // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
+                if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, P_id))
+                {
+                    std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+
+                if(i > 0 && !test::validate_coherent_tags(suf[i - 1], key[i - 1], suf[i], key[i]))
+                {
+                    std::cerr << "Target coherence invariant broken. Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+            }
+    }
+#endif
+
+    #pragma omp parallel num_threads(compute_c)
+    {
+        for(auto* s : p_assembly.slab)
+        {
+            const auto sz = s->size();
+            idx_t* const suf = s->suf();
+            idx_t* const key = reinterpret_cast<idx_t*>(s->key());
+            auto* const beta = s->beta();
+
+            #pragma omp for schedule(static) nowait
+            for(idx_t i = 0; i < sz; ++i)
+            {
+                const auto j = bit_layout::suffix_of(suf[i]);
+                beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
+                                                init_rank_ || j < stride ? 0 : P_id[j - stride]);
+
+                // Following are for verification purposes.
+                if constexpr(!init_rank_)
+                {
+                    suf[i] = bit_layout::pack(j, 0);
+                    key[i] = bit_layout::key(key[i], bit_layout::SECONDARY_MASK);
+                }
+            }
+        }
+    }
 }
 
 
