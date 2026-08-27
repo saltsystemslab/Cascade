@@ -138,11 +138,16 @@ template <idx_t BLOCK_SZ>
 __global__
 void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                                            uint8_t* const __restrict__ is_active)
+                                                                            uint8_t* const __restrict__ is_active, idx_t* const __restrict__ unserved_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
+
+#ifdef TESTS
+    if(bit_layout::secondary_of(K[i]) == bit_layout::SECONDARY_MASK)    // No message joined this suffix.
+        atomicAdd(reinterpret_cast<unsigned long long*>(unserved_c), (unsigned long long)1);
+#endif
 
     const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y] && bit_layout::tag_of(SA[x]) == bit_layout::tag_of(SA[y]); };
 
@@ -265,16 +270,13 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
 
 // Locates each message's (target in `msg_tgt` and rank in `msg_rank`) recipient
 // in the suffix-ordered active set `SA` (of size `n`). If found, fills in the
-// secondary key of the recipient with the message's rank. Also fills the
-// receipt-state of the recipient `recv_st`, and checks the message's payload
-// against the rank-array `K` (supplied from global ISA).
+// secondary key of the recipient at `K` with the message's rank.
 // Grid organization: one thread per message.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            idx_t* const __restrict__ SA, idx_t* const __restrict__ K, const idx_t n,
-                            uint8_t* const __restrict__ recv_st, idx_t* const __restrict__ mismatch_c)
+                            idx_t* const __restrict__ SA, idx_t* const __restrict__ K, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= msg_c)
@@ -295,48 +297,10 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
     if(low == n || bit_layout::suffix_of(SA[low]) != tgt)   // Recipient has already retired.
         return;
 
-    // Following are for temporary verification purposes.
-    {
-        recv_st[low] = (is_poison_pill(msg_rank[i]) ? 2 : 1);
-
-        const p_id_t fwd_tag = bit_layout::tag_of(SA[low]); // Recipient's forward tag, filled in from the global ISA.
-        const auto exp_local_rank = bit_layout::secondary_of(K[low]);   // Expected local rank of the sender in its partition.
-        const p_id_t fwd_tag_rcvd = bit_layout::tag_of(msg_tgt[i]);   // Sender's forward tag from the preceding generation.
-        if(exp_local_rank != extract_rank(msg_rank[i]) || (!is_poison_pill(msg_rank[i]) && fwd_tag_rcvd != fwd_tag))
-            atomicAdd(reinterpret_cast<unsigned long long*>(mismatch_c), 1ull);
-    }
-
     // Deliver the message's payload.
     const auto key = bit_layout::update_secondary(K[low], extract_rank(msg_rank[i]));   // Pack in the received secondary.
     K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key; // Mark poison-pill if received, to forward it afterwards.
     SA[low] = bit_layout::pack(tgt, bit_layout::tag_of(msg_tgt[i]));    // Pack in the received forward tag.
-}
-
-
-// Counts from the receipt-states `recv_st` the number of suffixes: not having
-// received any message into `unserved_c`, and having received poison-pills into
-// `pill_recv_c`.
-template <idx_t BLOCK_SZ>
-__global__
-void count_message_receipts_kernel(const uint8_t* const __restrict__ recv_st, const idx_t n, idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_recv_c)
-{
-    typedef cub::BlockReduce<idx_t, BLOCK_SZ> Block_Reduce;
-    __shared__ typename Block_Reduce::TempStorage temp_unserved;
-    __shared__ typename Block_Reduce::TempStorage temp_pill_recv;
-
-    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
-    const auto st = (i < n ? recv_st[i] : uint8_t(1));
-
-    const auto block_unserved = Block_Reduce(temp_unserved).Sum(st == 0 ? idx_t(1) : idx_t(0));
-    const auto block_pill_recv = Block_Reduce(temp_pill_recv).Sum(st == 2 ? idx_t(1) : idx_t(0));
-    if(threadIdx.x == 0)
-    {
-        if(block_unserved > 0)
-            atomicAdd(reinterpret_cast<unsigned long long*>(unserved_c), static_cast<unsigned long long>(block_unserved));
-
-        if(block_pill_recv > 0)
-            atomicAdd(reinterpret_cast<unsigned long long*>(pill_recv_c), static_cast<unsigned long long>(block_pill_recv));
-    }
 }
 
 

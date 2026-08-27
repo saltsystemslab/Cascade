@@ -1336,23 +1336,10 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             {
                 const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
                 join_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                    (
-                        inbox_target, inbox_rank, inbox_sz,
-                        suf.Current(), key.Current(), part_sz,
-                        nullptr, unserved_c_d
-                    );
+                    (inbox_target, inbox_rank, inbox_sz, suf.Current(), key.Current(), part_sz);
                 CUDA_CHECK(cudaGetLastError());
             }
         }
-
-#ifdef TESTS
-        {
-            const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
-            count_message_receipts_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (nullptr, part_sz, nullptr, nullptr);
-            CUDA_CHECK(cudaGetLastError());
-        }
-#endif
     }
 
 
@@ -1429,7 +1416,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K_sorted, SA_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active);
+                (K_sorted, SA_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active, unserved_c_d);
 #ifdef TESTS
             cudaLaunchHostFunc(stream[buf_id], fatal_error_callback, std::string("target coherence invariant violated").data());
 #else
