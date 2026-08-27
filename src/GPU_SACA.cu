@@ -1225,6 +1225,7 @@ void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
                 beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
                                                 init_rank_ || j < stride ? 0 : P_id[j - stride]);
 
+#ifdef TESTS
                 // Following are for verification purposes.
                 if constexpr(!init_rank_)
                 {
@@ -1232,6 +1233,7 @@ void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
                     key[i] = bit_layout::key(key[i], bit_layout::SECONDARY_MASK);
                 }
             }
+#endif
         }
     }
 }
