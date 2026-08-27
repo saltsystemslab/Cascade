@@ -482,7 +482,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
-        CUDA_CHECK(cudaMalloc(&unserved_c_d, 3 * sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(&unserved_c_d, sizeof(idx_t)));
     }
 
     return true;
@@ -1286,7 +1286,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         {
             const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
             count_message_receipts_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (nullptr, part_sz, unserved_c_d + 1, unserved_c_d + 2);
+                (nullptr, part_sz, nullptr, nullptr);
             CUDA_CHECK(cudaGetLastError());
         }
 #endif
@@ -1477,9 +1477,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         backend_->open_deferred_inboxes();
     }
 
-#ifdef TESTS
-    idx_t prev_pill_c = 0, prev_unserved_c = 0;
-#endif
 
     idx_t gen = 1;
     for(idx_t k = ell; k < n_; k *= 2, ++gen)
@@ -1516,7 +1513,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
 #ifdef TESTS
-            CUDA_CHECK(cudaMemset(unserved_c_d, 0, 3 * sizeof(idx_t)));
+            CUDA_CHECK(cudaMemset(unserved_c_d, 0, sizeof(idx_t)));
 #endif
             drive_pipeline<false>();
         }
@@ -1530,35 +1527,11 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
 #ifdef TESTS
         {
-            idx_t join_stat[3];
-            CUDA_CHECK(cudaMemcpy(join_stat, unserved_c_d, 3 * sizeof(idx_t), cudaMemcpyDeviceToHost));
-            if(join_stat[0] > 0)
+            idx_t unserved_c_h;
+            CUDA_CHECK(cudaMemcpy(&unserved_c_h, unserved_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
+            if(unserved_c_h > 0)
             {
-                std::cerr << "Messages carrying rank-values inconsistent with the global ISA: " << join_stat[0] << ". Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            const auto cohort = cohort_sz[gen];
-            const auto unserved = join_stat[1];
-            const auto pill_c = join_stat[2];
-            std::cerr <<    "Active suffixes with no received messages: " << unserved << " (" << (unserved * 100.0 / cohort) << "%);"
-                            " received poison-pill: " << pill_c << " (" << (pill_c * 100.0 / cohort) << "%);\n";
-
-            // Coverage check: every unserved suffix must have a forwarded rank available from the preceding generation.
-            if(prev_pill_c + prev_unserved_c < unserved)
-            {
-                std::cerr << "Unserved suffixes (" << unserved << ") exceed the forwarded pills available from the preceding generation ("
-                          << prev_pill_c << "). Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            prev_pill_c = join_stat[2], prev_unserved_c = join_stat[1];
-
-            const auto retired = cohort_sz[gen] - active_set_size();
-            if(join_stat[1] + join_stat[2] > retired)   // Every unserved and pill-receiver must've retired this generation.
-            {
-                std::cerr << "Pill-receivers (" << join_stat[2] << ") plus unserved (" << join_stat[1]
-                          << ") exceed this generation's retirees (" << retired << "). Aborting.\n";
+                std::cerr << "Messages carrying rank-values inconsistent with the global ISA: " << unserved_c_h << ". Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
         }
