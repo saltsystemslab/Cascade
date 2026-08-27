@@ -215,11 +215,6 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
 
     if(bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1))   // Poison-pill forwarding.
         atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
-
-    if(bit_layout::suffix_of(SA[i]) < ctx)  // No valid target recipient for next generation.
-        return;
-
-    atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + beta[i], static_cast<unsigned int>(1));
 }
 
 
