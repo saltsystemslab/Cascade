@@ -523,7 +523,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Sets the slab pool size.
     {
-        const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
+        const auto max_chunk_per_part = 2 * (P_sz_max + chunk_cap_ - 1) / chunk_cap_;   // `2x` because outbox can have worst-case size `2 x part_sz`.
 
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
         // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer
@@ -561,7 +561,7 @@ void GPU_SACA<T_sym_>::setup_staging()
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 {
-    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(beta_t) + MESSAGE_BYTES);
+    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(beta_t) + 2 * MESSAGE_BYTES);
 }
 
 
@@ -994,13 +994,21 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
 
+        const idx_t outbox_sz = msg_off[p_];
+        idx_t c_id = 0; // Chunk-ID.
         for(auto* s : p_assembly.slab)
         {
+            const auto chunk_outbox_off = c_id++ * chunk_cap_;   // Offset in the outbox for this slab.
+            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
+            s->set_outbox_sz(chunk_outbox_sz);
+
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), reinterpret_cast<idx_t*>(K_ranked) + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            (void)beta_ranked;
-            CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + s->off(), s->size() * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            if(chunk_outbox_sz > 0)
+            {
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            }
         }
     }
 }
@@ -1031,8 +1039,9 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             const auto active_set_sz = Active_sz[p_id];
             const auto inbox_sz = backend_->inbox_size(p_id);
             const idx_t content_chunk_c = (active_set_sz + chunk_cap_ - 1) / chunk_cap_;    // Number of slabs required for this partition's content.
-            const idx_t msg_chunk_c = (inbox_sz + chunk_cap_ - 1) / chunk_cap_; // Number of slabs required for this partition's inbox.
-            const idx_t chunk_c = std::max(content_chunk_c, msg_chunk_c); // Number of slabs required in aggregate to hold this partition.
+            const idx_t inbox_chunk_c = (inbox_sz + chunk_cap_ - 1) / chunk_cap_; // Number of slabs required for this partition's inbox.
+            const idx_t outbox_chunk_c = (2 * Active_sz[p_id] + chunk_cap_ - 1) / chunk_cap_;   // Upper-bound on the number of slabs required for this partition's outbox.
+            const idx_t chunk_c = std::max({content_chunk_c, inbox_chunk_c, outbox_chunk_c});   // Number of slabs required in aggregate to hold this partition.
             total_chunk += chunk_c;
 
             // Prepare skeleton chain of chunks of this partition.
@@ -1072,7 +1081,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         if constexpr(init_rank_)    backend_->read_prefixes(*s);
                         else                        backend_->read_keys(*s, P_off);
 
-                        if(s->msg_sz() > 0)
+                        if(s->inbox_sz() > 0)
                             backend_->read_messages(*s);
 
 #ifdef TESTS
@@ -1139,7 +1148,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         {
                             idx_t read_msg = 0;
                             for(auto* s : p_assembly->slab)
-                                read_msg += s->msg_sz();
+                                read_msg += s->inbox_sz();
 
                             if(read_msg != backend_->inbox_size(p_id))
                             {
@@ -1264,10 +1273,10 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         }
 
         for(auto* s : p_assembly.slab)
-            if(s->msg_sz() > 0)
+            if(s->inbox_sz() > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->msg_off(), s->msg_target(), s->msg_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
-                CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->msg_off(), s->msg_rank(), s->msg_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->msg_off(), s->msg_target(), s->inbox_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->msg_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
             }
 
 #ifdef TESTS
@@ -1448,13 +1457,21 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
 
+        const idx_t outbox_sz = msg_off[p_];
+        idx_t c_id = 0; // Chunk-ID.
         for(auto* s : p_assembly.slab)
         {
+            const auto chunk_outbox_off = c_id++ * chunk_cap_;   // Offset in the outbox for this slab.
+            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
+            s->set_outbox_sz(chunk_outbox_sz);
+
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            (void)beta_re_ranked;
-            CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + s->off(), s->size() * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            if(chunk_outbox_sz > 0)
+            {
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            }
         }
     }
 }

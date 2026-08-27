@@ -168,7 +168,7 @@ void Partition_Backend::read_messages(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
 
-    disk_.read_messages(s.p_id(), s.msg_off(), s.msg_sz(), s.msg_target(), s.msg_rank());
+    disk_.read_messages(s.p_id(), s.msg_off(), s.inbox_sz(), s.msg_target(), s.msg_rank());
 }
 
 
@@ -187,7 +187,7 @@ void Partition_Backend::write_messages(const Staging_Slab& s)
     const auto* const msg_off = this->msg_off(p_id);
 
     // This slab contains the slice `[l_slab, r_slab)` of messages from `p_id`.
-    const p_sz_t l_slab = s.off(), r_slab = std::min<idx_t>(s.off() + s.size(), msg_off[p_ - 1]);
+    const p_sz_t l_slab = s.off(), r_slab = std::min<idx_t>(s.off() + s.outbox_sz(), msg_off[p_ - 1]);
     if(l_slab >= r_slab)
         return;
 

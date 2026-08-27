@@ -163,7 +163,7 @@ bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* const P_id, con
     bool is_valid = true;
 
     #pragma omp parallel for schedule(static) reduction(&& : is_valid)
-    for(p_sz_t i = 0; i < s.msg_sz(); ++i)
+    for(p_sz_t i = 0; i < s.inbox_sz(); ++i)
     {
         const auto tgt = bit_layout::suffix_of(s.msg_target()[i]);
         if(tgt >= n || P_id[tgt] != s.p_id())

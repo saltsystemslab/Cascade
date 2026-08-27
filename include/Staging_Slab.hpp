@@ -29,7 +29,8 @@ private:
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
     idx_t off_; // Offset of the content of this slab within the corresponding partition.
     p_sz_t msg_off_;    // Offset of this slab's chunk into its partition's inbox.
-    p_sz_t msg_sz_; // Count of inbox messages in this slab's chunk.
+    p_sz_t inbox_sz_;   // Count of inbox messages in this slab's chunk.
+    p_sz_t outbox_sz_;  // Count of outbox messages in this slab's chunk.
     idx_t sz_;  // Number of elements in the slab.
 
 public:
@@ -84,10 +85,16 @@ public:
     auto msg_off() const { return msg_off_; }
 
     // Returns count of inbox messages in this slab's chunk.
-    auto msg_sz() const { return msg_sz_; }
+    auto inbox_sz() const { return inbox_sz_; }
+
+    // Returns count of outbox messages in this slab's chunk.
+    auto outbox_sz() const { return outbox_sz_; }
 
     // Returns the number of elements in the slab.
     auto size() const { return sz_; }
+
+    // Sets the count of outbox messages in this slab's chunk to `outbox_sz`.
+    void set_outbox_sz(const idx_t outbox_sz) { outbox_sz_ = outbox_sz; }
 
     // Allocates the slab for a `sz`-sized partition. Must be invoked before
     // accessing the slab.
@@ -95,8 +102,8 @@ public:
 
     // Tags the slab with the partition-chunk it's carrying (from partition-ID
     // `p_id`, at range `[off, off + sz)`, and the message- chunk it's carrying
-    // (at range `[msg_off, msg_off + msg_sz)`).
-    void assign(p_id_t p_id, idx_t off, idx_t sz, p_sz_t msg_off, p_sz_t msg_sz);
+    // (at range `[msg_off, msg_off + inbox_sz)`).
+    void assign(p_id_t p_id, idx_t off, idx_t sz, p_sz_t msg_off, p_sz_t inbox_sz);
 };
 
 
