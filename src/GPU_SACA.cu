@@ -442,7 +442,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     //      1. `cub::DoubleBuffer` keys, input and output (2 x `DEV_KEY_BYTES`);
     //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
     //      3. `cub::DoubleBuffer` permutation-indices, generated and transformed (2 x `p_sz_t`);
-    //      4. `cub::DoubleBuffer` backward routing tags, input and output (2 x `p_id_t`);
+    //      4. `cub::DoubleBuffer` backward routing tag pairs, input and output (2 x `beta_t`);
     //      5. activeness-flag, output (1 x `uint8_t`);
     //      6. message-receipt status, output (1 x `uint8_t`).
     // Message-collation requires `p + 1` counts (per-partition offset).
@@ -561,7 +561,7 @@ void GPU_SACA<T_sym_>::setup_staging()
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 {
-    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(p_id_t) + MESSAGE_BYTES);
+    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(beta_t) + MESSAGE_BYTES);
 }
 
 
@@ -841,7 +841,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         {
             CUDA_CHECK(cudaMemcpyAsync(key.Current() + s->off(), s->key(), s->size() * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(p_id_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
 
@@ -1196,7 +1196,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         {
             CUDA_CHECK(cudaMemcpyAsync(key.Current() + s->off(), s->key(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(p_id_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
 
