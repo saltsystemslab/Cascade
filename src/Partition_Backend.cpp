@@ -168,7 +168,7 @@ void Partition_Backend::read_messages(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
 
-    disk_.read_messages(s.p_id(), s.msg_off(), s.inbox_sz(), s.msg_target(), s.msg_rank());
+    disk_.read_messages(s.p_id(), s.inbox_off(), s.inbox_sz(), s.msg_target(), s.msg_rank());
 }
 
 
@@ -187,7 +187,7 @@ void Partition_Backend::write_messages(const Staging_Slab& s)
     const auto* const msg_off = this->msg_off(p_id);
 
     // This slab contains the slice `[l_slab, r_slab)` of messages from `p_id`.
-    const p_sz_t l_slab = s.off(), r_slab = std::min<idx_t>(s.off() + s.outbox_sz(), msg_off[p_ - 1]);
+    const p_sz_t l_slab = s.outbox_off(), r_slab = std::min<idx_t>(s.outbox_off() + s.outbox_sz(), msg_off[p_ - 1]);
     if(l_slab >= r_slab)
         return;
 
@@ -207,7 +207,7 @@ void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s
     const auto parity = inbox_write_parity_;
     msg_count_[parity][p_id].fetch_add(r - l, std::memory_order_relaxed);
 
-    const auto base = s.off();  // `s` contains the index-range `[base, base + s.size())` of the source-partition's data.
+    const auto base = s.outbox_off();   // `s` contains the index-range `[base, base + s.outbox_sz())` of the source-partition's outbox.
     const p_sz_t a_l = ((l + MSG_ALIGN - 1) / MSG_ALIGN) * MSG_ALIGN;   // Leftmost `MSG_ALIGN`-ed endpoint of `[l, r)`.
     const p_sz_t a_r = (r / MSG_ALIGN) * MSG_ALIGN; // Rightmost `MSG_ALIGN`-ed (exclusive) endpoint of `[l, r)`.
 
@@ -234,7 +234,7 @@ void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s
 
 void Partition_Backend::buffer_overhang(const p_id_t p_id, const Staging_Slab& s, const p_sz_t l, const p_sz_t r)
 {
-    const auto base = s.off();  // `s` contains the index-range `[base, base + s.size())` of the source-partition's data.
+    const auto base = s.outbox_off();   // `s` contains the index-range `[base, base + s.outbox_sz())` of the source-partition's outbox.
     const std::lock_guard<util::Spin_Lock> lock(ov_lock_[p_id]);    // Lock the inbox's block-overflow buffer.
 
     std::memcpy(ov_tgt_[p_id] + ov_sz_[p_id], s.msg_target() + (l - base), (r - l) * sizeof(idx_t));

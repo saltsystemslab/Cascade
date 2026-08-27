@@ -993,14 +993,15 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
+        const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
 
-        const idx_t outbox_sz = msg_off[p_];
         idx_t c_id = 0; // Chunk-ID.
         for(auto* s : p_assembly.slab)
         {
-            const auto chunk_outbox_off = c_id++ * chunk_cap_;   // Offset in the outbox for this slab.
-            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
-            s->set_outbox_sz(chunk_outbox_sz);
+            const auto chunk_outbox_off = 2 * c_id++ * chunk_cap_;  // Offset in the outbox for this slab.
+            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(2 * chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
+            s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), reinterpret_cast<idx_t*>(K_ranked) + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -1040,8 +1041,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             const auto inbox_sz = backend_->inbox_size(p_id);
             const idx_t content_chunk_c = (active_set_sz + chunk_cap_ - 1) / chunk_cap_;    // Number of slabs required for this partition's content.
             const idx_t inbox_chunk_c = (inbox_sz + chunk_cap_ - 1) / chunk_cap_; // Number of slabs required for this partition's inbox.
-            const idx_t outbox_chunk_c = (2 * Active_sz[p_id] + chunk_cap_ - 1) / chunk_cap_;   // Upper-bound on the number of slabs required for this partition's outbox.
-            const idx_t chunk_c = std::max({content_chunk_c, inbox_chunk_c, outbox_chunk_c});   // Number of slabs required in aggregate to hold this partition.
+            const idx_t chunk_c = std::max(content_chunk_c, inbox_chunk_c); // Number of slabs required in aggregate to hold this partition.
             total_chunk += chunk_c;
 
             // Prepare skeleton chain of chunks of this partition.
@@ -1275,8 +1275,8 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         for(auto* s : p_assembly.slab)
             if(s->inbox_sz() > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->msg_off(), s->msg_target(), s->inbox_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
-                CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->msg_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->inbox_off(), s->msg_target(), s->inbox_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->inbox_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
             }
 
 #ifdef TESTS
@@ -1456,14 +1456,15 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
+        const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
 
-        const idx_t outbox_sz = msg_off[p_];
         idx_t c_id = 0; // Chunk-ID.
         for(auto* s : p_assembly.slab)
         {
-            const auto chunk_outbox_off = c_id++ * chunk_cap_;   // Offset in the outbox for this slab.
-            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
-            s->set_outbox_sz(chunk_outbox_sz);
+            const auto chunk_outbox_off = 2 * c_id++ * chunk_cap_;  // Offset in the outbox for this slab.
+            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(2 * chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
+            s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));

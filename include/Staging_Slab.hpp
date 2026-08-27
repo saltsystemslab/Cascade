@@ -28,8 +28,9 @@ private:
     msg_rank_t* msg_rank_;  // Ranks carried within the rank-propagation messages.
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
     idx_t off_; // Offset of the content of this slab within the corresponding partition.
-    p_sz_t msg_off_;    // Offset of this slab's chunk into its partition's inbox.
+    p_sz_t inbox_off_;  // Offset of this slab's chunk into its partition's inbox.
     p_sz_t inbox_sz_;   // Count of inbox messages in this slab's chunk.
+    p_sz_t outbox_off_; // Offset of this slab's chunk into its partition's outbox.
     p_sz_t outbox_sz_;  // Count of outbox messages in this slab's chunk.
     idx_t sz_;  // Number of elements in the slab.
 
@@ -82,10 +83,13 @@ public:
     auto off() const { return off_; }
 
     // Returns offset of this slab's chunk into its partition's inbox.
-    auto msg_off() const { return msg_off_; }
+    auto inbox_off() const { return inbox_off_; }
 
     // Returns count of inbox messages in this slab's chunk.
     auto inbox_sz() const { return inbox_sz_; }
+
+    // Returns the offset of this slab's chunk into its partition's outbox.
+    auto outbox_off() const { return outbox_off_; }
 
     // Returns count of outbox messages in this slab's chunk.
     auto outbox_sz() const { return outbox_sz_; }
@@ -93,8 +97,9 @@ public:
     // Returns the number of elements in the slab.
     auto size() const { return sz_; }
 
-    // Sets the count of outbox messages in this slab's chunk to `outbox_sz`.
-    void set_outbox_sz(const idx_t outbox_sz) { outbox_sz_ = outbox_sz; }
+    // Sets the offset of this slab's chunk into its partition's outbox, and the
+    // count of outbox messages in this slab's chunk to `outbox_sz`.
+    void set_outbox_off_and_size(const idx_t off, const idx_t sz) { outbox_off_ = off, outbox_sz_ = sz; }
 
     // Allocates the slab for a `sz`-sized partition. Must be invoked before
     // accessing the slab.
