@@ -180,7 +180,6 @@ std::size_t GPU_SACA<T_sym_>::fixed_budget() const
 {
     return  n_ * sizeof(T_sym_) +   // `T`
             n_ * sizeof(p_id_t) +   // `Π`
-            n_ * sizeof(idx_t) +    // `ρ`
             slab_pool_memory() +
             Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_);
 }
@@ -1628,6 +1627,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
 {
+    SA = util::allocate<idx_t>(n_);
     auto& s = S[0];
     idx_t* const suf = s.suf();
     idx_t* const key = reinterpret_cast<idx_t*>(s.key());
