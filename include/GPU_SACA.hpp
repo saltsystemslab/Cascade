@@ -85,6 +85,8 @@ private:
         idx_t slab_c_;  // |S|: slab pool size.
         idx_t reader_c_;    // |r|: reader-threads count.
         idx_t writer_c_;    // |w|: writer-threads count.
+        idx_t dispatcher_c; // |d|: dispatcher-threads count.
+        idx_t compute_c;    // |c|: compute-threads count.
 
         std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
 

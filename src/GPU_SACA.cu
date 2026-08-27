@@ -507,10 +507,14 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Set the reader- and writer-pool sizes.
     {
-        writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
         reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, omp_get_max_threads()));
-        if(reader_c_ + writer_c_ + STREAM_C > static_cast<idx_t>(omp_get_max_threads()))
-            std::cerr << "Warning: the staging workers (readers, writers, and dispatchers) oversubscribes the " << omp_get_max_threads() << "available CPU-threads.\n";
+        writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
+        dispatcher_c = STREAM_C;
+        compute_c = std::max<idx_t>(1, (omp_get_max_threads() - reader_c_ - writer_c_ - dispatcher_c) / STREAM_C);  // Temporary setting before compute-pool gets introduced.
+        if(reader_c_ + writer_c_ + dispatcher_c + compute_c > static_cast<idx_t>(omp_get_max_threads()))
+            std::cerr <<    "Warning: the staging workers (readers, writers, dispatchers, and host-side computers)"
+                            ": (" << reader_c_ << ", " << writer_c_ << ", " << dispatcher_c << ", " << compute_c << ")"
+                            " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
 
         INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_));
     }
@@ -530,6 +534,8 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         std::cerr << "Staging-configuration between backend and device:\n";
         std::cerr << "\tReader-pool size: " << reader_c_ << "\n";
         std::cerr << "\tWriter-pool size: " << writer_c_ << "\n";
+        std::cerr << "\tDevice-dispatcher-pool size: " << dispatcher_c << "\n";
+        std::cerr << "\tCPU-compute-pool size: " << (compute_c * STREAM_C) << "\n";
         std::cerr << "\tSlab-pool size: " << slab_c_ << "\n";
         std::cerr << "\tSlab-capacity:  " << chunk_cap_ << "\n";
         std::cerr << "\tSlab-pool memory: " << slab_pool_memory() << "B\n";
