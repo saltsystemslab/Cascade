@@ -273,7 +273,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
 template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            const idx_t* const __restrict__ SA, idx_t* const __restrict__ K, const idx_t n,
+                            idx_t* const __restrict__ SA, idx_t* const __restrict__ K, const idx_t n,
                             uint8_t* const __restrict__ recv_st, idx_t* const __restrict__ mismatch_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -306,8 +306,10 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
             atomicAdd(reinterpret_cast<unsigned long long*>(mismatch_c), 1ull);
     }
 
-    const auto key = bit_layout::update_secondary(K[low], extract_rank(msg_rank[i]));
-    K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key;
+    // Deliver the message's payload.
+    const auto key = bit_layout::update_secondary(K[low], extract_rank(msg_rank[i]));   // Pack in the received secondary.
+    K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key; // Mark poison-pill if received, to forward it afterwards.
+    SA[low] = bit_layout::pack(tgt, bit_layout::tag_of(msg_tgt[i]));    // Pack in the received forward tag.
 }
 
 
