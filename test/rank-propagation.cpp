@@ -32,7 +32,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
 {
     const auto p = self->p_;
     const auto msg_count = msg_off[p - 1];
-    if(s.off() >= msg_count)    // The partition produced fewer messages than the total capacity of the slabs across the assembly.
+    if(s.outbox_off() >= msg_count) // This slab's outbox chunk lies past the messages the partition produced.
         return true;
 
     const auto n = self->n_;
@@ -42,7 +42,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
 
     const auto* const msg_target = s.msg_target();
     const auto* const msg_rank = s.msg_rank();
-    const auto msgs_to_check = std::min<idx_t>(s.size(), msg_count - s.off());
+    const auto msgs_to_check = std::min<p_sz_t>(s.outbox_sz(), msg_count - s.outbox_off());
 
     bool is_valid = true;
     #pragma omp parallel
