@@ -523,7 +523,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Sets the slab pool size.
     {
-        const auto max_chunk_per_part = 2 * (P_sz_max + chunk_cap_ - 1) / chunk_cap_;   // `2x` because outbox can have worst-case size `2 x part_sz`.
+        const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
 
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
         // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer
