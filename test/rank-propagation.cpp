@@ -8,6 +8,8 @@
 
 #include "omp.h"
 
+#include <algorithm>
+
 
 namespace gpu_saca::test
 {
@@ -39,6 +41,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
     const auto ctx = self->ctx_;
     const auto* const P_id = self->P_id;
     const auto p_id = s.p_id();
+    const auto P_sz_max = *std::max_element(self->P_cap.cbegin(), self->P_cap.cend());
 
     const auto* const msg_target = s.msg_target();
     const auto* const msg_rank = s.msg_rank();
@@ -52,19 +55,25 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
         {
             #pragma omp cancellation point for
 
+            // In the following checks, for a poison-pill message, it is impossible
+            // to detect whether the pill was a direct push or a forward.
+
             const auto target = bit_layout::suffix_of(msg_target[i]);
 
             // Sender check: the sender of this message must belong to this partition.
             {
-                const auto sender = target + ctx;
-                if(sender >= n)
+                const auto direct_sender = target + ctx;
+                const auto pill_forwarder = target + ctx / 2;
+                if((direct_sender >= n && pill_forwarder >= n) || (direct_sender >= n && pill_forwarder < n && !is_poison_pill(msg_rank[i])))
                 {
                     is_valid = false;
                     std::cerr << "Incorrect off-bound senders in messages.";
                     #pragma omp cancel for
                 }
 
-                if(P_id[sender] != p_id)
+                const bool sender_in_place =    (direct_sender < n && P_id[direct_sender] == p_id) ||
+                                                (is_poison_pill(msg_rank[i]) && pill_forwarder < n && P_id[pill_forwarder] == p_id);
+                if(!sender_in_place)
                 {
                     is_valid = false;
                     std::cerr << "For some messages produced in a partition, their senders do not belong to that partition.\n";
@@ -75,7 +84,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
             // Message collation check: this message must lie in the group of messages going to the target's partition.
             {
                 const auto dest_part = P_id[target];
-                const auto msg_slot = s.off() + i;
+                const auto msg_slot = s.outbox_off() + i;
                 const auto msg_group_beg = (dest_part > 0 ? msg_off[dest_part - 1] : 0);
                 const auto msg_group_end = msg_off[dest_part];
                 if(!(msg_group_beg <= msg_slot && msg_slot < msg_group_end))
@@ -91,10 +100,11 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
             // extension suffix has look-back depth `λ >= 2`, then the message it had received earlier had
             // a stale forward tag; this is benign per tertiary-irrelevance. Stale tags are impossible when
             // `λ < 2`, and this is guaranteed to hold for everyone up-to generation 1.
+            // Also, a forwarded pill carries tag 0 by construction.
             {
                 const p_id_t phi = bit_layout::tag_of(msg_target[i]);
                 const p_id_t expected_phi = (target + 2 * ctx < n ? P_id[target + 2 * ctx] : p_id_t(0));
-                if(ctx <= 2 * self->ell && phi != expected_phi)
+                if(!is_poison_pill(msg_rank[i]) && ctx <= 2 * self->ell && phi != expected_phi)
                 {
                     is_valid = false;
                     std::cerr << "Some messages carry incorrect forward tag.\n";
@@ -106,7 +116,8 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
             {
                 const auto r = extract_rank(msg_rank[i]);
                 const auto& P_cap = self->P_cap;
-                if(r >= P_cap[p_id])
+                const auto rank_bound = (is_poison_pill(msg_rank[i]) ? P_sz_max : P_cap[p_id]); // A forwarded pill carries the rank from another partition.
+                if(r >= rank_bound)
                 {
                     is_valid = false;
                     std::cerr << "Messages carry incorrect out-of-range ranks from senders.\n";
