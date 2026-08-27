@@ -1279,7 +1279,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->inbox_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
             }
 
-#ifdef TESTS
+        // Join the inbox to the partition.
         {
             CUDA_CHECK(cudaMemsetAsync(recv_st_d[buf_id], 0, part_sz * sizeof(uint8_t), stream[buf_id]));
             if(inbox_sz > 0)
@@ -1293,7 +1293,10 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                     );
                 CUDA_CHECK(cudaGetLastError());
             }
+        }
 
+#ifdef TESTS
+        {
             const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
             count_message_receipts_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (recv_st_d[buf_id], part_sz, join_stat_d + 1, join_stat_d + 2);
