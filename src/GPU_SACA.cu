@@ -969,7 +969,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
         msg_target = reinterpret_cast<idx_t*>(K_sorted);
-        msg_rank = reinterpret_cast<msg_rank_t*>(msg_target + part_sz);
+        msg_rank = reinterpret_cast<msg_rank_t*>(SA_sorted);
         msg_off = msg_off_buf[buf_id];
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
@@ -1419,7 +1419,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
         msg_target = K_sorted;
-        msg_rank = reinterpret_cast<msg_rank_t*>(msg_target + part_sz);
+        msg_rank = reinterpret_cast<msg_rank_t*>(SA_sorted);
         msg_off = msg_off_buf[buf_id];
 
         CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
