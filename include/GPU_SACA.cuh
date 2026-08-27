@@ -229,7 +229,7 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
 // Shared memory layout: no usage.
 template <bool packed_key_, idx_t BLOCK_SZ>
 __global__
-void emit_messages_kernel(  const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA,
+void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K,
                             const beta_t* const __restrict__ beta,
                             const idx_t n, const idx_t ctx, const idx_t* const __restrict__ active_sz,
                             idx_t* const __restrict__ msg_target, msg_rank_t* const __restrict__ msg_rank,
