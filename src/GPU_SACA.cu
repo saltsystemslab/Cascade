@@ -1232,8 +1232,8 @@ void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
                     suf[i] = bit_layout::pack(j, 0);
                     key[i] = bit_layout::key(key[i], bit_layout::SECONDARY_MASK);
                 }
+                #endif
             }
-#endif
         }
     }
 }
