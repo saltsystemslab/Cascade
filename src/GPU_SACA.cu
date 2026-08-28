@@ -162,6 +162,8 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_3 = now();
     std::cerr << "Initial ranking completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
 
+    {   PROFILE_SCOPE("drop_prefixes");             backend_->drop_prefixes();   }
+
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_4 = now();
     std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
