@@ -274,8 +274,8 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     idx_t p_sz_max; // Maximum supported suffix-count per partition.
     {
         const idx_t from_device_mem = budget / (STREAM_C * bytes_per_suf);    // Max count so that `STREAM_C` partitions can fit concurrently in the worst-case.
-        const idx_t from_msgs = MSG_RANK_MASK + 1;  // Max count so that local-ranks carried in rank-propagation messages do not overflow.
-        p_sz_max = std::min(from_device_mem, from_msgs);
+        const idx_t from_rank_width = bit_layout::MAX_PART_SZ;
+        p_sz_max = std::min(from_device_mem, from_rank_width);
     }
 
     while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.
@@ -334,18 +334,9 @@ bool GPU_SACA<T_sym_>::partition_sizes_fit() const
 {
     const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
-    if(P_sz_max > MSG_RANK_MASK + 1)    // Local-ranks carried in rank-propagation messages must not overflow.
+    if(P_sz_max > bit_layout::MAX_PART_SZ)
     {
-        std::cerr <<    "Maximum partition-size " << P_sz_max << " exceeds hard-constraint " << (MSG_RANK_MASK + 1) <<
-                        " set by local-rank bit-width in rank-propagation messages.\n";
-        return false;
-    }
-
-    constexpr auto max_key = idx_t(1) << std::max(bit_layout::PRIMARY_BITS, bit_layout::SECONDARY_BITS);
-    if(P_sz_max > max_key)
-    {
-        std::cerr <<    "Maximum partition-size " << P_sz_max << " exceeds hard-constraint " << max_key <<
-                        " set by local-rank width.\n";
+        std::cerr << "Maximum partition-size " << P_sz_max << " exceeds hard-constraint " << bit_layout::MAX_PART_SZ << " set by local-rank bit-width.\n";
         return false;
     }
 
@@ -439,8 +430,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
     //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
     //      3. `cub::DoubleBuffer` permutation-indices, generated and transformed (2 x `p_sz_t`);
     //      4. `cub::DoubleBuffer` backward routing tag pairs, input and output (2 x `beta_t`);
-    //      5. activeness-flag, output (1 x `uint8_t`);
-    //      6. message-receipt status, output (1 x `uint8_t`).
+    //      5. activeness-flag, output (1 x `uint8_t`).
     // Message-collation requires `p + 1` counts (per-partition offset).
     // `cub` itself requires a workspace for sort and scan.
     // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + 2 * sizeof(uint8_t)) + (p + 1) * sizeof(p_sz_t) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
@@ -455,7 +445,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + 2 * sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -497,11 +487,16 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Sets the capacity of each staging-slab.
     {
+        // A chunk-boundary `c * chunk_cap_` must be disk-block aligned, and the
+        // narrowest persisted element type (`p_sz_t`) governs it.
+        static_assert(sizeof(p_sz_t) <= sizeof(idx_t) && sizeof(p_sz_t) <= sizeof(Prefix_Key), "`p_sz_t` must be the narrowest persisted element type.");
+
         if(P_sz_max >= CHUNK_CAP)
             chunk_cap_ = CHUNK_CAP;
         else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
         {
-            constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(idx_t);
+            constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
+            static_assert(CHUNK_CAP % elems_per_disk_blk == 0, "`CHUNK_CAP` must be disk-block aligned.");
             chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
         }
     }
@@ -1228,7 +1223,7 @@ void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
                                                 init_rank_ || j < stride ? 0 : P_id[j - stride]);
 
                 if constexpr(!init_rank_)
-                    key[i] = bit_layout::key(key[i], bit_layout::SECONDARY_MASK);
+                    key[i] = bit_layout::key(key[i], bit_layout::SECONDARY_ABSENT);
             }
         }
     }

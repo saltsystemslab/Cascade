@@ -145,7 +145,7 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
         return;
 
 #ifdef TESTS
-    if(bit_layout::secondary_of(K[i]) == bit_layout::SECONDARY_MASK)    // No message joined this suffix.
+    if(bit_layout::secondary_absent(K[i]))  // No message joined this suffix.
         atomicAdd(reinterpret_cast<unsigned long long*>(unserved_c), (unsigned long long)1);
 #endif
 

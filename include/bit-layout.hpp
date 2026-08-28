@@ -15,6 +15,7 @@
 //      63 .. 48 :  forward routing tag;
 //      47 .. 0 :   value
 // key:
+//      63 :        spare;
 //      62 :        poison-pill marker;
 //      61 .. 31 :  primary-key;
 //      30 .. 0 :   secondary key.
@@ -48,6 +49,21 @@ constexpr idx_t PRIMARY_MASK = ((idx_t(1) << PRIMARY_BITS) - 1) << SECONDARY_BIT
 constexpr idx_t KEY_BITS = SECONDARY_BITS + PRIMARY_BITS;
 constexpr idx_t POISON_PILL_RECEIPT = idx_t(1) << KEY_BITS;
 
+// Reserved secondary-key value denoting "no rank-propagation message has joined
+// this suffix at this generation". Complete coverage makes it unobservable.
+constexpr idx_t SECONDARY_ABSENT = SECONDARY_MASK;
+
+// Largest representable local rank.
+constexpr idx_t MAX_LOCAL_RANK = SECONDARY_ABSENT - 1;
+
+// Largest permissible partition-size, so that a local-rank fits key's and
+// message's rank-field.
+constexpr idx_t MAX_PART_SZ = MAX_LOCAL_RANK + 1;
+
+// The primary and the secondary hold partition-local ranks, so they are in the
+// same rank-space.
+static_assert(PRIMARY_BITS == SECONDARY_BITS, "primary and secondary must share a single partition-size constraint");
+
 
 constexpr idx_t BETA_BITS = 16; // Current generation's backward routing tag in low half of the pair, and preceding generation's one in high half.
 constexpr idx_t BETA_CUR_GEN_MASK = (idx_t(1) << BETA_BITS) - 1;
@@ -79,6 +95,10 @@ CUDA_SPECIFIER inline idx_t secondary_of(const idx_t key) { return key & SECONDA
 
 // Returns `true` iff the composite key `key` had received a poison pill.
 CUDA_SPECIFIER inline bool received_poison_pill(const idx_t key) { return key & POISON_PILL_RECEIPT; }
+
+// Returns `true` iff no rank-propagation message joined the composite key `key`
+// at this generation.
+CUDA_SPECIFIER inline bool secondary_absent(const idx_t key) { return secondary_of(key) == SECONDARY_ABSENT; }
 
 // Returns the composite key made from `primary` and `secondary`.
 CUDA_SPECIFIER inline idx_t key(const idx_t primary, const idx_t secondary) { return (primary << SECONDARY_BITS) | secondary; }

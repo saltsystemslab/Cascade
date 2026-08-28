@@ -5,6 +5,7 @@
 
 
 #include "types.hpp"
+#include "bit-layout.hpp"
 #include "Direct_File.hpp"
 #include "cross-compile.hpp"
 
@@ -20,6 +21,9 @@ namespace
 // The MSB of a message's rank carries its finality, aka the poison-pill status.
 constexpr inline msg_rank_t MSG_POISON_PILL_BIT = static_cast<msg_rank_t>(1) << (8 * sizeof(msg_rank_t) - 1);
 constexpr inline msg_rank_t MSG_RANK_MASK = MSG_POISON_PILL_BIT - 1;    // Mask to extract actual rank-value from a message's rank field.
+
+// A message's rank field carries the target's secondary rank.
+static_assert(MSG_RANK_MASK == bit_layout::SECONDARY_MASK, "Message-rank and key-secondary must have the same width.");
 
 }
 
