@@ -108,8 +108,8 @@ public:
                         wait_ns / 1e9,   percentage(wait_ns),
                         100.0 - percentage(read_ns) - percentage(gather_ns) - percentage(wait_ns));
 
-        std::fprintf(stderr, "  update_global_rank      read %8.3f s | scatter %8.3f s | total %8.3f s\n",
-                        read_chunk_ns_ / 1e9, scatter_ns_ / 1e9, (read_chunk_ns_ + scatter_ns_) / 1e9);
+        // std::fprintf(stderr, "  update_global_rank      read %8.3f s | scatter %8.3f s | total %8.3f s\n",
+        //                 read_chunk_ns_ / 1e9, scatter_ns_ / 1e9, (read_chunk_ns_ + scatter_ns_) / 1e9);
 
         if(active_ > 0)
             std::fprintf(stderr, "  per-op                  gather %6.2f ns | scatter %6.2f ns\n",

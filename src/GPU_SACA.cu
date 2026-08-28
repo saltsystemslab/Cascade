@@ -260,9 +260,9 @@ void GPU_SACA<T_sym_>::select_pivots()
 template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
-    // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sorts, one activeness-flag byte, and one message-receipt status byte.
+    // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sorts, and one activeness-flag byte.
     // 2 x (key + suffix + permutation-index + backward tag) ping-pong + activeness flag.
-    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + sizeof(uint8_t) + sizeof(uint8_t);
+    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + sizeof(uint8_t);
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
@@ -425,7 +425,7 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
         ));
     }
 
-    return std::max({init_rank_workspace_sz, exponentiation_workspace_size, scan_workspace_sz, compaction_workspace_sz});
+    return std::max({init_rank_workspace_sz, exponentiation_workspace_size, scan_workspace_sz, compaction_workspace_sz, msg_off_scan_workspace_sz});
 }
 
 
@@ -1582,7 +1582,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             CUDA_CHECK(cudaMemcpy(&unserved_c_h, unserved_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
             if(unserved_c_h > 0)
             {
-                std::cerr << "Messages carrying rank-values inconsistent with the global ISA: " << unserved_c_h << ". Aborting.\n";
+                std::cerr << "Active suffixes with no message received: " << unserved_c_h << ". Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
         }

@@ -120,8 +120,7 @@ public:
     void read_prefixes(Staging_Slab& s) const;
 
     // Reads the staging slab `s`'s chunk of suffixes and their corresponding
-    // ranks from the backend into it, and folds in their secondary keys into
-    // the ranks, transforming the ranks into full keys.
+    // ranks from the backend into it.
     void read_keys(Staging_Slab& s) const;
 
     // Reads `sz` suffixes and their corresponding ranks of the `p_id`'th

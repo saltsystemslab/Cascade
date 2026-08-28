@@ -16,8 +16,8 @@
 //      47 .. 0 :   value
 // key:
 //      62 :        poison-pill marker;
-//      61 .. 32 :  primary-key;
-//      31 .. 0 :   secondary key.
+//      61 .. 31 :  primary-key;
+//      30 .. 0 :   secondary key.
 namespace gpu_saca::bit_layout
 {
 
