@@ -512,7 +512,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
                             ": (" << reader_c_ << ", " << writer_c_ << ", " << dispatcher_c << ", " << compute_c << ")"
                             " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
 
-        INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_));
+        INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_ + STREAM_C));
     }
 
     // Sets the slab pool size.
@@ -1134,6 +1134,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             dispatchers.emplace_back(
                 [&, s_id]
                 {
+                    INSTRUMENT(isa_instrument::ISA_Instrument().bind(reader_c_ + s_id));
                     while(dp_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
                         Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.

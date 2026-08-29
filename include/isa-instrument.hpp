@@ -45,9 +45,6 @@ private:
     uint64_t read_chunk_ns_ = 0;    // Time spent in `read_chunk` from backend, within `update_global_rank`. Disjoint from the reader-stats: they accumulate timings of the pool-based pipeline-backbone.
     uint64_t scatter_ns_ = 0;   // Time spent in ISA-scatters, within `update_global_rank`. Disjoint from the reader-stats: they accumulate timings of the pool-based pipeline-backbone.
 
-    mutable uint64_t gather_total_ = 0; // Probes over the whole run.
-    mutable uint64_t oob_total_ = 0;    // Out-of-bound probes over the whole run.
-
 
 public:
 
@@ -90,10 +87,9 @@ public:
     // counters into the run-level totals.
     void report_log() const
     {
-        uint64_t read_ns = 0, gather_ns = 0, wait_ns = 0;
-        uint64_t gathers = 0, oob = 0;
+        uint64_t read_ns = 0, stage_ns = 0, wait_ns = 0;
         for(const auto& r : r_)
-            read_ns += r->read_ns, gather_ns += r->stage_ns, wait_ns += r->wait_ns;
+            read_ns += r->read_ns, stage_ns += r->stage_ns, wait_ns += r->wait_ns;
 
         std::cerr << "\n[ISA iter " << iter_ << ", context "<< k_ << ", active "<< active_ << "]\n";
         std::fprintf(stderr, "  drive_pipeline wall     %10.3f s\n", pipeline_ns_ / 1e9);
@@ -101,21 +97,19 @@ public:
         const auto w_c = r_.size(); // Number of workers performing backend-read and the associated ISA-updates in the pipeline.
         const double denom = double(pipeline_ns_) * w_c;    // Normalization factor for each reader's timings.
         const auto percentage = [denom](const uint64_t ns) { return denom > 0.0 ? 100.0 * ns / denom : 0.0; };
-        std::fprintf(stderr, "  readers (%zu, cpu-sum)  read %8.3f s (%5.1f%%) | gather %8.3f s (%5.1f%%) | wait %8.3f s (%5.1f%%) | other %5.1f%%\n",
+        std::fprintf(stderr, "  readers (%zu, cpu-sum)  read %8.3f s (%5.1f%%) | stage %8.3f s (%5.1f%%) | wait %8.3f s (%5.1f%%) | other %5.1f%%\n",
                         r_.size(),
                         read_ns / 1e9,   percentage(read_ns),
-                        gather_ns / 1e9, percentage(gather_ns),
+                        stage_ns / 1e9, percentage(stage_ns),
                         wait_ns / 1e9,   percentage(wait_ns),
-                        100.0 - percentage(read_ns) - percentage(gather_ns) - percentage(wait_ns));
+                        100.0 - percentage(read_ns) - percentage(stage_ns) - percentage(wait_ns));
 
         // std::fprintf(stderr, "  update_global_rank      read %8.3f s | scatter %8.3f s | total %8.3f s\n",
         //                 read_chunk_ns_ / 1e9, scatter_ns_ / 1e9, (read_chunk_ns_ + scatter_ns_) / 1e9);
 
         if(active_ > 0)
-            std::fprintf(stderr, "  per-op                  gather %6.2f ns | scatter %6.2f ns\n",
-                            double(gather_ns) / double(active_), double(scatter_ns_) / double(active_));
-
-        gather_total_ += gathers, oob_total_ += oob;
+            std::fprintf(stderr, "  per-op                  stage %6.2f ns | scatter %6.2f ns\n",
+                            double(stage_ns) / double(active_), double(scatter_ns_) / double(active_));
 
         std::fflush(stderr);
     }
