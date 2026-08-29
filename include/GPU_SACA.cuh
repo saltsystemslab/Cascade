@@ -269,14 +269,15 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
 
 
 // Locates each message's (target in `msg_tgt` and rank in `msg_rank`) recipient
-// in the suffix-ordered active set `SA` (of size `n`). If found, fills in the
-// secondary key of the recipient at `K` with the message's rank.
+// in the suffix-ordered active set `SA` (of size `n`). If found, constructs the
+// recipient's composite key into `K` from its primary rank in `primary` and the
+// secondary key in the message's rank.
 // Grid organization: one thread per message.
 // Shared memory layout: no usage.
-template <idx_t BLOCK_SZ>
+template <typename T_primary_, idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            idx_t* const __restrict__ SA, idx_t* const __restrict__ K, const idx_t n)
+                            idx_t* const __restrict__ SA, const T_primary_* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= msg_c)
@@ -298,7 +299,7 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
         return;
 
     // Deliver the message's payload.
-    const auto key = bit_layout::update_secondary(K[low], extract_rank(msg_rank[i]));   // Pack in the received secondary.
+    const auto key = bit_layout::key(primary[low], extract_rank(msg_rank[i]));  // Pack in the received secondary.
     K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key; // Mark poison-pill if received, to forward it afterwards.
     SA[low] = bit_layout::pack(tgt, bit_layout::tag_of(msg_tgt[i]));    // Pack in the received forward tag.
 }

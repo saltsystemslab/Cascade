@@ -103,9 +103,6 @@ CUDA_SPECIFIER inline bool secondary_absent(const idx_t key) { return secondary_
 // Returns the composite key made from `primary` and `secondary`.
 CUDA_SPECIFIER inline idx_t key(const idx_t primary, const idx_t secondary) { return (primary << SECONDARY_BITS) | secondary; }
 
-// Returns the composite key `key` with its secondary updated to `secondary`.
-CUDA_SPECIFIER inline idx_t update_secondary(const idx_t key, const idx_t secondary) { return (key & ~SECONDARY_MASK) | secondary; }
-
 // Returns the composite key `key` marking it as having received a poison pill.
 CUDA_SPECIFIER inline idx_t mark_poison_pill_receipt(const idx_t key) { return key | POISON_PILL_RECEIPT; }
 

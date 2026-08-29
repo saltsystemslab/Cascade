@@ -1211,8 +1211,7 @@ void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
         for(auto* s : p_assembly.slab)
         {
             const auto sz = s->size();
-            idx_t* const suf = s->suf();
-            idx_t* const key = reinterpret_cast<idx_t*>(s->key());
+            const auto* const suf = s->suf();
             auto* const beta = s->beta();
 
             #pragma omp for schedule(static) nowait
@@ -1221,9 +1220,6 @@ void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
                 const auto j = bit_layout::suffix_of(suf[i]);
                 beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
                                                 init_rank_ || j < stride ? 0 : P_id[j - stride]);
-
-                if constexpr(!init_rank_)
-                    key[i] = bit_layout::key(key[i], bit_layout::SECONDARY_ABSENT);
             }
         }
     }
@@ -1236,17 +1232,24 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     PROFILE_SCOPE_FMT("sort_and_re_rank_and_filter_p%d", static_cast<int>(p_id));
 
 
-    cub::DoubleBuffer<idx_t> key(reinterpret_cast<idx_t*>(key_buf[buf_id][0]), reinterpret_cast<idx_t*>(key_buf[buf_id][1]));
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
     cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
     cub::DoubleBuffer<beta_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
+
+    static_assert(DEV_KEY_BYTES >= 2 * sizeof(idx_t), "Current device floor-plan requires at least two `idx_t` per entry.");
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
+    idx_t* const A = reinterpret_cast<idx_t*>(key_buf[buf_id][0]);
+    idx_t* const B = reinterpret_cast<idx_t*>(key_buf[buf_id][1]);
+    idx_t* const primary = A;    // Bare local ranks, staged in.
+    idx_t* const primary_suf_ordered = A + P_sz_max;    // Local ranks in suffix-order.
+    idx_t* const K = B; // Composite keys, produced from join.
 
 
     // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
     {
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(key.Current() + s->off(), s->key(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(primary + s->off(), s->key(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
@@ -1291,9 +1294,8 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
         // Shuffle keys and backward tags per the suffix-index-order permutation.
         shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (key.Alternate(), key.Current(), perm.Current(), part_sz);
+            (primary_suf_ordered, primary, perm.Current(), part_sz);
         CUDA_CHECK(cudaGetLastError());
-        key.selector ^= 1;
 
         shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
@@ -1304,11 +1306,9 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     // Asynchronously upload this partition's inbox to the device.
     {
-        inbox_target = key.Alternate();
-        inbox_rank = reinterpret_cast<msg_rank_t*>(inbox_target + inbox_sz);
-
-        const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
-        if(inbox_sz * MESSAGE_BYTES > P_sz_max * DEV_KEY_BYTES)
+        inbox_target = primary; // Bare local ranks have moved to `primary_suf_ordered`.
+        inbox_rank = reinterpret_cast<msg_rank_t*>(B + P_sz_max);
+        if(inbox_sz > P_sz_max) // By injectivity, a partition cannot receive more messages than its capacity.
         {
             std::cerr <<    "Device-space for partition does not have enough space for its messages."
                             " This is impossible due to the injectivity of rank-propagation messaging in a generation. Aborting.\n";
@@ -1321,18 +1321,25 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
                 CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->inbox_off(), s->msg_target(), s->inbox_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->inbox_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
             }
+    }
 
-        // Join the inbox to the partition.
+
+     // Join the inbox to the partition.
+    {
+        // Seed every key with `SECONDARY_ABSENT` to optionally catch any suffix which hasn't received a message, during the join.
+        CUDA_CHECK(cudaMemsetAsync(K, 0xFF, part_sz * sizeof(idx_t), stream[buf_id]));
+
+        if(inbox_sz > 0)
         {
-            if(inbox_sz > 0)
-            {
-                const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
-                join_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                    (inbox_target, inbox_rank, inbox_sz, suf.Current(), key.Current(), part_sz);
-                CUDA_CHECK(cudaGetLastError());
-            }
+            const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+            join_messages_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (inbox_target, inbox_rank, inbox_sz, suf.Current(), primary_suf_ordered, K, part_sz);
+            CUDA_CHECK(cudaGetLastError());
         }
     }
+
+
+    cub::DoubleBuffer<idx_t> key(K, A);
 
 
     // Sort the partition by (primary, secondary, tertiary): two phase radix sort.
