@@ -85,7 +85,7 @@ public:
 
     // Reads `sz`-many keys of the `p_id`'th partition, from its offset `off`,
     // into `dst`.
-    void read_key(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
+    void read_key(p_id_t p_id, idx_t off, idx_t sz, p_sz_t* dst) const;
 
     // Reads `sz`-many messages of the `p_id`'th partition's inbox for the
     // current generation, from its offset `off`, into `tgt` and `rank`.
@@ -93,7 +93,7 @@ public:
 
     // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
     // offset `off`, from `suf` and `key`.
-    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const idx_t* key);
+    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
 
     // Drops the prefix-key files from the backend.
     void drop_prefixes();

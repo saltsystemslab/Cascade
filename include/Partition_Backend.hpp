@@ -101,19 +101,19 @@ public:
     p_sz_t msg_written(const p_id_t q) const { return msg_written_[inbox_write_parity_][q]; }
 
     // Returns the `p_id`'th partition's resident suffixes, if any.
-    idx_t* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }
+    auto* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }
 
     // Returns the `p_id`'th partition's resident keys, if any.
-    idx_t* resident_key(const p_id_t p_id) { return plan_.data(p_id) ? ram_.key(p_id) : nullptr; }
+    auto* resident_key(const p_id_t p_id) { return plan_.data(p_id) ? ram_.key(p_id) : nullptr; }
 
     // Returns the `p_id`'th partition's resident prefix-keys, if any.
-    Prefix_Key* resident_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? ram_.prefix(p_id) : nullptr; }
+    auto* resident_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? ram_.prefix(p_id) : nullptr; }
 
     // Returns the `p_id`'th partition's spilled suffixes' file, if any.
-    Direct_File* spilled_suf(const p_id_t p_id) { return plan_.data(p_id) ? nullptr : &disk_.suf(p_id); }
+    auto* spilled_suf(const p_id_t p_id) { return plan_.data(p_id) ? nullptr : &disk_.suf(p_id); }
 
     // Returns the `p_id`'th partition's spilled prefix-keys' file, if any.
-    Direct_File* spilled_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? nullptr : &disk_.prefix(p_id); }
+    auto* spilled_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? nullptr : &disk_.prefix(p_id); }
 
     // Reads the staging slab `s`'s chunk of suffixes and their corresponding
     // prefix-keys from the backend into it.
@@ -125,7 +125,7 @@ public:
 
     // Reads `sz` suffixes and their corresponding ranks of the `p_id`'th
     // partition, from its offset `off`, into `suf` and `key` respectively.
-    void read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, idx_t* key) const;
+    void read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, p_sz_t* key) const;
 
     // Reads `sz` suffixes and their corresponding initial prefix-keys of the
     // `p_id`'th partition, from its offset `off`, into `suf` and `key`

@@ -812,6 +812,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter_p%d", static_cast<int>(p_id));
 
 
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
     cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
     cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
@@ -846,6 +847,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
     msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
     p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
+    p_sz_t* local_rank = nullptr;   // Final primary ranks computed.
 
 
     // Sort the partition by the (packed-prefix, forward-tag): two-phase radix-sort.
@@ -973,6 +975,15 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     }
 
 
+    // Narrow the rank-width for persisting as `p_sz_t`.
+    {
+        local_rank = reinterpret_cast<p_sz_t*>(reinterpret_cast<idx_t*>(K_ranked) + P_sz_max);  // `K_ranked[0, part_sz)` contains primary keys.
+        extract_primary_keys_kernel<false, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (reinterpret_cast<const idx_t*>(K_ranked), local_rank, part_sz);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -986,7 +997,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(2 * chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
             s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
-            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), reinterpret_cast<idx_t*>(K_ranked) + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
@@ -1182,8 +1193,8 @@ void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
 #ifdef TESTS
     for(auto* s : p_assembly.slab)
     {
-        const idx_t* const suf = s->suf();
-        const idx_t* const key = reinterpret_cast<const idx_t*>(s->key());
+        const auto* const suf = s->suf();
+        const auto* const key = reinterpret_cast<const p_sz_t*>(s->key());
 
         #pragma omp parallel for schedule(static) num_threads(compute_c)
         for(idx_t i = 0; i < s->size(); ++i)
@@ -1240,16 +1251,17 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
     idx_t* const A = reinterpret_cast<idx_t*>(key_buf[buf_id][0]);
     idx_t* const B = reinterpret_cast<idx_t*>(key_buf[buf_id][1]);
-    idx_t* const primary = A;    // Bare local ranks, staged in.
-    idx_t* const primary_suf_ordered = A + P_sz_max;    // Local ranks in suffix-order.
+    p_sz_t* const primary = reinterpret_cast<p_sz_t*>(A);   // Bare local ranks, staged in.
+    p_sz_t* const primary_suf_ordered = primary + P_sz_max; // Local ranks in suffix-order.
     idx_t* const K = B; // Composite keys, produced from join.
+    p_sz_t* local_rank = nullptr;   // Final primary ranks computed.
 
 
     // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
     {
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(primary + s->off(), s->key(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(primary + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
@@ -1293,7 +1305,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         ));
 
         // Shuffle keys and backward tags per the suffix-index-order permutation.
-        shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+        shuffle_kernel<p_sz_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (primary_suf_ordered, primary, perm.Current(), part_sz);
         CUDA_CHECK(cudaGetLastError());
 
@@ -1306,7 +1318,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     // Asynchronously upload this partition's inbox to the device.
     {
-        inbox_target = primary; // Bare local ranks have moved to `primary_suf_ordered`.
+        inbox_target = A + P_sz_max;    // Bare local ranks have moved to `primary_suf_ordered`, at `A[4P, 8P)`.
         inbox_rank = reinterpret_cast<msg_rank_t*>(B + P_sz_max);
         if(inbox_sz > P_sz_max) // By injectivity, a partition cannot receive more messages than its capacity.
         {
@@ -1332,7 +1344,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         if(inbox_sz > 0)
         {
             const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
-            join_messages_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            join_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (inbox_target, inbox_rank, inbox_sz, suf.Current(), primary_suf_ordered, K, part_sz);
             CUDA_CHECK(cudaGetLastError());
         }
@@ -1410,7 +1422,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Re-rank and filter the sort-output.
     {
         idx_t* const key_group_rank = K_re_ranked;    // Distinct key groups' ranks.
-        idx_t* const primary_key_group_rank = key_group_rank + part_sz; // Distinct primary-key groups' ranks.
+        idx_t* const primary_key_group_rank = key_group_rank + P_sz_max;    // Distinct primary-key groups' ranks.
 
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
@@ -1485,9 +1497,14 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         emit_messages_kernel<true, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (SA_re_ranked, K_re_ranked, beta_re_ranked, part_sz, ctx_, active_set_sz_d + p_id, msg_target, msg_rank, msg_off);
         CUDA_CHECK(cudaGetLastError());
+    }
 
-        unpack_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-            (K_re_ranked, part_sz);
+
+    // Narrow the rank-width for persisting as `p_sz_t`.
+    {
+        local_rank = reinterpret_cast<p_sz_t*>(K_re_ranked + P_sz_max);
+        extract_primary_keys_kernel<true, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (K_re_ranked, local_rank, part_sz);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1505,7 +1522,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(2 * chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
             s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
-            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
@@ -1615,8 +1632,8 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
 {
     SA = util::allocate<idx_t>(n_);
     auto& s = S[0];
-    idx_t* const suf = s.suf();
-    idx_t* const key = reinterpret_cast<idx_t*>(s.key());
+    auto* const suf = s.suf();
+    auto* const key = reinterpret_cast<p_sz_t*>(s.key());
 
     // Place the partitions at their appropriate offsets and shuffle the in-
     // partition suffixes per their local-rank.

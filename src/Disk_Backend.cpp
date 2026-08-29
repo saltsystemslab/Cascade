@@ -88,9 +88,9 @@ void Disk_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, 
 }
 
 
-void Disk_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const dst) const
+void Disk_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, p_sz_t* const dst) const
 {
-    key_[p_id].read_at(dst, sz * sizeof(idx_t), off * sizeof(idx_t));
+    key_[p_id].read_at(dst, sz * sizeof(p_sz_t), off * sizeof(p_sz_t));
 }
 
 
@@ -101,10 +101,10 @@ void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz
 }
 
 
-void Disk_Backend::write(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const suf, const idx_t* const key)
+void Disk_Backend::write(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const suf, const p_sz_t* const key)
 {
     suf_[p_id].write_at(suf, sz * sizeof(idx_t), off * sizeof(idx_t));
-    key_[p_id].write_at(key, sz * sizeof(idx_t), off * sizeof(idx_t));
+    key_[p_id].write_at(key, sz * sizeof(p_sz_t), off * sizeof(p_sz_t));
 }
 
 
@@ -115,7 +115,7 @@ void Disk_Backend::retire_prefix_and_open_key(const p_id_t p_id)
     if(!data_resident_[p_id])
     {
         key_[p_id] = spill_->open(p_id, Spill_Role::key, Direct_File::Mode::read_write);
-        key_[p_id].preallocate(P_cap_[p_id] * sizeof(idx_t));
+        key_[p_id].preallocate(P_cap_[p_id] * sizeof(p_sz_t));
     }
 }
 

@@ -69,8 +69,8 @@ void Partition_Backend::read_prefixes(Staging_Slab& s) const
 
 void Partition_Backend::read_keys(Staging_Slab& s) const
 {
-    idx_t* const suf = s.suf();
-    idx_t* const key = reinterpret_cast<idx_t*>(s.key());
+    auto* const suf = s.suf();
+    auto* const key = reinterpret_cast<p_sz_t*>(s.key());
 
     {
         INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
@@ -79,7 +79,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 }
 
 
-void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, idx_t* const key) const
+void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, p_sz_t* const key) const
 {
     plan_.data(p_id) ?  (ram_.read_suf(p_id, off, sz, suf), ram_.read_key(p_id, off, sz, key)) :
                         (disk_.read_suf(p_id, off, sz, suf), disk_.read_key(p_id, off, sz, key));
@@ -107,7 +107,7 @@ void Partition_Backend::read_messages(Staging_Slab& s) const
 void Partition_Backend::write(const Staging_Slab& s)
 {
     const auto p_id = s.p_id();
-    const idx_t* const key = reinterpret_cast<const idx_t*>(s.key());
+    const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
     plan_.data(p_id) ?  ram_.write(p_id, s.off(), s.size(), s.suf(), key) :
                         disk_.write(p_id, s.off(), s.size(), s.suf(), key);
 }

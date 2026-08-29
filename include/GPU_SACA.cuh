@@ -274,10 +274,10 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
 // secondary key in the message's rank.
 // Grid organization: one thread per message.
 // Shared memory layout: no usage.
-template <typename T_primary_, idx_t BLOCK_SZ>
+template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            idx_t* const __restrict__ SA, const T_primary_* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
+                            idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= msg_c)
@@ -305,18 +305,23 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
 }
 
 
-// Transforms the packed keys in `K` to unpacked primary keys.
+// Extracts the primary keys from the keys in `K` to `dst`. `packed_` denotes
+// whether the keys are composite keys packing both primaries and secondaries,
+// or only bare primaries.
 // Grid organization: one thread per key.
 // Shared memory layout: no usage.
-template <idx_t BLOCK_SZ>
+template <bool packed_, idx_t BLOCK_SZ>
 __global__
-void unpack_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n)
+void extract_primary_keys_kernel(const idx_t* const __restrict__ K, p_sz_t* const __restrict__ dst, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
         return;
 
-    K[i] = bit_layout::primary_of(K[i]);
+    if constexpr(packed_)
+        dst[i] = static_cast<p_sz_t>(bit_layout::primary_of(K[i]));
+    else
+        dst[i] = static_cast<p_sz_t>(K[i]);
 }
 
 }

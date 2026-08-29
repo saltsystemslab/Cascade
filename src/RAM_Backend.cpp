@@ -18,7 +18,7 @@ RAM_Backend::RAM_Backend(const std::vector<idx_t>& P_cap, const Residency_Plan& 
         if(plan.data(p_id))
         {
             suf_[p_id] = util::checked_allocate<idx_t>(P_cap[p_id]);
-            key_[p_id] = util::checked_allocate<idx_t>(P_cap[p_id]);
+            key_[p_id] = util::checked_allocate<p_sz_t>(P_cap[p_id]);
         }
 
         if(plan.prefix(p_id))
@@ -57,16 +57,16 @@ void RAM_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, i
 }
 
 
-void RAM_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const dst) const
+void RAM_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, p_sz_t* const dst) const
 {
-    std::memcpy(dst, key_[p_id] + off, sz * sizeof(idx_t));
+    std::memcpy(dst, key_[p_id] + off, sz * sizeof(p_sz_t));
 }
 
 
-void RAM_Backend::write(const p_id_t p_id, const  idx_t off, const  idx_t sz, const idx_t* const suf, const idx_t* const key)
+void RAM_Backend::write(const p_id_t p_id, const  idx_t off, const  idx_t sz, const idx_t* const suf, const p_sz_t* const key)
 {
     std::memcpy(suf_[p_id] + off, suf, sz * sizeof(idx_t));
-    std::memcpy(key_[p_id] + off, key, sz * sizeof(idx_t));
+    std::memcpy(key_[p_id] + off, key, sz * sizeof(p_sz_t));
 }
 
 }
