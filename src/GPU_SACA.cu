@@ -183,7 +183,8 @@ std::size_t GPU_SACA<T_sym_>::fixed_budget() const
     return  n_ * sizeof(T_sym_) +   // `T`
             n_ * sizeof(p_id_t) +   // `Π`
             slab_pool_memory() +
-            Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_);
+            Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_) +
+            Partition_Backend::fixed_budget(p_);
 }
 
 

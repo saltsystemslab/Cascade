@@ -79,6 +79,10 @@ public:
 
     ~Partition_Backend();
 
+    // Returns the fixed RAM-budget (in bytes) required by the backend for `p`
+    // partitions. Currently: the block-overflow buffers for the messages.
+    static std::size_t fixed_budget(p_id_t p);
+
     // Returns the count of partitions.
     auto p() const { return p_; }
 

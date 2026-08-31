@@ -136,9 +136,9 @@ private:
     // }
 
 
-    // Returns the fixed space-budget (in bytes) required in the algorithm.
-    // Currently: the text (`T`), the partition-IDs (`Π`), and the scatter-
-    // buffers in partitioning.
+    // Returns the fixed RAM-budget (in bytes) required in the algorithm.
+    // Currently: the text (`T`), the partition-IDs (`Π`), the scatter-buffers
+    // in partitioning, and backend's fixed space.
     std::size_t fixed_budget() const;
 
     // Selects the set of pivots for the partitioning of the suffixes.

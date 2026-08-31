@@ -47,6 +47,12 @@ Partition_Backend::~Partition_Backend()
 }
 
 
+std::size_t Partition_Backend::fixed_budget(const p_id_t p)
+{
+    return p * OV_CAP * (sizeof(idx_t) + sizeof(msg_rank_t));
+}
+
+
 void Partition_Backend::open_deferred_inboxes()
 {
     disk_.open_deferred_inboxes();
