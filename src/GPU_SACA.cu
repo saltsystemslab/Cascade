@@ -42,7 +42,9 @@ namespace gpu_saca
 
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
-      n_(n)
+      host_budget(env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>((1 - MEM_SAFETY_MARGIN) *
+                                                                                    (util::available_memory() + n * sizeof(T_sym_)))))
+    , n_(n)
     , T_h_(T)
     , p_(0)
     , P_id(nullptr)
@@ -596,7 +598,7 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), p_);
+            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, host_budget, fixed_budget(), p_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)

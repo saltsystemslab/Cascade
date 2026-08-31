@@ -17,18 +17,16 @@ class Residency_Plan
 {
 private:
 
-    static constexpr double MEM_SAFETY_FRACTION = 0.9; // Fraction of the available memory to budget against.
-
     std::vector<uint8_t> data_; // Whether each partition's data (suffixes and keys) are host-resident.
     std::vector<uint8_t> prefix_;   // Whether each partition's initial prefixes are host-resident.
 
 
 public:
 
-    // Plans residency for partitions with capacities `P_cap`, given an
-    // unavoidable host allocation `fixed_bytes` and the per-element bytes for
-    // its prefix-key.
-    Residency_Plan(const std::vector<idx_t>& P_cap, std::size_t fixed_bytes, std::size_t prefix_elem_bytes);
+    // Plans residency for partitions with capacities `P_cap` on host-budget
+    // `budget`, given an unavoidable host allocation `fixed_bytes` and the per-
+    // element bytes for its prefix-key.
+    Residency_Plan(const std::vector<idx_t>& P_cap, std::size_t budget, std::size_t fixed_bytes, std::size_t prefix_elem_bytes);
 
     // Returns whether the `p_id`'th partition's data (suffixes and keys) are
     // host-resident.

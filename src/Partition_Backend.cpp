@@ -13,9 +13,9 @@
 namespace gpu_saca
 {
 
-Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t fixed_bytes, const p_id_t p):
+Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t budget, const std::size_t fixed_bytes, const p_id_t p):
       p_(p)
-    , plan_(P_cap, fixed_bytes, sizeof(Prefix_Key))
+    , plan_(P_cap, budget, fixed_bytes, sizeof(Prefix_Key))
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
     , msg_off_(nullptr)

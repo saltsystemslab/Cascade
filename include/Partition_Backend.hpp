@@ -68,11 +68,11 @@ private:
 public:
 
     // Constructs a backend for partitions with capacities `P_cap`. It spills to
-    // spill-store `spill` whenever the memory budget of the host (less its
-    // fixed allocation cost `fixed_bytes) cannot hold some data. The global-
+    // spill-store `spill` whenever the memory `budget` of the host, less its
+    // fixed allocation cost `fixed_bytes` cannot hold some data. The global-
     // ranks array `rho` of size `n` is used to extend the ranks of the suffixes
     // while they are read off the backend. Partition-ID map `P_id` feeds the routing tags.
-    Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t fixed_bytes, p_id_t p);
+    Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, std::size_t budget, std::size_t fixed_bytes, p_id_t p);
 
     Partition_Backend(const Partition_Backend&) = delete;
     Partition_Backend& operator=(const Partition_Backend&) = delete;

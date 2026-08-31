@@ -37,6 +37,7 @@ class GPU_SACA
 private:
 
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
+                                                        // TODO: what happens if we bump it down? How far can we go?
 
     // Bytes per suffix required in each of the two device key-buffers, per
     // partition. The initial-ranking phase sorts the suffixes by their `\ell`-
@@ -48,6 +49,8 @@ private:
     // Assumed worst-case ratio of actual max partition-size to the target
     // estimated during pivots-selection.
     static constexpr double PART_SZ_IMBALANCE_SLACK = 1.20;
+
+    const std::size_t host_budget;  // Host-memory budget available for the algorithm.
 
     const idx_t n_; // Size of the text.
     const T_sym_* const T_h_;   // Text at the host-side.

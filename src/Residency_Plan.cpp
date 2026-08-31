@@ -1,6 +1,5 @@
 
 #include "Residency_Plan.hpp"
-#include "utility.hpp"
 #include "env.hpp"
 
 #include <numeric>
@@ -12,13 +11,12 @@
 namespace gpu_saca
 {
 
-Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_t fixed_bytes, const std::size_t prefix_elem_bytes):
+Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_t budget, const std::size_t fixed_bytes, const std::size_t prefix_elem_bytes):
       data_(P_cap.size(), 0)
     , prefix_(P_cap.size(), 0)
 {
-    const auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
 
-    const auto budget = env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>(MEM_SAFETY_FRACTION * util::available_memory()));
     if(budget < fixed_bytes)
     {
         std::cerr << "The host memory-budget of " << GB(budget) << "GBs cannot fit the fixed requirement of " << GB(fixed_bytes) << "GBs. Aborting.\n";
