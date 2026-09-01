@@ -4,6 +4,8 @@
 
 
 
+#include "utility.hpp"
+
 #include <cstdint>
 #include <cstdio>
 
@@ -61,6 +63,32 @@ inline const char* queue_name(const std::size_t q)
     constexpr const char* name[QUEUE_C] = {"F (free)", "C (to-stage)", "R (to-device)", "W (to-backend)"};
     return name[q];
 }
+
+
+// Per worker-thread stats accumulators.
+struct alignas(2 * util::L1_CACHE_LINE_SIZE)
+    Worker_Stat
+{
+    uint64_t io_ns = 0; // Time spent by: readers and writers; in: `pread` / `pwrite` / resident memcpy to / from the backend.
+    uint64_t gather_ns = 0; // Time spent by: stagers; in: host-side staging-compute.
+    uint64_t device_ns = 0; // Time spent by: dispatchers; in: device-dispatch (H2D uploads, kernels, D2H downloads, and stream-syncs).
+    uint64_t wait_in_ns = 0;    // Time spent in: blocking on the pool's input queues: `RT` / `C` / `R` / `W`.
+    uint64_t wait_slab_ns = 0;  // Time spent by: readers; in: blocking on `F` for free slabs.
+    uint64_t items = 0; // Units handled: slabs (for readers, writers, and stagers), and partitions (dispatchers).
+    uint64_t bytes = 0; // Bytes moved: backend traffic (for readers and writers), and PCIe traffic (for dispatchers).
+
+    // Time spent in actual work: in I/O, host-, or device-work.
+    uint64_t busy_ns() const { return io_ns + gather_ns + device_ns; }
+
+    // Resets the stats.
+    void reset() { io_ns = gather_ns = device_ns = wait_in_ns = wait_slab_ns = items = bytes = 0; }
+};
+
+}
+
+
+
+#endif
 
 }
 
