@@ -56,7 +56,7 @@ enum class Queue : std::size_t { F = 0, C, R, W, queue_c, };
 constexpr std::size_t QUEUE_C = static_cast<std::size_t>(Queue::queue_c);
 
 // Depth reported for a queue that does not exist yet in this build.
-constexpr uint64_t QUEUE_ABSENT = ~uint64_t(0);
+constexpr uint64_t QUEUE_ABSENT = std::numeric_limits<uint64_t>::max();
 
 inline const char* queue_name(const std::size_t q)
 {
@@ -65,7 +65,7 @@ inline const char* queue_name(const std::size_t q)
 }
 
 
-// Per worker-thread stats accumulators.
+// Per worker-thread stats accumulator.
 struct alignas(2 * util::L1_CACHE_LINE_SIZE)
     Worker_Stat
 {
@@ -84,13 +84,37 @@ struct alignas(2 * util::L1_CACHE_LINE_SIZE)
     void reset() { io_ns = gather_ns = device_ns = wait_in_ns = wait_slab_ns = items = bytes = 0; }
 };
 
-}
+
+// Sampled occupancy of a pipeline queue.
+struct Queue_Stat
+{
+    uint64_t sum = 0;   // Sum of the sampled depths.
+    uint64_t n = 0; // Number of samples.
+    uint64_t zero_n = 0;    // Number of samples that found the queue empty.
+    uint64_t min_n = std::numeric_limits<uint64_t>::max();  // Minimum sampled depth.
+    uint64_t max_n = 0; // Maximum sampled depth.
+
+    // Adds sampled depth `d` to the stats.
+    void add(const uint64_t d)
+    {
+        sum += d, n++;
+        zero_n += (d == 0);
+        min_n = std::min(min_n, d), max_n = std::max(max_n, d);
+    }
+
+    // Resets the stats.
+    void reset() { sum = n = zero_n = max_n = 0, min_n = std::numeric_limits<uint64_t>::max(); }
+
+    // Returns the mean of the sampled depths.
+    double mean() const { return n > 0 ? static_cast<double>(sum) / static_cast<double>(n) : 0.0; }
+
+    // Returns the percentage of empty samples.
+    double empty_pct() const { return n > 0 ? 100.0 * static_cast<double>(zero_n) / static_cast<double>(n) : 0.0; }
+};
 
 
 
 #endif
-
-}
 
 
 
