@@ -18,9 +18,9 @@
 namespace gpu_saca::isa_instrument
 {
 
-// Per reader-thread stats accumulators.
+// Per worker-thread stats accumulators.
 struct alignas(2 * util::L1_CACHE_LINE_SIZE)
-    Reader_Stat
+    Worker_Stat
 {
     uint64_t read_ns = 0;   // Time spent in the backend `pread`.
     uint64_t stage_ns = 0;  // Time spent in staging slabs with host-side compute.
@@ -35,11 +35,14 @@ class ISA_Instrumentation
 {
 private:
 
-    std::vector<std::unique_ptr<Reader_Stat>> r_;    // Accumulators per reader-thread.
+    std::vector<std::unique_ptr<Worker_Stat>> w_;    // Accumulators per worker-thread.
 
     idx_t iter_ = 0;    // Iteration index; 0 is initial-ranking.
     idx_t k_ = 0;   // Prefix-context size of the current iteration.
     idx_t active_ = 0;  // Active-set size entering the current iteration.
+
+    idx_t reader_c_ = 0;    // Number of readers.
+    idx_t dispatcher_c_ = 0;    // Number of workers.
 
     uint64_t pipeline_ns_ = 0;  // `drive_pipeline` wall-time.
     uint64_t read_chunk_ns_ = 0;    // Time spent in `read_chunk` from backend, within `update_global_rank`. Disjoint from the reader-stats: they accumulate timings of the pool-based pipeline-backbone.
@@ -48,12 +51,14 @@ private:
 
 public:
 
-    // Initializes the accumulators for `reader_c`-many reader-threads.
-    void init(const std::size_t reader_c)
+    // Initializes the accumulators for `reader_c`-many reader-threads and
+    // `dispatcher_c`-many dispatcher threads.
+    void init(const std::size_t reader_c, const std::size_t dispatcher_c)
     {
-        r_.clear();
-        for(std::size_t i = 0; i < reader_c; ++i)
-            r_.emplace_back(std::make_unique<Reader_Stat>());
+        reader_c_ = reader_c, dispatcher_c_ = dispatcher_c;
+        w_.clear();
+        for(std::size_t i = 0; i < reader_c + dispatcher_c; ++i)
+            w_.emplace_back(std::make_unique<Worker_Stat>());
     }
 
     // Returns a static slot-ID storage for the caller thread.
@@ -63,14 +68,14 @@ public:
     void bind(const std::size_t i) { slot() = i; }
 
     // Returns the calling thread's read-stats accumulators.
-    Reader_Stat& me() { return *r_[slot()]; }
+    Worker_Stat& me() { return *w_[slot()]; }
 
     // Opens iteration `iter` at prefix-context `k` over `active` suffixes.
     void begin_iteration(const idx_t iter, const idx_t k, const idx_t active)
     {
         iter_ = iter, k_ = k, active_ = active;
         pipeline_ns_ = read_chunk_ns_ = scatter_ns_ = 0;
-        for(auto& r : r_)
+        for(auto& r : w_)
             r->reset();
     }
 
@@ -88,17 +93,17 @@ public:
     void report_log() const
     {
         uint64_t read_ns = 0, stage_ns = 0, wait_ns = 0;
-        for(const auto& r : r_)
+        for(const auto& r : w_)
             read_ns += r->read_ns, stage_ns += r->stage_ns, wait_ns += r->wait_ns;
 
         std::cerr << "\n[ISA iter " << iter_ << ", context "<< k_ << ", active "<< active_ << "]\n";
         std::fprintf(stderr, "  drive_pipeline wall     %10.3f s\n", pipeline_ns_ / 1e9);
 
-        const auto w_c = r_.size(); // Number of workers performing backend-read and the associated ISA-updates in the pipeline.
+        const auto w_c = w_.size(); // Number of workers performing backend-read and the associated ISA-updates in the pipeline.
         const double denom = double(pipeline_ns_) * w_c;    // Normalization factor for each reader's timings.
         const auto percentage = [denom](const uint64_t ns) { return denom > 0.0 ? 100.0 * ns / denom : 0.0; };
         std::fprintf(stderr, "  readers (%zu, cpu-sum)  read %8.3f s (%5.1f%%) | stage %8.3f s (%5.1f%%) | wait %8.3f s (%5.1f%%) | other %5.1f%%\n",
-                        r_.size(),
+                        w_.size(),
                         read_ns / 1e9,   percentage(read_ns),
                         stage_ns / 1e9, percentage(stage_ns),
                         wait_ns / 1e9,   percentage(wait_ns),

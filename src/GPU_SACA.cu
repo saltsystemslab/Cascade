@@ -515,7 +515,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
                             ": (" << reader_c_ << ", " << writer_c_ << ", " << dispatcher_c << ", " << compute_c << ")"
                             " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
 
-        INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_ + STREAM_C));
+        INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_, dispatcher_c));
     }
 
     // Sets the slab pool size.
