@@ -103,8 +103,8 @@ if(STATS)
     add_compile_definitions(STATS)
 endif()
 
-if(ISA_INSTRUMENT)
-    add_compile_definitions(ISA_INSTRUMENT)
+if(PROBE)
+    add_compile_definitions(PROBE)
 endif()
 
 if(PROFILE)

@@ -2,7 +2,7 @@
 #include "Partition_Backend.hpp"
 #include "utility.hpp"
 #include "utility.cuh"
-#include "isa-instrument.hpp"
+#include "Pipeline_Probe.hpp"
 
 #include <cstring>
 #include <mutex>
@@ -67,7 +67,8 @@ void Partition_Backend::retire_prefix_and_open_key(const p_id_t p_id)
 
 void Partition_Backend::read_prefixes(Staging_Slab& s) const
 {
-    INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+    INSTRUMENT_TIMER(probe::P().me().io_ns);
+    INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(Prefix_Key)));
 
     read_prefix_chunk(s.p_id(), s.off(), s.size(), s.suf(), s.key());
 }
@@ -79,7 +80,8 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
     auto* const key = reinterpret_cast<p_sz_t*>(s.key());
 
     {
-        INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+        INSTRUMENT_TIMER(probe::P().me().io_ns);
+        INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
         read_chunk(s.p_id(), s.off(), s.size(), suf, key);
     }
 }
@@ -104,7 +106,8 @@ void Partition_Backend::read_prefix_chunk(const p_id_t p_id, const idx_t off, co
 
 void Partition_Backend::read_messages(Staging_Slab& s) const
 {
-    INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().read_ns);
+    INSTRUMENT_TIMER(probe::P().me().io_ns);
+    INSTRUMENT(probe::P().me().bytes += s.inbox_sz() * MESSAGE_BYTES);
 
     disk_.read_messages(s.p_id(), s.inbox_off(), s.inbox_sz(), s.msg_target(), s.msg_rank());
 }
@@ -112,6 +115,9 @@ void Partition_Backend::read_messages(Staging_Slab& s) const
 
 void Partition_Backend::write(const Staging_Slab& s)
 {
+    INSTRUMENT_TIMER(probe::P().me().io_ns);
+    INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
+
     const auto p_id = s.p_id();
     const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
     plan_.data(p_id) ?  ram_.write(p_id, s.off(), s.size(), s.suf(), key) :
@@ -121,6 +127,9 @@ void Partition_Backend::write(const Staging_Slab& s)
 
 void Partition_Backend::write_messages(const Staging_Slab& s)
 {
+    INSTRUMENT_TIMER(probe::P().me().io_ns);
+    INSTRUMENT(probe::P().me().bytes += s.outbox_sz() * MESSAGE_BYTES);
+
     const auto p_id = s.p_id();
     const auto* const msg_off = this->msg_off(p_id);
 

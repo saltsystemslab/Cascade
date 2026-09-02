@@ -9,7 +9,7 @@
 #include "utility.cuh"
 #include "env.hpp"
 #include "tests.hpp"
-#include "isa-instrument.hpp"
+#include "Pipeline_Probe.hpp"
 #include "profile.hpp"
 
 #include "omp.h"
@@ -514,8 +514,6 @@ void GPU_SACA<T_sym_>::setup_staging_config()
             std::cerr <<    "Warning: the staging workers (readers, writers, dispatchers, and host-side computers)"
                             ": (" << reader_c_ << ", " << writer_c_ << ", " << dispatcher_c << ", " << compute_c << ")"
                             " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
-
-        INSTRUMENT(isa_instrument::ISA_Instrument().init(reader_c_, dispatcher_c));
     }
 
     // Sets the slab pool size.
@@ -525,6 +523,8 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
         // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer
         slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
+
+        INSTRUMENT(probe::P().init(reader_c_, 0, dispatcher_c, writer_c_, slab_c_, STREAM_C * max_chunk_per_part));
     }
 
     // Log the staging configurations.
@@ -773,7 +773,7 @@ void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
-    INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(0, 0, n_));
+    INSTRUMENT(probe::P().begin_iteration(0, 0, n_));
 
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
@@ -805,7 +805,7 @@ void GPU_SACA<T_sym_>::initial_rank()
     }
 #endif
 
-    INSTRUMENT(isa_instrument::ISA_Instrument().report_log());
+    INSTRUMENT(probe::P().report_log());
 }
 
 
@@ -1016,11 +1016,20 @@ template <typename T_sym_>
 template <bool init_rank_>
 void GPU_SACA<T_sym_>::drive_pipeline()
 {
-#ifdef ISA_INSTRUMENT
+#ifdef INSTRUMENT
     uint64_t pipeline_ns = 0;
 #endif
 {
     INSTRUMENT_TIMER(pipeline_ns);
+
+    INSTRUMENT(probe::P().set_depth_reader([this](uint64_t* const d)
+    {
+        d[0] = F.size_approx();
+        d[1] = probe::QUEUE_ABSENT;
+        d[2] = R.size_approx();
+        d[3] = W.size_approx();
+    }));
+    INSTRUMENT(probe::P().start_sampler());
 
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
     p_id_t active_part_c = 0;   // Count of active partitions in the current iteration.
@@ -1064,15 +1073,22 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             readers.emplace_back(
                 [&, r]
                 {
-                    INSTRUMENT(isa_instrument::ISA_Instrument().bind(r));
+                    INSTRUMENT(probe::P().bind(probe::Role::reader, r));
                     while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
-                        Read_Task rt;       RT.wait_dequeue(rt);    // Get a read-task.
+                        Read_Task rt;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            RT.wait_dequeue(rt);    // Get a read-task.
+                        }
+
                         Staging_Slab* s;
                         {
-                            INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().wait_ns);
+                            INSTRUMENT_TIMER(probe::P().me().wait_slab_ns);
                             F.wait_dequeue(s);      // Get a free slab for the chunk.
                         }
+
+                        INSTRUMENT(probe::P().me().items++);
 
                         s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
                         if constexpr(init_rank_)    backend_->read_prefixes(*s);
@@ -1091,7 +1107,9 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
                         auto& p_assembly = part_assembly[rt.p_id];
                         p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
-                        if(p_assembly.chunks_to_read.fetch_sub(1, std::memory_order_acq_rel) == 1)  // Last chunk read off for this partition; chunked-assembly is ready for the device.
+                        const auto prev = p_assembly.chunks_to_read.fetch_sub(1, std::memory_order_acq_rel);
+                        INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
+                        if(prev == 1)   // Last chunk read off for this partition; chunked-assembly is ready for the device.
                             R.enqueue(&p_assembly);
                     }
                 }
@@ -1105,12 +1123,18 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     {
         for(idx_t w = 0; w < writer_c_; ++w)
             writers.emplace_back(
-                [&]
+                [&, w]
                 {
+                    INSTRUMENT(probe::P().bind(probe::Role::writer, w));
                     while(dl_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
                         Staging_Slab* s;
-                        W.wait_dequeue(s);  // Get a processed slab.
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            W.wait_dequeue(s);  // Get a processed slab.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
 #ifdef TESTS
                         if(!test::validate_messages(*s, this, backend_->msg_off(s->p_id())))
                         {
@@ -1137,10 +1161,17 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             dispatchers.emplace_back(
                 [&, s_id]
                 {
-                    INSTRUMENT(isa_instrument::ISA_Instrument().bind(reader_c_ + s_id));
+                    INSTRUMENT(probe::P().bind(probe::Role::dispatcher, s_id));
                     while(dp_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
-                        Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
+                        Partition_Assembly* p_assembly;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
                         const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
 #ifdef TESTS
                         {
@@ -1159,10 +1190,13 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                             backend_->retire_prefix_and_open_key(p_id);
 
                         stage_slabs<init_rank_>(*p_assembly);
-                        if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
-                        else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().device_ns);
+                            if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
+                            else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
 
-                        CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                            CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                        }
 
                         for(auto* s : p_assembly->slab) // The processed slabs now move to the write queue.
                             W.enqueue(s);
@@ -1178,11 +1212,13 @@ void GPU_SACA<T_sym_>::drive_pipeline()
         for(auto& r : readers)  r.join();
         for(auto& w : writers)  w.join();
 
+        INSTRUMENT(probe::P().stop_sampler());
+
         backend_->close_generation();
     }
 }
 
-    INSTRUMENT(isa_instrument::ISA_Instrument().accumulate_pipeline_ns(pipeline_ns));
+    INSTRUMENT(probe::P().accumulate_pipeline_ns(pipeline_ns));
 }
 
 
@@ -1190,7 +1226,7 @@ template <typename T_sym_>
 template <bool init_rank_>
 void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
 {
-    INSTRUMENT_TIMER(isa_instrument::ISA_Instrument().me().stage_ns);
+    INSTRUMENT_TIMER(probe::P().me().stage_ns);
 
     const auto stride = ctx_ / 2;   // Previous generation's context.
 
@@ -1570,7 +1606,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
         }
 #endif
 
-        INSTRUMENT(isa_instrument::ISA_Instrument().begin_iteration(gen, k, std::accumulate(Active_sz.cbegin(), Active_sz.cend(), idx_t(0))));
+        INSTRUMENT(probe::P().begin_iteration(gen, k, std::accumulate(Active_sz.cbegin(), Active_sz.cend(), idx_t(0))));
         const auto t_0 = gpu_saca::timer::now();
 
         // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
@@ -1622,7 +1658,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
 #endif
 
-            INSTRUMENT(isa_instrument::ISA_Instrument().report_log());
+            INSTRUMENT(probe::P().report_log());
 
             if(sorted_part == p_)   // All partitions have already been sorted.
                 break;
