@@ -14,6 +14,7 @@ set(PROJECT_SRC
         RAM_Backend.cpp
         Partition_Backend.cpp
         Residency_Plan.cpp
+        Pipeline_Probe.cpp
         utility.cpp
 )
 

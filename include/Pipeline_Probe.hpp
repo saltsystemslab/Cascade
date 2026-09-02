@@ -8,14 +8,15 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 
 
-// Instrumentation scaffolding for the staging pipeline between the partition-
-// backend and the device.
+// Instrumentation scaffolding for the staging pipeline of the slab-pool between
+// the partition-backend and the device.
 // The pipeline is a chain of thread-pools connected by queues:
 //  F --> [reader] --> C --> [stager] --> R --> [dispatcher] --> W --> [writer] --> F
 //
-// The probing identifies per generation:
+// The instrumentation identifies per generation:
 // 1.   The bottleneck pool: Per-role time is split into actual work (`io` /
 //      `host` / `device`), blocked-on-input (`waitIn`), blocked-on-a-free-slab
 //      (`waitF`), and unaccounted (`idle`). Each is normalized against
@@ -111,10 +112,6 @@ struct Queue_Stat
     // Returns the percentage of empty samples.
     double empty_pct() const { return n > 0 ? 100.0 * static_cast<double>(zero_n) / static_cast<double>(n) : 0.0; }
 };
-
-
-
-#endif
 
 
 
