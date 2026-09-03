@@ -508,11 +508,11 @@ void GPU_SACA<T_sym_>::setup_staging_config()
     {
         reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, omp_get_max_threads()));
         writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
-        dispatcher_c = STREAM_C;
-        compute_c = std::max<idx_t>(1, (omp_get_max_threads() - reader_c_ - writer_c_ - dispatcher_c) / STREAM_C);  // Temporary setting before compute-pool gets introduced.
-        if(reader_c_ + writer_c_ + dispatcher_c + compute_c > static_cast<idx_t>(omp_get_max_threads()))
-            std::cerr <<    "Warning: the staging workers (readers, writers, dispatchers, and host-side computers)"
-                            ": (" << reader_c_ << ", " << writer_c_ << ", " << dispatcher_c << ", " << compute_c << ")"
+        dispatcher_c_ = STREAM_C;
+        stager_c_ = std::max<idx_t>(1, omp_get_max_threads() - reader_c_ - writer_c_ - dispatcher_c_);
+        if(reader_c_ + writer_c_ + dispatcher_c_ + stager_c_ > static_cast<idx_t>(omp_get_max_threads()))
+            std::cerr <<    "Warning: the staging workers (readers, writers, stagers, and dispatchers)"
+                            ": (" << reader_c_ << ", " << writer_c_ << ", " << stager_c_ << ", " << dispatcher_c_ << ")"
                             " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
     }
 
@@ -521,10 +521,11 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
 
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
-        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer
-        slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
+        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader, per-stager,
+        // and per-writer.
+        slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + stager_c_ + writer_c_;
 
-        INSTRUMENT(probe::P().init(reader_c_, 0, dispatcher_c, writer_c_, slab_c_, STREAM_C * max_chunk_per_part));
+        INSTRUMENT(probe::P().init(reader_c_, stager_c_, dispatcher_c_, writer_c_, slab_c_, STREAM_C * max_chunk_per_part));
     }
 
     // Log the staging configurations.
@@ -533,8 +534,8 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         std::cerr << "Staging-configuration between backend and device:\n";
         std::cerr << "\tReader-pool size: " << reader_c_ << "\n";
         std::cerr << "\tWriter-pool size: " << writer_c_ << "\n";
-        std::cerr << "\tDevice-dispatcher-pool size: " << dispatcher_c << "\n";
-        std::cerr << "\tCPU-compute-pool size: " << (compute_c * STREAM_C) << "\n";
+        std::cerr << "\tDevice-dispatcher-pool size: " << dispatcher_c_ << "\n";
+        std::cerr << "\tStager-pool size: " << stager_c_ << "\n";
         std::cerr << "\tSlab-pool size: " << slab_c_ << "\n";
         std::cerr << "\tSlab-capacity:  " << chunk_cap_ << "\n";
         std::cerr << "\tSlab-pool memory: " << slab_pool_memory() << "B\n";
@@ -1025,7 +1026,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     INSTRUMENT(probe::P().set_depth_reader([this](uint64_t* const d)
     {
         d[0] = F.size_approx();
-        d[1] = probe::QUEUE_ABSENT;
+        d[1] = C.size_approx();
         d[2] = R.size_approx();
         d[3] = W.size_approx();
     }));
@@ -1052,7 +1053,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
             // Prepare skeleton chain of chunks of this partition.
             part_assembly[p_id].slab.assign(chunk_c, nullptr);
-            part_assembly[p_id].chunks_to_read.store(chunk_c, std::memory_order_relaxed);
+            part_assembly[p_id].slabs_to_stage.store(chunk_c, std::memory_order_relaxed);
 
             for(idx_t c = 0; c < chunk_c; ++c) // Post a read-task for each chunk of this partition.
             {
@@ -1067,7 +1068,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
     std::vector<std::thread> readers;   // Readers-pool.    // TODO: why new pool per iteration? Fix.
     std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
-    // Launch readers thread-pool to read chunks from the partition-backend to staging slabs.
+    // Launch the readers thread-pool to read chunks from the partition-backend to staging slabs.
     {
         for(idx_t r = 0; r < reader_c_; ++r)
             readers.emplace_back(
@@ -1085,7 +1086,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         Staging_Slab* s;
                         {
                             INSTRUMENT_TIMER(probe::P().me().wait_slab_ns);
-                            F.wait_dequeue(s);      // Get a free slab for the chunk.
+                            F.wait_dequeue(s);      // Get a free slab.
                         }
 
                         INSTRUMENT(probe::P().me().items++);
@@ -1097,6 +1098,33 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         if(s->inbox_sz() > 0)
                             backend_->read_messages(*s);
 
+                        auto& p_assembly = part_assembly[rt.p_id];
+                        p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
+                        C.enqueue(s);   // This slab now moves to the staging-compute queue.
+                    }
+                }
+            );
+    }
+
+
+    std::vector<std::thread> stagers;   // Stagers-pool.
+    std::atomic<int64_t> st_remain(total_chunk);    // Count of slabs left to stage.
+    // Launch the stagers thread-pool to apply host-side compute to each slab as soon as it's been read from
+    // the backend, add it to its partition's assembly, and post completed assemblies for dispatch.
+    {
+        for(idx_t c = 0; c < stager_c_; ++c)
+            stagers.emplace_back([&, c]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::stager, c));
+                    while(st_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            C.wait_dequeue(s);  // Get a slab with read data.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
 #ifdef TESTS
                         if(!test::validate_inbox_routing(*s, P_id, n_))
                         {
@@ -1104,12 +1132,12 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                             std::exit(EXIT_FAILURE);
                         }
 #endif
+                        stage_slab<init_rank_>(*s);
 
-                        auto& p_assembly = part_assembly[rt.p_id];
-                        p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
-                        const auto prev = p_assembly.chunks_to_read.fetch_sub(1, std::memory_order_acq_rel);
+                        auto& p_assembly = part_assembly[s->p_id()];
+                        const auto prev = p_assembly.slabs_to_stage.fetch_sub(1, std::memory_order_acq_rel);
                         INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
-                        if(prev == 1)   // Last chunk read off for this partition; chunked-assembly is ready for the device.
+                        if(prev == 1)   // Last slab staged for this partition; chunked-assembly is ready for the device.
                             R.enqueue(&p_assembly);
                     }
                 }
@@ -1118,8 +1146,8 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
 
     std::vector<std::thread> writers;   // Writers-pool.    // TODO: why new pool per iteration?
-    std::atomic<int64_t> dl_remain(total_chunk);    // Count of chunks left to download from the device.
-    // Launch writers thread-pool to drain the processed chunks to the partition-backend from staging slabs.
+    std::atomic<int64_t> dl_remain(total_chunk);    // Count of slabs left to download from the device.
+    // Launch the writers thread-pool to drain the processed slabs to the partition-backend from staging slabs.
     {
         for(idx_t w = 0; w < writer_c_; ++w)
             writers.emplace_back(
@@ -1153,7 +1181,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
     std::vector<std::thread> dispatchers;   // Dispatchers-pool; one dispatcher per device-stream.
     std::atomic<int64_t> dp_remain(active_part_c);  // Count of partitions left to dispatch to the device.
-    // Launch dispatchers threads-pool to dispatch the device-tasks, by repeatedly
+    // Launch the dispatchers threads-pool to dispatch the device-tasks, by repeatedly
     // pulling a complete assembly, dispatching it to its device-stream, and then
     // handing it over to the writers after device-execution.
     {
@@ -1189,7 +1217,6 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         if constexpr(init_rank_)    // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
                             backend_->retire_prefix_and_open_key(p_id);
 
-                        stage_slabs<init_rank_>(*p_assembly);
                         {
                             INSTRUMENT_TIMER(probe::P().me().device_ns);
                             if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
@@ -1210,6 +1237,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     {
         for(auto& d : dispatchers)  d.join();   // Dispatchers feed the write-queue, so they must drain before the writers.
         for(auto& r : readers)  r.join();
+        for(auto& c : stagers)  c.join();
         for(auto& w : writers)  w.join();
 
         INSTRUMENT(probe::P().stop_sampler());
@@ -1224,55 +1252,44 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
 template <typename T_sym_>
 template <bool init_rank_>
-void GPU_SACA<T_sym_>::stage_slabs(Partition_Assembly& p_assembly)
+void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
 {
     INSTRUMENT_TIMER(probe::P().me().stage_ns);
 
     const auto stride = ctx_ / 2;   // Previous generation's context.
+    const auto sz = s.size();
+    const auto* const suf = s.suf();
 
 #ifdef TESTS
-    for(auto* s : p_assembly.slab)
+    if constexpr(!init_rank_)
     {
-        const auto* const suf = s->suf();
-        const auto* const key = reinterpret_cast<const p_sz_t*>(s->key());
+        const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
 
-        #pragma omp parallel for schedule(static) num_threads(compute_c)
-        for(idx_t i = 0; i < s->size(); ++i)
-            if constexpr(!init_rank_)
+        for(idx_t i = 0; i < sz; ++i)
+        {
+            // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
+            // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
+            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, P_id))
             {
-                // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
-                // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
-                if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, P_id))
-                {
-                    std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
-                    std::exit(EXIT_FAILURE);
-                }
-
-                if(i > 0 && !test::validate_coherent_tags(suf[i - 1], key[i - 1], suf[i], key[i]))
-                {
-                    std::cerr << "Target coherence invariant broken. Aborting.\n";
-                    std::exit(EXIT_FAILURE);
-                }
+                std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
+                std::exit(EXIT_FAILURE);
             }
+
+            if(i > 0 && !test::validate_coherent_tags(suf[i - 1], key[i - 1], suf[i], key[i]))
+            {
+                std::cerr << "Target coherence invariant broken. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+        }
     }
 #endif
 
-    #pragma omp parallel num_threads(compute_c)
+    auto* const beta = s.beta();
+    for(idx_t i = 0; i < sz; ++i)
     {
-        for(auto* s : p_assembly.slab)
-        {
-            const auto sz = s->size();
-            const auto* const suf = s->suf();
-            auto* const beta = s->beta();
-
-            #pragma omp for schedule(static) nowait
-            for(idx_t i = 0; i < sz; ++i)
-            {
-                const auto j = bit_layout::suffix_of(suf[i]);
-                beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
-                                                init_rank_ || j < stride ? 0 : P_id[j - stride]);
-            }
-        }
+        const auto j = bit_layout::suffix_of(suf[i]);
+        beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
+                                        init_rank_ || j < stride ? 0 : P_id[j - stride]);
     }
 }
 

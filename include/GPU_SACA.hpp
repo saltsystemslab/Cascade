@@ -88,8 +88,8 @@ private:
         idx_t slab_c_;  // |S|: slab pool size.
         idx_t reader_c_;    // |r|: reader-threads count.
         idx_t writer_c_;    // |w|: writer-threads count.
-        idx_t dispatcher_c; // |d|: dispatcher-threads count.
-        idx_t compute_c;    // |c|: compute-threads count.
+        idx_t dispatcher_c_;    // |d|: dispatcher-threads count.
+        idx_t stager_c_;    // |c|: stager-threads count.
 
         std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
 
@@ -98,7 +98,8 @@ private:
         template <typename T> using blocking_q_t = moodycamel::BlockingConcurrentQueue<T>;
         blocking_q_t<Read_Task> RT; // Chunk-read tasks.
         blocking_q_t<Staging_Slab*> F;  // Free slabs.
-        blocking_q_t<Partition_Assembly*> R;    // Slabs with chunks read from partition-backend, ready to be uploaded to device.
+        blocking_q_t<Staging_Slab*> C;  // Slabs read off the backend, ready for host-side staging-compute.
+        blocking_q_t<Partition_Assembly*> R;    // Partition-assemblies (chains of slabs) ready to be uploaded to device.
         blocking_q_t<Staging_Slab*> W;  // Slabs with chunks downloaded from device, ready to be written to partition-backend.
 
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
@@ -192,9 +193,8 @@ private:
     // for the initial-ranking phase.
     template <bool init_rank_> void drive_pipeline();
 
-    // Stages the slab-assembly `p_assembly`'s content for upload, with required
-    // compute / logic.
-    template <bool init_rank_> void stage_slabs(Partition_Assembly& p_assembly);
+    // Stages the slab `s`'s content for upload with required host-side compute.
+    template <bool init_rank_> void stage_slab(Staging_Slab& s);
 
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
