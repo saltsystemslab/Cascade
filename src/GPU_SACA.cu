@@ -508,10 +508,10 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Set the reader- and writer-pool sizes.
     {
-        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, omp_get_max_threads()));
+        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, 24)); // TODO: tune default.
         writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
         dispatcher_c_ = STREAM_C;
-        stager_c_ = std::max<idx_t>(1, omp_get_max_threads() - reader_c_ - writer_c_ - dispatcher_c_);
+        stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<idx_t>(1, omp_get_max_threads() - reader_c_ - writer_c_ - dispatcher_c_));
         if(reader_c_ + writer_c_ + dispatcher_c_ + stager_c_ > static_cast<idx_t>(omp_get_max_threads()))
             std::cerr <<    "Warning: the staging workers (readers, writers, stagers, and dispatchers)"
                             ": (" << reader_c_ << ", " << writer_c_ << ", " << stager_c_ << ", " << dispatcher_c_ << ")"
