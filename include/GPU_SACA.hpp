@@ -90,6 +90,7 @@ private:
         idx_t writer_c_;    // |w|: writer-threads count.
         idx_t dispatcher_c_;    // |d|: dispatcher-threads count.
         idx_t stager_c_;    // |c|: stager-threads count.
+        idx_t admit_budget_;    // Maximum slab-count that may be posted for reading at the same time (i.e. committed to open assemblies).
 
         std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
 

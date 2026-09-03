@@ -12,6 +12,8 @@
 #include "Pipeline_Probe.hpp"
 #include "profile.hpp"
 
+#include "concurrentqueue/lightweightsemaphore.h"
+
 #include "omp.h"
 #include "cub/cub.cuh"
 #include "thrust/iterator/zip_iterator.h"
@@ -508,13 +510,14 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Set the reader- and writer-pool sizes.
     {
+        constexpr idx_t read_poster_c = 1;
         reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, 24)); // TODO: tune default.
         writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
         dispatcher_c_ = STREAM_C;
-        stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<idx_t>(1, omp_get_max_threads() - reader_c_ - writer_c_ - dispatcher_c_));
-        if(reader_c_ + writer_c_ + dispatcher_c_ + stager_c_ > static_cast<idx_t>(omp_get_max_threads()))
-            std::cerr <<    "Warning: the staging workers (readers, writers, stagers, and dispatchers)"
-                            ": (" << reader_c_ << ", " << writer_c_ << ", " << stager_c_ << ", " << dispatcher_c_ << ")"
+        stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<idx_t>(1, omp_get_max_threads() - (read_poster_c +reader_c_ + writer_c_ + dispatcher_c_)));
+        if(read_poster_c + reader_c_ + writer_c_ + dispatcher_c_ + stager_c_ > static_cast<idx_t>(omp_get_max_threads()))
+            std::cerr <<    "Warning: the staging workers (read-posters, readers, writers, stagers, and dispatchers)"
+                            ": (" << read_poster_c << ", " << reader_c_ << ", " << writer_c_ << ", " << stager_c_ << ", " << dispatcher_c_ << ")"
                             " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
     }
 
@@ -528,7 +531,14 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         // timeline in `C`, at a stager, and at device), `W`, and a writer.
         slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
 
-        INSTRUMENT(probe::P().init(reader_c_, stager_c_, dispatcher_c_, writer_c_, slab_c_, STREAM_C * max_chunk_per_part));
+        admit_budget_ = slab_c_;
+        if(admit_budget_ < max_chunk_per_part)
+        {
+            std::cerr << "Slab-pool cannot admit the largest partition's assembly. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        INSTRUMENT(probe::P().init(reader_c_, stager_c_, dispatcher_c_, writer_c_, slab_c_, admit_budget_));
     }
 
     // Log the staging configurations.
@@ -1038,8 +1048,12 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
     p_id_t active_part_c = 0;   // Count of active partitions in the current iteration.
 
-    // Post read-tasks in partition order.
+    std::thread read_poster;
+    moodycamel::LightweightSemaphore admit(admit_budget_);
+    // Post read-tasks under admission control: a partition's read-tasks are posted only if
+    // `admit_budget_` has room for its whole assembly.
     {
+        // Prepare read-tasks in partition order.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
             if(Active_sz[p_id] == 0)    // Skip partitions with empty active-sets.
@@ -1057,15 +1071,31 @@ void GPU_SACA<T_sym_>::drive_pipeline()
             // Prepare skeleton chain of chunks of this partition.
             part_assembly[p_id].slab.assign(chunk_c, nullptr);
             part_assembly[p_id].slabs_to_stage.store(chunk_c, std::memory_order_relaxed);
-
-            for(idx_t c = 0; c < chunk_c; ++c) // Post a read-task for each chunk of this partition.
-            {
-                const auto chunk_off = c * chunk_cap_;
-                const auto content_chunk_sz = (chunk_off < active_set_sz ? std::min(chunk_cap_, active_set_sz - chunk_off) : 0);
-                const auto msg_chunk_sz = (chunk_off < inbox_sz ? std::min<p_sz_t>(chunk_cap_, inbox_sz - chunk_off) : 0);
-                RT.enqueue(Read_Task{p_id, c, chunk_off, content_chunk_sz, static_cast<p_sz_t>(chunk_off), msg_chunk_sz});
-            }
         }
+
+        read_poster = std::thread(
+            [&]
+            {
+                for(p_id_t p_id = 0; p_id < p_; ++p_id)
+                {
+                    if(Active_sz[p_id] == 0)    // Skip partitions with empty active-sets.
+                        continue;
+
+                    const idx_t chunk_c = part_assembly[p_id].slab.size();  // Number of slabs required to hold this partition's content and inbox.
+                    admit.waitMany(chunk_c);    // Reserve the assembly's slabs.
+
+                    const auto active_set_sz = Active_sz[p_id];
+                    const auto inbox_sz = backend_->inbox_size(p_id);
+                    for(idx_t c = 0; c < chunk_c; ++c) // Post a read-task for each chunk of this partition.
+                    {
+                        const auto chunk_off = c * chunk_cap_;
+                        const auto content_chunk_sz = (chunk_off < active_set_sz ? std::min(chunk_cap_, active_set_sz - chunk_off) : 0);
+                        const auto msg_chunk_sz = (chunk_off < inbox_sz ? std::min<p_sz_t>(chunk_cap_, inbox_sz - chunk_off) : 0);
+                        RT.enqueue(Read_Task{p_id, c, chunk_off, content_chunk_sz, static_cast<p_sz_t>(chunk_off), msg_chunk_sz});
+                    }
+                }
+            }
+        );
     }
 
 
@@ -1141,7 +1171,10 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         const auto prev = p_assembly.slabs_to_stage.fetch_sub(1, std::memory_order_acq_rel);
                         INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
                         if(prev == 1)   // Last slab staged for this partition; chunked-assembly is ready for the device.
+                        {
                             R.enqueue(&p_assembly);
+                            admit.signal(p_assembly.slab.size());   // These slabs are guaranteed to return to the free-pool `F`, so early signalling is safe.
+                        }
                     }
                 }
             );
@@ -1238,9 +1271,10 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
     // Wait for the pipeline to finish.
     {
-        for(auto& d : dispatchers)  d.join();   // Dispatchers feed the write-queue, so they must drain before the writers.
+        read_poster.join();
         for(auto& r : readers)  r.join();
         for(auto& c : stagers)  c.join();
+        for(auto& d : dispatchers)  d.join();   // Dispatchers feed the write-queue, so they must drain before the writers.
         for(auto& w : writers)  w.join();
 
         INSTRUMENT(probe::P().stop_sampler());

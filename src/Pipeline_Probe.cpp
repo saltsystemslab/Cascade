@@ -12,7 +12,7 @@ void Pipeline_Probe::init(  const std::size_t reader_c, const std::size_t stager
                             const std::size_t slab_c, const std::size_t asm_reserve)
 {
     role_c_ = {reader_c, stager_c, dispatcher_c, writer_c};
-    slab_c_ = slab_c, asm_reserve_ = asm_reserve;
+    slab_c_ = slab_c, admit_budget_ = asm_reserve;
 
     std::size_t off = 0;
     for(std::size_t r = 0; r < ROLE_C; ++r)
@@ -148,12 +148,12 @@ void Pipeline_Probe::report_assemblies() const
 {
     const auto parked = parked_slab_max_.load(std::memory_order_relaxed);
     const auto open = asm_partial_max_.load(std::memory_order_relaxed);
-    const auto headroom = (slab_c_ > asm_reserve_ ? slab_c_ - asm_reserve_ : 0);    // Slabs the pool has beyond the dispatcher-held assemblies.
+    const auto transit = (slab_c_ > admit_budget_ ? slab_c_ - admit_budget_ : 0);   // Slabs held back for reader- and writer-transit.
 
-    std::fprintf(stderr, "  assemblies: incomplete max %llu | slabs parked max %llu of %zu headroom (pool %zu, reserved %zu)%s\n",
-                    static_cast<unsigned long long>(open), static_cast<unsigned long long>(parked),
-                    headroom, slab_c_, asm_reserve_,
-                    parked > headroom ? "  <-- EXCEEDS HEADROOM" : "");
+    std::fprintf(stderr, "  assemblies: open max %llu | slabs parked max %llu of %zu admissible (pool %zu, transit reserve %zu)%s\n",
+                    (unsigned long long)open, (unsigned long long)parked,
+                    admit_budget_, slab_c_, transit,
+                    parked > admit_budget_ ? "  <-- ADMISSION VIOLATED" : "");
 }
 
 

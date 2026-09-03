@@ -149,7 +149,7 @@ private:
     std::atomic<int64_t> parked_slab_{0};   // Number of slabs currently parked in incomplete assemblies.
     std::atomic<uint64_t> parked_slab_max_{0};  // Maximum value of `parked_slab_`.
     std::size_t slab_c_ = 0;    // Slab-pool size.
-    std::size_t asm_reserve_ = 0;   // Slabs the pool reserves for the assemblies held by the dispatchers.
+    std::size_t admit_budget_ = 0;  // Slabs the pool reserves for assemblies.
 
     idx_t iter_ = 0;    // Generation index.
     idx_t ctx_ = 0; // Prefix-context size the current generation is resolving.
@@ -183,7 +183,7 @@ public:
     // Initializes the accumulators for the pipeline's pool-sizes (`reader_c`,
     // `stager_c`, `dispatcher_c`, and `writer_c`), and records the slab-pool
     // layout: `slab_c` slabs, of which `asm_reserve` are reserved for the
-    // assemblies the dispatchers hold.
+    // assemblies.
     void init(std::size_t reader_c, std::size_t stager_c, std::size_t dispatcher_c, std::size_t writer_c, std::size_t slab_c, std::size_t asm_reserve);
 
     // Binds the calling thread to the `i`'th worker-slot of role `r`.
