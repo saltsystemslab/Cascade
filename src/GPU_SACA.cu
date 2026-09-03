@@ -511,7 +511,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
     // Set the reader- and writer-pool sizes.
     {
         constexpr idx_t read_poster_c = 1;
-        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, 24)); // TODO: tune default.
+        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(24); // TODO: tune default.
         writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
         dispatcher_c_ = STREAM_C;
         stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<idx_t>(1, omp_get_max_threads() - (read_poster_c +reader_c_ + writer_c_ + dispatcher_c_)));
@@ -526,9 +526,9 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
 
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
-        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader, per-stager,
-        // and per-writer. A slab lives in exactly one of: `F`, a reader, an assembly slot (covering its
-        // timeline in `C`, at a stager, and at device), `W`, and a writer.
+        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer.
+        // A slab lives in exactly one of: `F`, a reader, an assembly slot (covering its timeline in `C`,
+        // at a stager, and at device), `W`, and a writer.
         slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
 
         admit_budget_ = slab_c_;

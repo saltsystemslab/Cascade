@@ -9,10 +9,10 @@ namespace gpu_saca::probe
 {
 
 void Pipeline_Probe::init(  const std::size_t reader_c, const std::size_t stager_c, const std::size_t dispatcher_c, const std::size_t writer_c,
-                            const std::size_t slab_c, const std::size_t asm_reserve)
+                            const std::size_t slab_c, const std::size_t admit_budget)
 {
     role_c_ = {reader_c, stager_c, dispatcher_c, writer_c};
-    slab_c_ = slab_c, admit_budget_ = asm_reserve;
+    slab_c_ = slab_c, admit_budget_ = admit_budget;
 
     std::size_t off = 0;
     for(std::size_t r = 0; r < ROLE_C; ++r)

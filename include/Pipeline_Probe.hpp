@@ -33,10 +33,6 @@
 //      sitting empty implies slab starvation; `C` backing up implies the
 //      stagers not keeping pace with the readers; `R` empty implies the device
 //      being starved of assemblies.
-//
-// The assembly gauge additionally tracks the slabs parked in incomplete
-// assemblies, which is the quantity the slab-pool sizing has to cover on top of
-// the `STREAM_C` assemblies held by the dispatchers.
 namespace gpu_saca::probe
 {
 
@@ -182,9 +178,9 @@ public:
 
     // Initializes the accumulators for the pipeline's pool-sizes (`reader_c`,
     // `stager_c`, `dispatcher_c`, and `writer_c`), and records the slab-pool
-    // layout: `slab_c` slabs, of which `asm_reserve` are reserved for the
+    // layout: `slab_c` slabs, of which `admit_budget` is the budget for
     // assemblies.
-    void init(std::size_t reader_c, std::size_t stager_c, std::size_t dispatcher_c, std::size_t writer_c, std::size_t slab_c, std::size_t asm_reserve);
+    void init(std::size_t reader_c, std::size_t stager_c, std::size_t dispatcher_c, std::size_t writer_c, std::size_t slab_c, std::size_t admit_budget);
 
     // Binds the calling thread to the `i`'th worker-slot of role `r`.
     void bind(Role r, std::size_t i);
