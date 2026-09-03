@@ -164,7 +164,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
     const auto t_4 = now();
-    std::cerr << "Initial ranking completed. Time taken: " << duration(t_4 - t_2) << "s.\n";
+    std::cerr << "Initial ranking completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
 
     {   PROFILE_SCOPE("drop_prefixes");             backend_->drop_prefixes();   }
 
