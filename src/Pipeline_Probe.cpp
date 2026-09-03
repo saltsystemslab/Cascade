@@ -165,7 +165,7 @@ void Pipeline_Probe::report_log() const
     std::fprintf(stderr, "  drive_pipeline wall  %10.3f s\n\n", double(pipeline_ns_) / 1e9);
 
     std::fprintf(stderr, "  %-11s %4s  %6s %6s %6s  %7s %6s %7s  %11s %9s %7s\n",
-                    "role", "n", "io%", "gath%", "dev%", "waitIn%", "waitF%", "idle%", "items", "GB", "GB/s");
+                    "role", "n", "io%", "stage%", "dev%", "waitIn%", "waitF%", "idle%", "items", "GB", "GB/s");
     for(std::size_t r = 0; r < ROLE_C; ++r)
         report_role(static_cast<Role>(r));
 

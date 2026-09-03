@@ -1016,7 +1016,7 @@ template <typename T_sym_>
 template <bool init_rank_>
 void GPU_SACA<T_sym_>::drive_pipeline()
 {
-#ifdef INSTRUMENT
+#ifdef PROBE
     uint64_t pipeline_ns = 0;
 #endif
 {
