@@ -1082,7 +1082,8 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         continue;
 
                     const idx_t chunk_c = part_assembly[p_id].slab.size();  // Number of slabs required to hold this partition's content and inbox.
-                    admit.waitMany(chunk_c);    // Reserve the assembly's slabs.
+                    for(idx_t chunk_res = 0; chunk_res < chunk_c;)  // Reserve the assembly's slabs, piecemeal.
+                        chunk_res += static_cast<idx_t>(admit.waitMany(chunk_c - chunk_res));
 
                     const auto active_set_sz = Active_sz[p_id];
                     const auto inbox_sz = backend_->inbox_size(p_id);
