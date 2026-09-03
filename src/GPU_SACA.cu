@@ -159,23 +159,25 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
         PROFILE_SCOPE("setup_staging");
         setup_staging();
     }
+    const auto t_3 = now();
+    std::cerr << "Device-space allocated and staging-setup completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
-    const auto t_3 = now();
-    std::cerr << "Initial ranking completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
+    const auto t_4 = now();
+    std::cerr << "Initial ranking completed. Time taken: " << duration(t_4 - t_2) << "s.\n";
 
     {   PROFILE_SCOPE("drop_prefixes");             backend_->drop_prefixes();   }
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
-    const auto t_4 = now();
-    std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
+    const auto t_5 = now();
+    std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
 
     {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(SA);}
 
     {   PROFILE_SCOPE("drop_backend");              backend_.reset();   spill_->cleanup();   }
 
-    const auto t_5 = now();
-    std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
+    const auto t_6 = now();
+    std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_6 - t_5) << "s.\n";
 }
 
 
