@@ -524,8 +524,9 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
         // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader, per-stager,
-        // and per-writer.
-        slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + stager_c_ + writer_c_;
+        // and per-writer. A slab lives in exactly one of: `F`, a reader, an assembly slot (covering its
+        // timeline in `C`, at a stager, and at device), `W`, and a writer.
+        slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
 
         INSTRUMENT(probe::P().init(reader_c_, stager_c_, dispatcher_c_, writer_c_, slab_c_, STREAM_C * max_chunk_per_part));
     }
