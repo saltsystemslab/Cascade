@@ -5,7 +5,6 @@
 
 
 #include "types.hpp"
-#include "Packed_Prefix.hpp"
 #include "Partition_Backend.hpp"
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
@@ -38,6 +37,8 @@ private:
 
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
                                                         // TODO: what happens if we bump it down? How far can we go?
+
+    static constexpr idx_t PREFIX_KEY_GATHER_PREFETCH_D = 16;   // Software-prefetch lookahead for prefix-key gathering in initial ranking.
 
     // Bytes per suffix required in each of the two device key-buffers, per
     // partition. The initial-ranking phase sorts the suffixes by their `\ell`-

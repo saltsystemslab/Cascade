@@ -14,15 +14,13 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
     , read_parity_(read_parity(0))
 {
     const auto p = P_cap_.size();
-    suf_.reserve(p), key_.reserve(p), prefix_.reserve(p);
+    suf_.reserve(p), key_.reserve(p);
     for(std::size_t parity = 0; parity < 2; ++parity)
         msg_tgt_tag_[parity].reserve(p), msg_rank_[parity].reserve(p);
 
     for(p_id_t p_id = 0; p_id < p; ++p_id)
     {
-        // Open the required prefix- and the suffix-files; opening of required key-
-        // files is deferred at least until the corresponding prefix-files retire.
-
+        // Open the required psuffix-files; opening of required key-files is deferred.
         key_.emplace_back();
         if(plan.data(p_id))
             suf_.emplace_back();
@@ -30,14 +28,6 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
         {
             suf_.emplace_back(spill.open(p_id, Spill_Role::suf, Direct_File::Mode::read_write));
             suf_.back().preallocate(P_cap_[p_id] * sizeof(idx_t));
-        }
-
-        if(plan.prefix(p_id))
-            prefix_.emplace_back();
-        else
-        {
-            prefix_.emplace_back(spill.open(p_id, Spill_Role::prefix, Direct_File::Mode::read_write));
-            prefix_.back().preallocate(P_cap_[p_id] * sizeof(Prefix_Key));
         }
 
 
@@ -76,12 +66,6 @@ void Disk_Backend::open_deferred_inboxes()
 }
 
 
-void Disk_Backend::read_prefix(const p_id_t p_id, const idx_t off, const idx_t sz, Prefix_Key* const dst) const
-{
-    prefix_[p_id].read_at(dst, sz * sizeof(Prefix_Key), off * sizeof(Prefix_Key));
-}
-
-
 void Disk_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const dst) const
 {
     suf_[p_id].read_at(dst, sz * sizeof(idx_t), off * sizeof(idx_t));
@@ -108,22 +92,13 @@ void Disk_Backend::write(const p_id_t p_id, const idx_t off, const idx_t sz, con
 }
 
 
-void Disk_Backend::retire_prefix_and_open_key(const p_id_t p_id)
+void Disk_Backend::open_key(const p_id_t p_id)
 {
-    prefix_[p_id].unlink();
-
     if(!data_resident_[p_id])
     {
         key_[p_id] = spill_->open(p_id, Spill_Role::key, Direct_File::Mode::read_write);
         key_[p_id].preallocate(P_cap_[p_id] * sizeof(p_sz_t));
     }
-}
-
-
-void Disk_Backend::drop_prefixes()
-{
-    for(auto& pre : prefix_)
-        pre.unlink();
 }
 
 }

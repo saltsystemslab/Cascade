@@ -49,14 +49,13 @@ bool validate_local_rankings(const std::vector<Partition>& P, const Sort_Key* ke
 template <typename T_sym_>
 T_sym_ universe_split_threshold(const T_sym_* T, idx_t n);
 
-// Returns `true` iff for the text `T` (of size `n`), the initial partition
-// content defined by the spill-store `spill` (of files of the partitions with
-// sizes `P_sz`) is correct: for each suffix `s` in the `p`'th partition, checks
+// Returns `true` iff for a text of size `n`, the initial partition content
+// defined by the spill-store `spill` (of files of the partitions with sizes
+// `P_sz`) is correct: for each suffix `s` in the `p`'th partition, checks
 // (1) whether it landed in the partition expected by `P_id`, ie `P_id[s] == p`;
-// (2) that it is not duplicated anywhere; and (3) that its associated prefix
-// matches to the actual prefix extracted from `T`.
-template <typename T_sym_>
-bool validate_partition_contents(const T_sym_* T, idx_t n, const p_id_t* P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
+// (2) that it is not duplicated anywhere; and (3) its forward tag is the
+// expected one, ie `P_id[s + ell] == tag_of(s)`.
+bool validate_partition_contents(idx_t n, idx_t ell, const p_id_t* P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
 
 // Returns `true` iff the suffix `suf` packed with its previous generation's
 // forward-tag correctly matches to the ground truth available from partition-ID

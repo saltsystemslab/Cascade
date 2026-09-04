@@ -2,6 +2,7 @@
 #include "GPU_SACA.hpp"
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.hpp"
+#include "Packed_Prefix.hpp"
 #include "Packed_Prefix_Decomposer.cuh"
 #include "bit-layout.hpp"
 #include "message.hpp"
@@ -142,7 +143,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
-    // Unpin the host-side text as we do not need the text anymore.
+    // Unpin the host-side text.
     {
         PROFILE_SCOPE("host_unregister_text");
         CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
@@ -171,8 +172,6 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
     const auto t_4 = now();
     std::cerr << "Initial ranking completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
-
-    {   PROFILE_SCOPE("drop_prefixes");             backend_->drop_prefixes();   }
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_5 = now();
@@ -590,12 +589,12 @@ void GPU_SACA<T_sym_>::partition()
         compute_partition_IDs();
     }
 
-    // Move the suffixes (with some associated prefixes) to their corresponding partitions.
+    // Move the suffixes to their corresponding partitions.
     {
         PROFILE_SCOPE("scatter_to_partition");
         std::vector<util::Padded<Suffix_Buffer>> P_buf;
 
-        // Initialize the partitions' spill-stores and their prefix-key buffers.
+        // Initialize the partitions' spill-stores and their scatter buffers.
         {
             PROFILE_SCOPE("allocate_partition_buffers");
 
@@ -620,18 +619,18 @@ void GPU_SACA<T_sym_>::partition()
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->resident_prefix(p_id), backend_->spilled_suf(p_id), backend_->spilled_prefix(p_id)});
+                P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->spilled_suf(p_id)});
         }
 
 
-        // Add suffix indices along with their `ELL_WORDS x 8`-byte prefixes to their corresponding partitions (through the buffers).
+        // Add suffix indices to their corresponding partitions (through the buffers).
         {
             PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
             {
                 const p_id_t phi = (i + ell < n_ ? P_id[i + ell] : 0);  // Forward tag for generation 0.
-                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi), Prefix_Key::pack_prefix(T_h_ + i));   // Suffix packed with its forward tag, seeded at generation 0.
+                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi));  // Suffix packed with its forward tag, seeded at generation 0.
             }
 
             #pragma omp parallel for schedule(static)
@@ -646,7 +645,7 @@ void GPU_SACA<T_sym_>::partition()
                 part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_cap[p_id]);
 
             std::cerr << "Partition-sizes match verification: " << (part_sz_match ? "Passes" : "Fails") << "\n";
-            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(T_h_, n_, P_id, P_cap, *backend_) ? "Passes" : "Fails") << "\n";
+            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(n_, ell, P_id, P_cap, *backend_) ? "Passes" : "Fails") << "\n";
         }
 #endif
     }
@@ -1212,7 +1211,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         INSTRUMENT(probe::P().me().items++);
 
                         s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
-                        if constexpr(init_rank_)    backend_->read_prefixes(*s);
+                        if constexpr(init_rank_)    backend_->read_suffixes(*s);
                         else                        backend_->read_keys(*s);
 
                         if(s->inbox_sz() > 0)
@@ -1338,7 +1337,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         }
 #endif
                         if constexpr(init_rank_)    // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
-                            backend_->retire_prefix_and_open_key(p_id);
+                            backend_->open_key(p_id);
 
                         {
                             INSTRUMENT_TIMER(probe::P().me().device_ns);

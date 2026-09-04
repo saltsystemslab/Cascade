@@ -5,7 +5,6 @@
 
 
 #include "types.hpp"
-#include "Packed_Prefix.hpp"
 #include "Residency_Plan.hpp"
 
 #include <vector>
@@ -22,7 +21,6 @@ private:
 
     std::vector<idx_t*> suf_;   // Suffixes of the partitions.
     std::vector<p_sz_t*> key_;  // Keys of the partitions.
-    std::vector<Prefix_Key*> prefix_;   // Prefix-keys of the partitions.
 
 public:
 
@@ -41,13 +39,6 @@ public:
     // Returns the `p_id`'th partition's resident keys.
     auto* key(const p_id_t p_id) { return key_[p_id]; }
 
-    // Returns the `p_id`'th partition's resident prefix-keys.
-    auto* prefix(const p_id_t p_id) { return prefix_[p_id]; }
-
-    // Reads `sz`-many initial prefixes of the `p_id`'th partition, from its
-    // offset `off`, into `dst`.
-    void read_prefix(p_id_t p_id, idx_t off, idx_t sz, Prefix_Key* dst) const;
-
     // Reads `sz`-many suffixes of the `p_id`'th partition, from its offset
     // `off`, into `dst`.
     void read_suf(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
@@ -59,9 +50,6 @@ public:
     // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
     // offset `off`, from `suf` and `key`.
     void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
-
-    // Drops the prefix-keys from the backend.
-    void drop_prefixes();
 };
 
 }
