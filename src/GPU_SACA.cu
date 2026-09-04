@@ -1408,9 +1408,19 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
 #endif
 
     auto* const beta = s.beta();
+    auto* const key = s.key();
     for(idx_t i = 0; i < sz; ++i)
     {
         const auto j = bit_layout::suffix_of(suf[i]);
+
+        if constexpr(init_rank_)
+        {
+            if(i + PREFIX_KEY_GATHER_PREFETCH_D < sz)
+                __builtin_prefetch(T_h_ + bit_layout::suffix_of(suf[i + PREFIX_KEY_GATHER_PREFETCH_D]), 0, 0);
+
+            key[i] = Prefix_Key::pack_prefix(T_h_ + j);
+        }
+
         beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
                                         init_rank_ || j < stride ? 0 : P_id[j - stride]);
     }
