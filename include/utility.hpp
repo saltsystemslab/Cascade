@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <limits>
+#include <utility>
 #include <random>
 #include <vector>
 #include <filesystem>
@@ -182,6 +183,10 @@ void deallocate(T_* const ptr)
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
 
+// Returns from `/proc/self/smaps` (pseudo-file with memory consumption metrics
+// for each memory mapping), for the memory mapping containing the address `p`,
+// `(RSS-bytes, THP-bytes)`. Both are `0` if not found.
+std::pair<std::size_t, std::size_t> thp_coverage(const void* p);
 
 // Generates a random text of symbols of type `T_sym_` and of length `n` at `T`.
 // `T` must have enough space allocated beforehand.

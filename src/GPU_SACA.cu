@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <limits>
 #include <atomic>
+#include <utility>
 #include <vector>
 #include <cstring>
 #include <sstream>
@@ -146,6 +147,9 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
         PROFILE_SCOPE("host_unregister_text");
         CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
     }
+
+    if(env::get_u64("GPU_SACA_GATHER_PROBE").value_or(0) != 0)
+    {   PROFILE_SCOPE("probe_prefix_key_gather");   probe_prefix_key_gather(); return;   }
 
     {
         PROFILE_SCOPE("allocate_device_space");
@@ -646,6 +650,88 @@ void GPU_SACA<T_sym_>::partition()
         }
 #endif
     }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::probe_prefix_key_gather()
+{
+    p_id_t q = p_;  // ID of the largest host-resident partition.
+    idx_t q_sz = 0; // Size of the largest host-resident partition.
+    for(p_id_t i = 0; i < p_; ++i)
+        if(backend_->resident_suf(i) != nullptr && q_sz < P_cap[i])
+            q = i, q_sz = P_cap[i];
+
+    if(q == p_)
+    {
+        std::cerr << "Prefix-gather probe: no resident partition.\n";
+        return;
+    }
+
+    idx_t sample = std::min<idx_t>(q_sz, env::get_u64("GPU_SACA_PREFIX_GATHER_PROBE_N").value_or(idx_t(64) << 20));
+    auto* const flush_ord = util::checked_allocate<idx_t>(sample);  // Partition-layout produced by the scatter in partitioning.
+    auto* const text_ord = util::checked_allocate<idx_t>(sample);   // Partition-layout a counting-scatter would produce.
+
+    // Produce the layout orderings.
+    {
+        const auto* const suf = backend_->resident_suf(q);
+        #pragma omp parallel for schedule(static)
+        for(idx_t i = 0; i < sample; ++i)
+            flush_ord[i] = bit_layout::suffix_of(suf[i]);
+
+        idx_t c = 0;
+        for(idx_t i = 0; i < n_ && c < sample; ++i)
+            if(P_id[i] == q)
+                text_ord[c++] = i;
+
+        sample = c;
+    }
+
+
+    // Times `sample`-many prefix gathers from suffixes in `suf`, prefetching
+    // `D` iterations ahead. Returns (timing, sink-value).
+    const auto run = [&](const idx_t* const suf, const idx_t D)
+    {
+        const auto t_0 = timer::now();
+
+        uint64_t sink = 0;  // Redundant sink to accumulate data so that the next loop isn't optimized away.
+        #pragma omp parallel for schedule(static) num_threads(stager_c_) reduction(^ : sink)
+        for(idx_t i = 0; i < sample; ++i)
+        {
+            if(D > 0 && i + D < sample)
+                __builtin_prefetch(T_h_ + suf[i + D], 0, 0);
+
+            const auto pre_key = Prefix_Key::pack_prefix(T_h_ + suf[i]);
+            for(idx_t w = 0; w < ELL_WORDS; ++w)
+                sink ^= pre_key.word[w];
+        }
+
+        return std::pair<double, uint64_t>{timer::duration(timer::now() - t_0), sink};
+    };
+
+    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+    const auto [rss, thp] = util::thp_coverage(T_h_);
+
+    std::cerr   << "Prefix-gather probe (p_id " << q << ", " << sample << " of " << q_sz << " suffixes,"
+                " ell = " << ell << " symbols, p = " << p_ << ", " << stager_c_ << " threads):\n"
+                << "\tT: " << GB(n_ * sizeof(T_sym_)) << "GBs mapped, " << GB(rss) << "GBs resident, "
+                << GB(thp) << "GBs in huge pages (" << (rss ? 100.0 * thp / rss : 0.0) << "%)\n"
+                << "\tD\torder\tns/gather\tM gathers/s\tprojected over n\n";
+
+    run(flush_ord, 32), run(text_ord, 32);  // Warmup runs.
+    for(const idx_t D : {idx_t(0), idx_t(8), idx_t(16), idx_t(32), idx_t(64), idx_t(128)})
+        for(const auto& [name, idx] : {std::pair<const char*, const idx_t*>{"flush", flush_ord},
+                                       std::pair<const char*, const idx_t*>{"text ", text_ord}})
+        {
+            const auto [s, sink] = run(idx, D);
+            std::cerr << "\t" << D << "\t" << name
+                      << "\t" << (s * 1e9 / sample)
+                      << "\t\t" << (sample / s / 1e6)
+                      << "\t\t" << (s * static_cast<double>(n_) / sample) << "s"
+                      << "\t(sink " << sink << ")\n";
+        }
+
+    util::deallocate(flush_ord), util::deallocate(text_ord);
 }
 
 
