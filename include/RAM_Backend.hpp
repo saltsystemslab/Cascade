@@ -60,6 +60,9 @@ public:
     // offset `off`, from `suf` and `key`.
     void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
 
+    // Releases the `p_id`'th partition's suffixes and keys.
+    void retire_data(p_id_t p_id);
+
     // Drops the prefix-keys from the backend.
     void drop_prefixes();
 };

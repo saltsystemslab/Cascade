@@ -95,6 +95,9 @@ public:
     // offset `off`, from `suf` and `key`.
     void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
 
+    // Retires the `p_id`'th partition's suffix- and key-files.
+    void retire_data(p_id_t p_id);
+
     // Drops the prefix-key files from the backend.
     void drop_prefixes();
 };

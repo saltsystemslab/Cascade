@@ -92,6 +92,9 @@ public:
     // Retires the `p_id`'th partition's prefix-file and opens its key-file.
     void retire_prefix_and_open_key(p_id_t p_id);
 
+    // Retires the `p_id`'th partition's suffixes and keys.
+    void retire_partition(p_id_t p_id);
+
     // Returns the (exclusive) ending-offsets of the destination-partitions into
     // the messages produced by the `p_id`'th partition.
     auto msg_off(const p_id_t p_id) const { return msg_off_ + p_id * p_; }

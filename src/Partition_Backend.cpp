@@ -65,6 +65,13 @@ void Partition_Backend::retire_prefix_and_open_key(const p_id_t p_id)
 }
 
 
+void Partition_Backend::retire_partition(const p_id_t p_id)
+{
+    plan_.data(p_id) ?  ram_.retire_data(p_id) :
+                        disk_.retire_data(p_id);
+}
+
+
 void Partition_Backend::read_prefixes(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);

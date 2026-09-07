@@ -37,6 +37,13 @@ RAM_Backend::~RAM_Backend()
 }
 
 
+void RAM_Backend::retire_data(const p_id_t p_id)
+{
+    util::deallocate(suf_[p_id]), suf_[p_id] = nullptr;
+    util::deallocate(key_[p_id]), key_[p_id] = nullptr;
+}
+
+
 void RAM_Backend::drop_prefixes()
 {
     for(auto*& p : prefix_)

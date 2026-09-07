@@ -120,6 +120,12 @@ void Disk_Backend::retire_prefix_and_open_key(const p_id_t p_id)
 }
 
 
+void Disk_Backend::retire_data(const p_id_t p_id)
+{
+    suf_[p_id].unlink(), key_[p_id].unlink();
+}
+
+
 void Disk_Backend::drop_prefixes()
 {
     for(auto& pre : prefix_)
