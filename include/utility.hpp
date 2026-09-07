@@ -277,5 +277,19 @@ struct Collection_Stats
 }
 
 
+namespace gpu_saca::util::file
+{
+
+// Exits the executions due to reason `op` on the file at path `path`.
+void exit_on_io_failure(const char* op, const std::string& path);
+
+// Writes `bytes`-many bytes from `buf` to the file-offset `off` of the file
+// `fd`, opened at path `path`. Additionally queues the bytes for writeback, so
+// that dirty pages do not pile up from a long output-stream.
+void write_and_flush(int fd, const std::string& path, const void* buf, std::size_t bytes, std::size_t off);
+
+}
+
+
 
 #endif

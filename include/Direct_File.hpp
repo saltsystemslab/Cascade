@@ -38,9 +38,6 @@ private:
     // Returns `true` iff the size `sz` is disk-block aligned.
     static bool is_block_aligned(std::size_t sz);
 
-    // Exits the executions due to reason `op`.
-    void exit(const char* const op) const;
-
 public:
 
     // Constructs a null file-handle.
