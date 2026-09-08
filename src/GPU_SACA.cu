@@ -52,7 +52,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
     , p_(0)
     , P_id(nullptr)
     , ctx_(0)
-    , null_d(nullptr)
     , workspace_sz(0)
 {
     if(n_ == 0)
@@ -65,10 +64,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamCreate(stream + s));
-
-    CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
-    std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
-    CUDA_CHECK(cudaMemcpy(null_d, null_h.data(), (K - 1) * sizeof(T_sym_), cudaMemcpyHostToDevice));
 
     for(std::size_t b = 0; b < STREAM_C; ++b)
     {
@@ -91,8 +86,6 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
-    CUDA_CHECK(cudaFree(null_d));
-
     CUDA_CHECK(deallocate_host(T_h_));
     util::deallocate(P_id);
 
@@ -127,8 +120,6 @@ void GPU_SACA<T_sym_>::build_SA()
 
     std::cerr << "Sequence length: " << n_ << "\n";
 
-    // TODO: add timer from here, and report load time.
-    // Pin the host-side text so that PCIe transfers of text can be overlapped kernel execution.
     {   PROFILE_SCOPE("load_text");                 load_text();    }
 
     const auto t_0 = now();
@@ -193,11 +184,21 @@ void GPU_SACA<T_sym_>::load_text()
 {
     constexpr auto null_count = tail_padding<T_sym_>;   // Null symbols the prefix-packing requires past the text's tail.
     const auto sym_count = n_;  // Symbols stored in the file.
+    const auto bytes = (sym_count + null_count) * sizeof(T_sym_);   // Size of the text's buffer.
 
+    const auto t_0 = timer::now();
     CUDA_CHECK(pinned_allocate_host(T_h_, sym_count + null_count));
+    const auto t_1 = timer::now();
+
     util::read_file(ip_path_, T_h_, sym_count);
     for(idx_t i = 0; i < null_count; ++i)
         T_h_[sym_count + i] = std::numeric_limits<T_sym_>::min();
+    const auto t_2 = timer::now();
+
+    std::cerr   << "Text-buffer pinned-allocation completed. Time taken: " << timer::duration(t_1 - t_0) << "s"
+                << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_1 - t_0)) << " GBs/s).\n";
+    std::cerr   << "Text-read completed. Time taken: " << timer::duration(t_2 - t_1) << "s"
+                << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_2 - t_1)) << " GBs/s).\n";
 }
 
 
@@ -697,7 +698,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory for the chunk buffers.
         const std::size_t per_idx_mem = STREAM_C * (sizeof(T_sym_) + sizeof(p_id_t));   // Space required per-index across the three sets of buffers.
-        CHUNK_SZ = budget / per_idx_mem;
+        CHUNK_SZ = std::min<idx_t>(PID_CHUNK_CAP, budget / per_idx_mem);
         CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
         if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
         {
@@ -705,8 +706,9 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
             std::exit(EXIT_FAILURE);
         }
 
-        const std::size_t text_buf_bytes = (CHUNK_SZ + K - 1) * sizeof(T_sym_);
-        const std::size_t p_id_buf_bytes = CHUNK_SZ * sizeof(p_id_t);
+        const auto buf_sz = std::min(CHUNK_SZ, n_);
+        const std::size_t text_buf_bytes = (buf_sz + K - 1) * sizeof(T_sym_);
+        const std::size_t p_id_buf_bytes = buf_sz * sizeof(p_id_t);
         for(std::size_t b = 0; b < STREAM_C; ++b)
         {
             CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
@@ -723,15 +725,10 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
             const auto buf_id = c % STREAM_C;   // Which set of buffers (and stream) to use for this chunk.
             const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
             const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
-            const auto chunk_symbol_req = chunk_suf_count + K - 1;  // Number of symbols this chunk is required to have.
-            const auto chunk_symbol_count = std::min(chunk_symbol_req, n_ - chunk_off);    // Number of symbols to transfer from host to device for this chunk.
+            const auto chunk_sym_count = chunk_suf_count + K - 1;   // Number of symbols this chunk requires. The text's tail-padding covers the overhang at the last chunk.
 
             //  Asynchronously transfer this chunk to the device while the other stream's kernel is being executed (from the last iteration).
-            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, chunk_symbol_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
-
-            // Pad the tail of the chunk with null / terminator symbols if required.
-            if(chunk_symbol_count < chunk_symbol_req)   // Can happen at the last and at the previous-to-last chunks.
-                CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id] + chunk_symbol_count, null_d, (chunk_symbol_req - chunk_symbol_count) * sizeof(T_sym_), cudaMemcpyDeviceToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, chunk_sym_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
 
             const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
             compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>

@@ -88,6 +88,9 @@ private:
         inline static const idx_t PREFETCH_DEPTH = env::get_u64("GPU_SACA_PREFETCH_DEPTH").value_or(0); // Complete partitions to stage ahead for the device-dispatcher.
         inline static const idx_t WRITEBACK_DEPTH = env::get_u64("GPU_SACA_WRITEBACK_DEPTH").value_or(0);   // Complete partitions to stage ahead to return to the backend.
 
+        // Suffixes per chunk in the partition-ID computation.
+        inline static const idx_t PID_CHUNK_CAP = env::get_u64("GPU_SACA_PID_CHUNK_CAP").value_or(idx_t(1) << 26);
+
         idx_t chunk_cap_;   // Chunk granularity (keys / suffixes per slab).
         idx_t slab_c_;  // |S|: slab pool size.
         idx_t reader_c_;    // |r|: reader-threads count.
@@ -127,8 +130,6 @@ private:
 
     // Device-side data and related.
     // {
-        T_sym_* null_d; // Buffer of `K - 1` null / terminator symbols, used to pad the tail of text chunks when required.
-
         Prefix_Key* key_buf[STREAM_C][2];   // Input and output buffers for keys of suffixes, per stream; typed to the initial-ranking sort key.
         idx_t* suf_buf[STREAM_C][2];        // Input and output buffers for suffixes, per stream.
         p_sz_t* perm_buf[STREAM_C][2];      // Input and output buffers for sort's permutation-indices, per stream; required for sorting with physically disjoint keys.
