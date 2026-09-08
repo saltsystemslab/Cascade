@@ -47,14 +47,17 @@ private:
     // So the buffers are sized to whichever of the two demands is larger.
     static constexpr std::size_t DEV_KEY_BYTES = (sizeof(Prefix_Key) > 2 * sizeof(idx_t) ? sizeof(Prefix_Key) : 2 * sizeof(idx_t));
 
+    const std::size_t host_budget;  // Host-memory budget available for the algorithm.
+
     // Assumed worst-case ratio of actual max partition-size to the target
     // estimated during pivots-selection.
     static constexpr double PART_SZ_IMBALANCE_SLACK = 1.20;
 
-    const std::size_t host_budget;  // Host-memory budget available for the algorithm.
-
     const idx_t n_; // Size of the text.
-    const T_sym_* const T_h_;   // Text at the host-side.
+    T_sym_* T_h_;   // Text.
+    const std::string ip_path_; // Filesystem path the input text.
+    const std::string op_path_; // Filesystem path to output the suffix array to.
+
 
     p_id_t p_;  // Number of partitions for the SA.
 
@@ -141,6 +144,10 @@ private:
                                             // temporary, for verification purposes.
     // }
 
+
+    // Loads the text into memory, padding it at the tail with enough null
+    // symbols required for correct prefix-packing.
+    void load_text();
 
     // Returns the fixed RAM-budget (in bytes) required in the algorithm.
     // Currently: the text (`T`), the partition-IDs (`Π`), the scatter-buffers
@@ -235,13 +242,14 @@ private:
 
 public:
 
-    // Constructs a GPU-SACA object for the input text `T` of size `n`.
-    GPU_SACA(const T_sym_* T, idx_t n);
+    // Constructs a GPU-SACA object for the input text at path `ip_path`, to
+    // output the suffix array to the file at path `op_path`.
+    GPU_SACA(const std::string& ip_path, const std::string& op_path);
 
     ~GPU_SACA();
 
-    // Builds the suffix array into `SA`.
-    void build_SA(idx_t*& SA);
+    // Builds the suffix array into the file at the output path.
+    void build_SA();
 };
 
 }

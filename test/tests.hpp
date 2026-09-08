@@ -11,6 +11,7 @@
 #include "bit-layout.hpp"
 #include "cross-compile.hpp"
 
+#include <string>
 #include <vector>
 
 
@@ -75,6 +76,11 @@ bool is_permutation(const idx_t* SA, idx_t n);
 // Returns `true` iff `SA` is the suffix array of the text `T` of size `n`.
 template <typename T_sym_>
 bool is_correct_SA(const idx_t* SA, const T_sym_* T, idx_t n);
+
+// Returns `true` iff the suffix array stored at path `SA_path` is the suffix
+// array of the text of symbols of type `T_sym_` stored at path `text_path`.
+template <typename T_sym_>
+bool is_correct_SA(const std::string& text_path, const std::string& SA_path);
 
 // Returns `true` iff the messages present in the staging slab `s` are
 // consistent according to the driver class `self`. `msg_off` contains the

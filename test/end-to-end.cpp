@@ -78,6 +78,33 @@ bool is_correct_SA(const idx_t* const SA, const T_sym_* const T, const idx_t n)
 }
 
 
+template <typename T_sym_>
+bool is_correct_SA(const std::string& text_path, const std::string& SA_path)
+{
+    const auto sym_count = util::file_size<T_sym_>(text_path);
+    const auto n = sym_count;
+
+    const auto SA_sz = util::file_size<idx_t>(SA_path);
+    if(SA_sz != n)
+    {
+        std::cerr   << "The suffix array at " << SA_path << " has " << SA_sz << " entries whereas the text at "
+                    << text_path << " has " << n << " suffixes.\n";
+        return false;
+    }
+
+    auto* const T = util::checked_allocate<T_sym_>(n);
+    util::read_file(text_path, T, sym_count);
+
+    auto* const SA = util::checked_allocate<idx_t>(n);
+    util::read_file(SA_path, SA, n);
+
+    const auto correct = is_correct_SA(SA, T, n);
+
+    util::deallocate(SA), util::deallocate(T);
+    return correct;
+}
+
+
 
 // Template instantiations for the required instances.
 template bool is_correct_SA(const idx_t*, const char*, idx_t);
@@ -85,5 +112,11 @@ template bool is_correct_SA(const idx_t*, const uint8_t*, idx_t);
 template bool is_correct_SA(const idx_t*, const uint16_t*, idx_t);
 template bool is_correct_SA(const idx_t*, const uint32_t*, idx_t);
 template bool is_correct_SA(const idx_t*, const uint64_t*, idx_t);
+
+template bool is_correct_SA<char>(const std::string&, const std::string&);
+template bool is_correct_SA<uint8_t>(const std::string&, const std::string&);
+template bool is_correct_SA<uint16_t>(const std::string&, const std::string&);
+template bool is_correct_SA<uint32_t>(const std::string&, const std::string&);
+template bool is_correct_SA<uint64_t>(const std::string&, const std::string&);
 
 }

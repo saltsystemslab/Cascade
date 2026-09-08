@@ -12,6 +12,7 @@
 #include <random>
 #include <vector>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <typeinfo>
 #include <cstdio>
@@ -209,6 +210,21 @@ std::size_t file_size(const std::string& file_path)
     }
 
     return file_bytes / sizeof(T_);
+}
+
+
+// Reads `count` elements of type `T_` from the file at path `file_path` into
+// `dst`, which must have enough space allocated beforehand.
+template <typename T_>
+void read_file(const std::string& file_path, T_* const dst, const std::size_t count)
+{
+    std::ifstream is(file_path, std::ios::binary);
+    is.read(reinterpret_cast<char*>(dst), count * sizeof(T_));
+    if(!is)
+    {
+        std::cerr << "Could not read " << (count * sizeof(T_)) << " bytes from the file at path " << file_path << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 

@@ -43,11 +43,12 @@ namespace gpu_saca
 {
 
 template <typename T_sym_>
-GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
-      host_budget(env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>((1 - MEM_SAFETY_MARGIN) *
-                                                                                    (util::available_memory() + n * sizeof(T_sym_)))))
-    , n_(n)
-    , T_h_(T)
+GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_path):
+      host_budget(env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>((1 - MEM_SAFETY_MARGIN) * util::available_memory())))
+    , n_(util::file_size<T_sym_>(ip_path))
+    , T_h_(nullptr)
+    , ip_path_(ip_path)
+    , op_path_(op_path)
     , p_(0)
     , P_id(nullptr)
     , ctx_(0)
@@ -86,6 +87,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 {
     CUDA_CHECK(cudaFree(null_d));
 
+    util::deallocate(T_h_);
     util::deallocate(P_id);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
@@ -112,16 +114,16 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
+void GPU_SACA<T_sym_>::build_SA()
 {
     using namespace gpu_saca::timer;
     PROFILE_SCOPE("build_SA");
 
+    std::cerr << "Sequence length: " << n_ << "\n";
+
+    // TODO: add timer from here, and report load time.
     // Pin the host-side text so that PCIe transfers of text can be overlapped kernel execution.
-    {
-        PROFILE_SCOPE("host_register_text");
-        CUDA_CHECK(cudaHostRegister(const_cast<T_sym_*>(T_h_), n_ * sizeof(T_sym_), cudaHostRegisterDefault));
-    }
+    {   PROFILE_SCOPE("load_text");                 load_text();    }
 
     const auto t_0 = now();
 
@@ -129,9 +131,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
-    {
-        PROFILE_SCOPE("partition");
-        partition();
+    {   PROFILE_SCOPE("partition");                 partition();
         if(!partition_sizes_fit())
         {
             std::cerr << "Unsuitable partition-sizes for " << p_ << " partitions. Increase `K` and / or `GPU_SACA_P_TARGET`. Aborting.\n";
@@ -141,11 +141,7 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
-    // Unpin the host-side text as we do not need the text anymore.
-    {
-        PROFILE_SCOPE("host_unregister_text");
-        CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
-    }
+    {   PROFILE_SCOPE("drop_text");                 deallocate_host(T_h_), T_h_ = nullptr; }
 
     {
         PROFILE_SCOPE("allocate_device_space");
@@ -174,12 +170,28 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_5 = now();
     std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
 
-    {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(SA);}
+    {   PROFILE_SCOPE("drop_partition_IDs");        util::deallocate(P_id), P_id = nullptr;  }
+
+    {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(op_path_);}
 
     {   PROFILE_SCOPE("drop_backend");              backend_.reset();   spill_->cleanup();   }
 
     const auto t_6 = now();
     std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_6 - t_5) << "s.\n";
+}
+
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::load_text()
+{
+    constexpr auto null_count = tail_padding<T_sym_>;   // Null symbols the prefix-packing requires past the text's tail.
+    const auto sym_count = n_;  // Symbols stored in the file.
+
+    pinned_allocate_host<T_sym_>(T_h_, sym_count + null_count);
+    util::read_file(ip_path_, T_h_, sym_count);
+    for(idx_t i = 0; i < null_count; ++i)
+        T_h_[sym_count + i] = std::numeric_limits<T_sym_>::min();
 }
 
 
