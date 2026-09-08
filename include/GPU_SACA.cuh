@@ -10,8 +10,6 @@
 #include "message.hpp"
 #include "tests.hpp"
 
-#include "cub/cub.cuh"
-
 
 namespace gpu_saca
 {
@@ -98,6 +96,28 @@ void shuffle_kernel(T_* const __restrict__ dest, const T_* const __restrict__ sr
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i < n)
         dest[i] = src[I[i]];
+}
+
+
+// Scatters the suffixes in `suf` per their ranks in `rank` into `SA`, all of
+// size `n`.
+// Grid organization: one thread per suffix.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void scatter_suffixes_to_rank_kernel(   const idx_t* const __restrict__ suf, const p_sz_t* const __restrict__ rank,
+                                        idx_t* const __restrict__ SA, const idx_t n)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i >= n)
+        return;
+
+#ifdef TESTS
+    if(rank[i] >= n)
+        __trap();
+#endif
+
+    SA[rank[i]] = bit_layout::suffix_of(suf[i]);
 }
 
 

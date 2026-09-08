@@ -15,11 +15,12 @@
 
 #include "concurrentqueue/blockingconcurrentqueue.h"
 
-#include "cuda_runtime_api.h"
+#include <cuda_runtime.h>
 
 #include <cstdint>
 #include <cstddef>
 #include <limits>
+#include <string>
 #include <vector>
 
 
@@ -215,9 +216,17 @@ private:
     // the suffixes are fully sorted.
     void exponentiate_prefix();
 
+    // Scatters the `p_id`'th partition's suffixes into their local-rank order.
+    // The assembly `p_assembly` contains the partition's content, and the
+    // `buf_id`'th device-buffer set is used for device operations.
+    void scatter_to_rank_order(p_id_t p_id, Partition_Assembly& p_assembly, idx_t buf_id);
+
     // Allocates enough space into `SA` and concatenates the partitions into it.
     void concatenate_partitions(idx_t*& SA);
 
+    // Concatenates the partitions into the file at path `op`, shuffling the in-
+    // partition suffixes per their local-ranks.
+    void concatenate_partitions(const std::string& op);
 
     // Provide access to private members for verification tests.
 

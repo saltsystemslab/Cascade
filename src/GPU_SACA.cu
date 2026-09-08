@@ -1100,7 +1100,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     }
 
 
-    std::vector<std::thread> readers;   // Readers-pool.    // TODO: why new pool per iteration? Fix.
+    std::vector<std::thread> readers;   // Readers-pool.
     std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
     // Launch the readers thread-pool to read chunks from the partition-backend to staging slabs.
     {
@@ -1182,9 +1182,9 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     }
 
 
-    std::vector<std::thread> writers;   // Writers-pool.    // TODO: why new pool per iteration?
+    std::vector<std::thread> writers;   // Writers-pool.
     std::atomic<int64_t> dl_remain(total_chunk);    // Count of slabs left to download from the device.
-    // Launch the writers thread-pool to drain the processed slabs to the partition-backend from staging slabs.
+    // Launch the writers thread-pool to drain the processed slabs to the partition-backend.
     {
         for(idx_t w = 0; w < writer_c_; ++w)
             writers.emplace_back(
@@ -1768,6 +1768,268 @@ void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
             }
         }
     }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assembly& p_assembly, const idx_t buf_id)
+{
+    PROFILE_SCOPE_FMT("scatter_to_rank_order_p%d", static_cast<int>(p_id));
+
+    static_assert(DEV_KEY_BYTES >= sizeof(p_sz_t), "Current device floor-plan requires at least one local-rank per entry.");
+    idx_t* const suf = suf_buf[buf_id][0];
+    p_sz_t* const rank = reinterpret_cast<p_sz_t*>(key_buf[buf_id][0]);
+    idx_t* const SA_local = suf_buf[buf_id][1]; // The partition's slice of the suffix array.
+    const auto part_sz = P_cap[p_id];
+
+    // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
+    {
+        for(auto* s : p_assembly.slab)
+        {
+            CUDA_CHECK(cudaMemcpyAsync(suf + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(rank + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
+        }
+    }
+
+
+    // Shuffle the suffixes into their rank-order.
+    {
+        constexpr std::size_t BLOCK_SZ = 256;
+        const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+
+        scatter_suffixes_to_rank_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (suf, rank, SA_local, part_sz);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
+    // Asynchronously download the rank-ordered partition in a chunked manner to host slabs.
+    {
+        for(auto* s : p_assembly.slab)
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_local + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+    }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
+{
+#ifdef PROBE
+    uint64_t pipeline_ns = 0;
+#endif
+{
+    INSTRUMENT_TIMER(pipeline_ns);
+
+    INSTRUMENT(probe::P().init(reader_c_, 0, dispatcher_c_, writer_c_, slab_c_, admit_budget_));
+    INSTRUMENT(probe::P().begin_iteration(cohort_sz.size(), 0, n_));
+    INSTRUMENT(probe::P().set_depth_reader([this](uint64_t* const d)
+    {
+        d[0] = F.size_approx();
+        d[1] = probe::QUEUE_ABSENT; // No host-side staging-compute in concatenation.
+        d[2] = R.size_approx();
+        d[3] = W.size_approx();
+    }));
+    INSTRUMENT(probe::P().start_sampler());
+
+    // Open the output file and preallocate it.
+    const auto fd = ::open(op.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); // Only owner can read-write, others read-only.
+    if(fd < 0)
+        util::file::exit_on_io_failure("open", op);
+
+    if(::fallocate(fd, 0, 0, n_ * sizeof(idx_t)) != 0)
+        util::file::exit_on_io_failure("fallocate", op);
+
+
+    idx_t total_chunk = 0;  // Total count of chunks across all partitions.
+    p_id_t part_c = 0;  // Count of non-empty partitions.
+
+    std::thread read_poster;
+    moodycamel::LightweightSemaphore admit(admit_budget_);
+    // Post read-tasks under admission control: a partition's read-tasks are posted only if
+    // `admit_budget_` has room for its whole assembly.
+    {
+        // Prepare read-tasks in partition order.
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        {
+            if(P_cap[p_id] == 0)    // Skip empty partitions; they have no content to concatenate.
+                continue;
+
+            part_c++;
+
+            const idx_t chunk_c = (P_cap[p_id] + chunk_cap_ - 1) / chunk_cap_;  // Number of slabs required to hold this partition.
+            total_chunk += chunk_c;
+
+            // Prepare skeleton chain of chunks of this partition.
+            part_assembly[p_id].slab.assign(chunk_c, nullptr);
+            part_assembly[p_id].slabs_to_stage.store(chunk_c, std::memory_order_relaxed);
+        }
+
+        read_poster = std::thread(
+            [&]
+            {
+                for(p_id_t p_id = 0; p_id < p_; ++p_id)
+                {
+                    if(P_cap[p_id] == 0)    // Skip empty partitions.
+                        continue;
+
+                    const idx_t chunk_c = part_assembly[p_id].slab.size();  // Number of slabs required to hold this partition.
+                    for(idx_t chunk_res = 0; chunk_res < chunk_c;)  // Reserve the assembly's slabs, piecemeal.
+                        chunk_res += static_cast<idx_t>(admit.waitMany(chunk_c - chunk_res));
+
+                    const auto sz = P_cap[p_id];
+                    for(idx_t c = 0; c < chunk_c; ++c) // Post a read-task for each chunk of this partition.
+                    {
+                        const auto chunk_off = c * chunk_cap_;
+                        RT.enqueue(Read_Task{p_id, c, chunk_off, std::min(chunk_cap_, sz - chunk_off), 0, 0});
+                    }
+                }
+            }
+        );
+    }
+
+
+    std::vector<std::thread> readers;   // Readers-pool.
+    std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
+    // Launch the readers thread-pool to read chunks from the partition-backend to staging slabs, and post
+    // completed assemblies for dispatch.
+    {
+        for(idx_t r = 0; r < reader_c_; ++r)
+            readers.emplace_back(
+                [&, r]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::reader, r));
+                    while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Read_Task rt;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            RT.wait_dequeue(rt);    // Get a read-task.
+                        }
+
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_slab_ns);
+                            F.wait_dequeue(s);      // Get a free slab.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
+                        s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
+                        backend_->read_keys(*s);
+
+                        auto& p_assembly = part_assembly[rt.p_id];
+                        p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
+                        const auto prev = p_assembly.slabs_to_stage.fetch_sub(1, std::memory_order_acq_rel);
+                        INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
+                        if(prev == 1)   // Last slab read for this partition; chunked-assembly is ready for the device.
+                        {
+                            backend_->retire_partition(rt.p_id);    // The partition's backend is dead onward.
+                            R.enqueue(&p_assembly);
+                            admit.signal(p_assembly.slab.size());   // These slabs are guaranteed to return to the free-pool `F`, so early signalling is safe.
+                        }
+                    }
+                }
+            );
+    }
+
+
+    std::vector<std::thread> writers;   // Writers-pool.
+    std::atomic<int64_t> dl_remain(total_chunk);    // Count of slabs left to download from the device.
+    // Launch the writers thread-pool to drain the processed slabs to the output file.
+    {
+        for(idx_t w = 0; w < writer_c_; ++w)
+            writers.emplace_back(
+                [&, w]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::writer, w));
+                    while(dl_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            W.wait_dequeue(s);  // Get a processed slab.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().io_ns);
+                            INSTRUMENT(probe::P().me().bytes += s->size() * sizeof(idx_t));
+
+                            // Drain the slab's suffixes.
+                            util::file::write_and_flush(fd, op, s->suf(), s->size() * sizeof(idx_t), (P_off[s->p_id()] + s->off()) * sizeof(idx_t));
+                        }
+
+                        F.enqueue(s);   // This slab is free now.
+                    }
+                }
+            );
+    }
+
+
+    std::vector<std::thread> dispatchers;   // Dispatchers-pool; one dispatcher per device-stream.
+    std::atomic<int64_t> dp_remain(part_c); // Count of partitions left to dispatch to the device.
+    // Launch the dispatchers threads-pool to dispatch the device-tasks, by repeatedly
+    // pulling a complete assembly, dispatching it to its device-stream, and then
+    // handing it over to the writers after device-execution.
+    {
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            dispatchers.emplace_back(
+                [&, s_id]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::dispatcher, s_id));
+                    while(dp_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Partition_Assembly* p_assembly;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
+                        const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
+
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().device_ns);
+                            scatter_to_rank_order(p_id, *p_assembly, s_id);
+
+                            CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                        }
+
+                        for(auto* s : p_assembly->slab) // The processed slabs now move to the write queue.
+                            W.enqueue(s);
+                    }
+                }
+            );
+    }
+
+
+    // Wait for the pipeline to finish.
+    {
+        read_poster.join();
+        for(auto& r : readers)  r.join();
+        for(auto& d : dispatchers)  d.join();   // Dispatchers feed the write-queue, so they must drain before the writers.
+        for(auto& w : writers)  w.join();
+
+        INSTRUMENT(probe::P().stop_sampler());
+    }
+
+
+    // Close the output file.
+    {
+        // The earlier per-chunk `sync_file_range`s only queued writebacks, with no guarantees on
+        // actual completions. Therefore block until the writes physically complete.
+        if(::fsync(fd) != 0)
+            util::file::exit_on_io_failure("fsync", op);
+
+        if(::close(fd) != 0)
+            util::file::exit_on_io_failure("close", op);
+    }
+}
+
+    INSTRUMENT(probe::P().accumulate_pipeline_ns(pipeline_ns));
+    INSTRUMENT(probe::P().report_log());
 }
 
 
