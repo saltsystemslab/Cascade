@@ -55,6 +55,12 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
     , null_d(nullptr)
     , workspace_sz(0)
 {
+    if(n_ == 0)
+    {
+        std::cerr << "The text at " << ip_path_ << " is empty. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
     P_id = util::allocate<p_id_t>(n_);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
@@ -87,7 +93,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 {
     CUDA_CHECK(cudaFree(null_d));
 
-    util::deallocate(T_h_);
+    CUDA_CHECK(deallocate_host(T_h_));
     util::deallocate(P_id);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
@@ -141,7 +147,7 @@ void GPU_SACA<T_sym_>::build_SA()
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
-    {   PROFILE_SCOPE("drop_text");                 deallocate_host(T_h_), T_h_ = nullptr; }
+    {   PROFILE_SCOPE("drop_text");                 CUDA_CHECK(deallocate_host(T_h_));   T_h_ = nullptr;   }
 
     {
         PROFILE_SCOPE("allocate_device_space");
@@ -188,7 +194,7 @@ void GPU_SACA<T_sym_>::load_text()
     constexpr auto null_count = tail_padding<T_sym_>;   // Null symbols the prefix-packing requires past the text's tail.
     const auto sym_count = n_;  // Symbols stored in the file.
 
-    pinned_allocate_host<T_sym_>(T_h_, sym_count + null_count);
+    CUDA_CHECK(pinned_allocate_host(T_h_, sym_count + null_count));
     util::read_file(ip_path_, T_h_, sym_count);
     for(idx_t i = 0; i < null_count; ++i)
         T_h_[sym_count + i] = std::numeric_limits<T_sym_>::min();
