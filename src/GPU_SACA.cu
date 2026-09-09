@@ -1,12 +1,18 @@
 
+#include "GPU_SACA.hpp"
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.hpp"
-#include "Prefix_Key_Decomposer.cuh"
+#include "Packed_Prefix_Decomposer.cuh"
+#include "bit-layout.hpp"
+#include "message.hpp"
 #include "utility.hpp"
 #include "utility.cuh"
 #include "env.hpp"
 #include "tests.hpp"
+#include "Pipeline_Probe.hpp"
 #include "profile.hpp"
+
+#include "concurrentqueue/lightweightsemaphore.h"
 
 #include "omp.h"
 #include "cub/cub.cuh"
@@ -24,6 +30,7 @@
 #include <memory>
 #include <cstdlib>
 #include <random>
+#include <numeric>
 #include <cmath>
 #include <algorithm>
 #include <iostream>
@@ -35,52 +42,52 @@
 namespace gpu_saca
 {
 
-__constant__ Prefix_Key pivots_d[MAX_PIVOT_COUNT];
-
-
 template <typename T_sym_>
-GPU_SACA<T_sym_>::GPU_SACA(const T_sym_* const T, const idx_t n):
-      n_(n)
-    , T_h_(T)
+GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_path):
+      host_budget(env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>((1 - MEM_SAFETY_MARGIN) * util::available_memory())))
+    , n_(util::file_size<T_sym_>(ip_path))
+    , T_h_(nullptr)
+    , ip_path_(ip_path)
+    , op_path_(op_path)
     , p_(0)
-    , secondary_bits_(util::math::bits_for(n_))
-    , key_bits_(0)
     , P_id(nullptr)
-    , rho(nullptr)
-    , null_d(nullptr)
+    , ctx_(0)
     , workspace_sz(0)
 {
+    if(n_ == 0)
+    {
+        std::cerr << "The text at " << ip_path_ << " is empty. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
     P_id = util::allocate<p_id_t>(n_);
-    rho = util::allocate<idx_t>(n_);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamCreate(stream + s));
-
-    CUDA_CHECK(cudaMalloc(&null_d, (K - 1) * sizeof(T_sym_)));
-    std::vector<T_sym_> null_h(K - 1, std::numeric_limits<T_sym_>::min());
-    CUDA_CHECK(cudaMemcpy(null_d, null_h.data(), (K - 1) * sizeof(T_sym_), cudaMemcpyHostToDevice));
 
     for(std::size_t b = 0; b < STREAM_C; ++b)
     {
         for(std::size_t r = 0; r < 2; ++r)
             key_buf[b][r] = nullptr,
-            suf_buf[b][r] = nullptr;
+            suf_buf[b][r] = nullptr,
+            perm_buf[b][r] = nullptr,
+            beta_buf[b][r] = nullptr;
 
         workspace_buf[b] = nullptr;
         is_active_buf[b] = nullptr;
+        msg_off_buf[b] = nullptr;
     }
 
     active_set_sz_d = nullptr;
+    unserved_c_d = nullptr;
 }
 
 
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
-    CUDA_CHECK(cudaFree(null_d));
-
+    util::deallocate(T_h_);
     util::deallocate(P_id);
-    util::deallocate(rho);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
         CUDA_CHECK(cudaStreamDestroy(stream[s]));
@@ -91,27 +98,37 @@ GPU_SACA<T_sym_>::~GPU_SACA()
         {
             CUDA_CHECK(cudaFree(key_buf[b][r]));
             CUDA_CHECK(cudaFree(suf_buf[b][r]));
+            CUDA_CHECK(cudaFree(perm_buf[b][r]));
+            CUDA_CHECK(cudaFree(beta_buf[b][r]));
         }
 
         CUDA_CHECK(cudaFree(workspace_buf[b]));
         CUDA_CHECK(cudaFree(is_active_buf[b]));
+        CUDA_CHECK(cudaFree(msg_off_buf[b]));
     }
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
+    CUDA_CHECK(cudaFree(unserved_c_d));
 }
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
+void GPU_SACA<T_sym_>::build_SA()
 {
-    using namespace caps_sa::timer;
+    using namespace gpu_saca::timer;
     PROFILE_SCOPE("build_SA");
 
-    // Pin the host-side text so that PCIe transfers of text can be overlapped kernel execution.
+    std::cerr << "Sequence length: " << n_ << "\n";
+
     {
-        PROFILE_SCOPE("host_register_text");
-        CUDA_CHECK(cudaHostRegister(const_cast<T_sym_*>(T_h_), n_ * sizeof(T_sym_), cudaHostRegisterDefault));
+        const auto t_a = now();
+        {   PROFILE_SCOPE("fault_in_partition_IDs");    util::prepage(P_id, n_);   }
+        const auto t_b = now();
+        std::cerr   << "Partition-ID map prepaging completed. Time taken: " << duration(t_b - t_a) << "s"
+                    << " (" << (n_ * sizeof(p_id_t) / (1024.0 * 1024.0 * 1024.0) / duration(t_b - t_a)) << " GBs/s).\n";
     }
+
+    {   PROFILE_SCOPE("load_text");                 load_text();    }
 
     const auto t_0 = now();
 
@@ -119,15 +136,17 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
     const auto t_1 = now();
     std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
 
-    {   PROFILE_SCOPE("partition");                 partition();    }
+    {   PROFILE_SCOPE("partition");                 partition();
+        if(!partition_sizes_fit())
+        {
+            std::cerr << "Unsuitable partition-sizes for " << p_ << " partitions. Increase `K` and / or `GPU_SACA_P_TARGET`. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+    }
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
-    // Unpin the host-side text as we do not need the text anymore.
-    {
-        PROFILE_SCOPE("host_unregister_text");
-        CUDA_CHECK(cudaHostUnregister(const_cast<T_sym_*>(T_h_)));
-    }
+    {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
 
     {
         PROFILE_SCOPE("allocate_device_space");
@@ -143,21 +162,56 @@ void GPU_SACA<T_sym_>::build_SA(idx_t*& SA)
         PROFILE_SCOPE("setup_staging");
         setup_staging();
     }
+    const auto t_3 = now();
+    std::cerr << "Device-space allocated and staging-setup completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
-    const auto t_3 = now();
-    std::cerr << "Initial ranking completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
+    const auto t_4 = now();
+    std::cerr << "Initial ranking completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
+
+    {   PROFILE_SCOPE("drop_prefixes");             backend_->drop_prefixes();   }
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
-    const auto t_4 = now();
-    std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
+    const auto t_5 = now();
+    std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
 
-    {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(SA);}
+    {   PROFILE_SCOPE("drop_partition_IDs");        util::deallocate(P_id), P_id = nullptr;  }
+
+    {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(op_path_);}
 
     {   PROFILE_SCOPE("drop_backend");              backend_.reset();   spill_->cleanup();   }
 
-    const auto t_5 = now();
-    std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
+    const auto t_6 = now();
+    std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_6 - t_5) << "s.\n";
+}
+
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::load_text()
+{
+    constexpr auto null_count = tail_padding<T_sym_>;   // Null symbols the prefix-packing requires past the text's tail.
+    const auto sym_count = n_;  // Symbols stored in the file.
+    const auto bytes = (sym_count + null_count) * sizeof(T_sym_);   // Size of the text's buffer.
+
+    const auto t_0 = timer::now();
+    T_h_ = util::checked_allocate<T_sym_>(sym_count + null_count);
+    const auto t_1 = timer::now();
+
+    util::prepage(T_h_, sym_count + null_count);
+    const auto t_2 = timer::now();
+
+    util::read_file(ip_path_, T_h_, sym_count);
+    for(idx_t i = 0; i < null_count; ++i)
+        T_h_[sym_count + i] = std::numeric_limits<T_sym_>::min();
+    const auto t_3 = timer::now();
+
+    std::cerr   << "Text-buffer allocation completed. Time taken: " << timer::duration(t_1 - t_0) << "s"
+                << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_1 - t_0)) << " GBs/s).\n";
+    std::cerr   << "Text-buffer prepaging completed. Time taken: " << timer::duration(t_2 - t_1) << "s"
+                << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_2 - t_1)) << " GBs/s).\n";
+    std::cerr   << "Text-read completed. Time taken: " << timer::duration(t_3 - t_2) << "s"
+                << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_3 - t_2)) << " GBs/s).\n";
 }
 
 
@@ -166,9 +220,9 @@ std::size_t GPU_SACA<T_sym_>::fixed_budget() const
 {
     return  n_ * sizeof(T_sym_) +   // `T`
             n_ * sizeof(p_id_t) +   // `Π`
-            n_ * sizeof(idx_t) +    // `ρ`
             slab_pool_memory() +
-            Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_);
+            Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_) +
+            Partition_Backend::fixed_budget(p_);
 }
 
 
@@ -177,10 +231,9 @@ void GPU_SACA<T_sym_>::select_pivots()
 {
     const idx_t p_sz_max = partition_size_upper_bound();    // Maximum supported partition-size based on the device-memory budget.
     const idx_t p_min = (n_ + p_sz_max - 1) / p_sz_max;     // Minimum number of partitions.
-    const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PIVOT_COUNT + 1);  // Maximum number of partitions.
-
+    const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PART_COUNT);    // Maximum number of partitions.
     const idx_t s = OVERSAMPLING_FACTOR * p_max * std::log2(n_);    // Number of samples.
-    std::vector<Prefix_Key> S(s);   // The samples.
+    std::vector<Pivot_Key> S(s);    // The samples.
 
     // Draw and sort the samples.
     {
@@ -191,7 +244,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 
             #pragma omp for schedule(static)
             for(idx_t i = 0; i < s; ++i)
-                S[i] = Prefix_Key::pack_prefix(T_h_ + dist(rng));
+                S[i] = Pivot_Key::pack_prefix(T_h_ + dist(rng));
         }
 
         std::sort(S.begin(), S.end());
@@ -235,6 +288,12 @@ void GPU_SACA<T_sym_>::select_pivots()
         }
 
         p_ = pivots.size() + 1;
+
+        if(!bit_layout::validate(n_, p_))
+        {
+            std::cerr << "Bit-packing layout violated. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
     }
 }
 
@@ -242,15 +301,22 @@ void GPU_SACA<T_sym_>::select_pivots()
 template <typename T_sym_>
 idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 {
-    // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sort, plus one flag byte to mark its activeness in subsequent steps.
-    constexpr std::size_t bytes_per_suf = 2 * (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t);   // 2 x (key + suffix) ping-pong + activeness flag.
+    // Device-space requirement for a suffix: it occupies space in two ping-pong partition-buffers for the radix-sorts, and one activeness-flag byte.
+    // 2 x (key + suffix + permutation-index + backward tag) ping-pong + activeness flag.
+    constexpr std::size_t bytes_per_suf = 2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + sizeof(uint8_t);
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
     const double imb_slack = env::get_f64("GPU_SACA_IMBALANCE_SLACK").value_or(PART_SZ_IMBALANCE_SLACK);
     const std::size_t budget = raw_budget / imb_slack;  // The actual partition-sizes, to be found out later, can be larger due to the probabilistic nature of pivoting.
 
-    idx_t p_sz_max = budget / (STREAM_C * bytes_per_suf);   // Max count of suffixes per partition so that `STREAM_C` partitions can fit concurrently in the worst-case.
+    idx_t p_sz_max; // Maximum supported suffix-count per partition.
+    {
+        const idx_t from_device_mem = budget / (STREAM_C * bytes_per_suf);    // Max count so that `STREAM_C` partitions can fit concurrently in the worst-case.
+        const idx_t from_rank_width = bit_layout::MAX_PART_SZ;
+        p_sz_max = std::min(from_device_mem, from_rank_width);
+    }
+
     while(true) // Keep refining `p_sz_max` until the device-budget can hold `STREAM_C`-many `p_sz_max`-sized partitions concurrently.
     {
         const auto req_workspace_sz = cub_workspace_size(p_sz_max);
@@ -273,13 +339,6 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
         p_sz_max = next_p_sz_max;
     }
 
-    // Cap partition-sizes so the 64-bit packed (primary, secondary) key of suffixes does not overflow.
-    {
-        const idx_t p_sz_max_from_packing = (secondary_bits_ == 0 ? std::numeric_limits<idx_t>::max() :
-                                                (secondary_bits_ == 64 ? 1 :
-                                                    static_cast<idx_t>((idx_t(1) << (64 - secondary_bits_)) / PART_SZ_IMBALANCE_SLACK)));
-        p_sz_max = std::min(p_sz_max, p_sz_max_from_packing);
-    }
 
     const idx_t p_min_from_budget = std::max(STREAM_C, (n_ + p_sz_max - 1) / p_sz_max); // Lower-bound on the number partitions.
     idx_t p_min = p_min_from_budget;
@@ -295,11 +354,11 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
         }
     }
 
-    // The (primary, secondary) key packing scheme, or very large `n`, can demand more partitions than constant-memory allow pivots.
-    if(p_min > MAX_PIVOT_COUNT + 1)
+    // The (primary, secondary) key packing scheme, or very large `n`, can demand more partitions than the partition-ID type can index.
+    if(p_min > MAX_PART_COUNT)
     {
         std::cerr   << "Current partitioning policy requires at least " << p_min << " partitions for the " << n_ << "-length text. "
-                    << "But constant-memory can hold at most " << MAX_PIVOT_COUNT << " pivots. Aborting.\n";
+                    << "But `p_id_t` can index at most " << MAX_PART_COUNT << " partitions. Aborting.\n";
         std::exit(EXIT_FAILURE);
     }
 
@@ -310,20 +369,48 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
 
 
 template <typename T_sym_>
+bool GPU_SACA<T_sym_>::partition_sizes_fit() const
+{
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
+
+    if(P_sz_max > bit_layout::MAX_PART_SZ)
+    {
+        std::cerr << "Maximum partition-size " << P_sz_max << " exceeds hard-constraint " << bit_layout::MAX_PART_SZ << " set by local-rank bit-width.\n";
+        return false;
+    }
+
+    return true;
+}
+
+
+template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 {
-    cub::DoubleBuffer<idx_t> vals_dummy(nullptr, nullptr);
+    cub::DoubleBuffer<idx_t> suf_dummy(nullptr, nullptr);
+    cub::DoubleBuffer<p_sz_t> perm_dummy(nullptr, nullptr);
 
     std::size_t init_rank_workspace_sz = 0;
     {
         cub::DoubleBuffer<Prefix_Key> keys_dummy(nullptr, nullptr);
-        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            nullptr, init_rank_workspace_sz,
-            keys_dummy, vals_dummy,
+
+        std::size_t suf_perm_sort_space = 0;
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs( // Check space for sorting based on the forward tag.
+            nullptr, suf_perm_sort_space,
+            suf_dummy, perm_dummy,
+            part_sz,
+            bit_layout::TAG_SHIFT, bit_layout::WORD_BITS
+        ));
+
+        std::size_t pref_perm_sort_space = 0;
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs( // Check space for sorting based on the prefix-key.
+            nullptr, pref_perm_sort_space,
+            keys_dummy, perm_dummy,
             part_sz,
             Prefix_Key_Decomposer{},
-            0, Prefix_Key::PREFIX_WORDS * 64
+            0, ELL_WORDS * 64
         ));
+
+        init_rank_workspace_sz = std::max(suf_perm_sort_space, pref_perm_sort_space);
     }
 
     std::size_t exponentiation_workspace_size = 0;
@@ -331,7 +418,7 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
         cub::DoubleBuffer<idx_t> keys_dummy(nullptr, nullptr);
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
             nullptr, exponentiation_workspace_size,
-            keys_dummy, vals_dummy,
+            keys_dummy, perm_dummy,
             part_sz,
             0, 64
         ));
@@ -349,18 +436,28 @@ std::size_t GPU_SACA<T_sym_>::cub_workspace_size(const idx_t part_sz)
 
     std::size_t compaction_workspace_sz = 0;
     {
-        auto in_zip  = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr)));
-        auto zip_out = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr)));
+        auto in_zip  = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr), static_cast<p_id_t*>(nullptr)));
+        auto zip_out = thrust::make_zip_iterator(thrust::make_tuple(static_cast<idx_t*>(nullptr), static_cast<idx_t*>(nullptr), static_cast<p_id_t*>(nullptr)));
         CUDA_CHECK(cub::DevicePartition::Flagged(
             nullptr, compaction_workspace_sz,
-            in_zip, static_cast<uint8_t*>(nullptr),
+            in_zip,
+            static_cast<uint8_t*>(nullptr),
             zip_out,
             static_cast<idx_t*>(nullptr),
             part_sz
         ));
     }
 
-    return std::max({init_rank_workspace_sz, exponentiation_workspace_size, scan_workspace_sz, compaction_workspace_sz});
+    std::size_t msg_off_scan_workspace_sz = 0;
+    {
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            nullptr, msg_off_scan_workspace_sz,
+            static_cast<p_sz_t*>(nullptr), static_cast<p_sz_t*>(nullptr),
+            part_sz // Over-provisioned: message-offset sum-scans are over `p_ + 1` entries and `p_` isn't available here.
+        ));
+    }
+
+    return std::max({init_rank_workspace_sz, exponentiation_workspace_size, scan_workspace_sz, compaction_workspace_sz, msg_off_scan_workspace_sz});
 }
 
 
@@ -368,11 +465,14 @@ template <typename T_sym_>
 bool GPU_SACA<T_sym_>::allocate_device_space()
 {
     // Each suffix in each stream needs:
-    //      1. `cub::DoubleBuffer` keys, input and output (2 x `Prefix_Key`);
+    //      1. `cub::DoubleBuffer` keys, input and output (2 x `DEV_KEY_BYTES`);
     //      2. `cub::DoubleBuffer` values, input and output (2 x `idx_t`);
-    //      3. activeness-flag, output (1 x `uint8_t`).
+    //      3. `cub::DoubleBuffer` permutation-indices, generated and transformed (2 x `p_sz_t`);
+    //      4. `cub::DoubleBuffer` backward routing tag pairs, input and output (2 x `beta_t`);
+    //      5. activeness-flag, output (1 x `uint8_t`).
+    // Message-collation requires `p + 1` counts (per-partition offset).
     // `cub` itself requires a workspace for sort and scan.
-    // Memory constraint: STREAM_C x (P_sz_max x (2 x (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
+    // Memory constraint: STREAM_C x (P_sz_max x (2 x (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t)) + 2 * sizeof(uint8_t)) + (p + 1) * sizeof(p_sz_t) + workspace_sz) <= free_mem x (1 - MEM_SAFETY_MARGIN)
 
     const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
@@ -384,7 +484,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         std::size_t free_mem, total_mem;
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory across all the streams.
-        const std::size_t per_stream_budget = P_sz_max * (2 * (sizeof(Prefix_Key) + sizeof(idx_t)) + sizeof(uint8_t)) + workspace_sz;
+        const std::size_t per_stream_budget = P_sz_max * (2 * (DEV_KEY_BYTES + sizeof(idx_t) + sizeof(p_sz_t) + sizeof(beta_t)) + sizeof(uint8_t)) + (p_ + 1) * sizeof(p_sz_t) + workspace_sz;
 #ifdef STATS
         std::cerr << "Required memory:    " << ((STREAM_C * per_stream_budget) / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
         std::cerr << "Device free-memory: " << (budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
@@ -400,15 +500,19 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         {
             for(std::size_t r = 0; r < 2; ++r)  // For each buffer in the radix-sort ping-pong
             {
-                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * sizeof(Prefix_Key)));
+                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * DEV_KEY_BYTES));
                 CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
+                CUDA_CHECK(cudaMalloc(&perm_buf[b][r], P_sz_max * sizeof(p_sz_t)));
+                CUDA_CHECK(cudaMalloc(&beta_buf[b][r], P_sz_max * sizeof(beta_t)));
             }
 
             CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
             CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
+            CUDA_CHECK(cudaMalloc(&msg_off_buf[b], (p_ + 1) * sizeof(p_sz_t)));
         }
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(&unserved_c_d, sizeof(idx_t)));
     }
 
     return true;
@@ -422,21 +526,31 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Sets the capacity of each staging-slab.
     {
+        // A chunk-boundary `c * chunk_cap_` must be disk-block aligned, and the
+        // narrowest persisted element type (`p_sz_t`) governs it.
+        static_assert(sizeof(p_sz_t) <= sizeof(idx_t) && sizeof(p_sz_t) <= sizeof(Prefix_Key), "`p_sz_t` must be the narrowest persisted element type.");
+
         if(P_sz_max >= CHUNK_CAP)
             chunk_cap_ = CHUNK_CAP;
         else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
         {
-            constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(idx_t);
+            constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
+            static_assert(CHUNK_CAP % elems_per_disk_blk == 0, "`CHUNK_CAP` must be disk-block aligned.");
             chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
         }
     }
 
     // Set the reader- and writer-pool sizes.
     {
+        constexpr idx_t read_poster_c = 1;
+        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(24); // TODO: tune default.
         writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
-        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(std::max<idx_t>(1, omp_get_max_threads()));
-        if(reader_c_ + writer_c_ + 1 > static_cast<idx_t>(omp_get_max_threads()))
-            std::cerr << "Warning: the staging workers (readers, writers, and dispatcher) oversubscribes the " << omp_get_max_threads() << "available CPU-threads.\n";
+        dispatcher_c_ = STREAM_C;
+        stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<idx_t>(1, omp_get_max_threads() - (read_poster_c +reader_c_ + writer_c_ + dispatcher_c_)));
+        if(read_poster_c + reader_c_ + writer_c_ + dispatcher_c_ + stager_c_ > static_cast<idx_t>(omp_get_max_threads()))
+            std::cerr <<    "Warning: the staging workers (read-posters, readers, writers, stagers, and dispatchers)"
+                            ": (" << read_poster_c << ", " << reader_c_ << ", " << writer_c_ << ", " << stager_c_ << ", " << dispatcher_c_ << ")"
+                            " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
     }
 
     // Sets the slab pool size.
@@ -444,8 +558,19 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
 
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
-        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer
+        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer.
+        // A slab lives in exactly one of: `F`, a reader, an assembly slot (covering its timeline in `C`,
+        // at a stager, and at device), `W`, and a writer.
         slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
+
+        admit_budget_ = slab_c_;
+        if(admit_budget_ < max_chunk_per_part)
+        {
+            std::cerr << "Slab-pool cannot admit the largest partition's assembly. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        INSTRUMENT(probe::P().init(reader_c_, stager_c_, dispatcher_c_, writer_c_, slab_c_, admit_budget_));
     }
 
     // Log the staging configurations.
@@ -454,8 +579,11 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         std::cerr << "Staging-configuration between backend and device:\n";
         std::cerr << "\tReader-pool size: " << reader_c_ << "\n";
         std::cerr << "\tWriter-pool size: " << writer_c_ << "\n";
+        std::cerr << "\tDevice-dispatcher-pool size: " << dispatcher_c_ << "\n";
+        std::cerr << "\tStager-pool size: " << stager_c_ << "\n";
         std::cerr << "\tSlab-pool size: " << slab_c_ << "\n";
         std::cerr << "\tSlab-capacity:  " << chunk_cap_ << "\n";
+        std::cerr << "\tSlab-pool memory: " << slab_pool_memory() << "B\n";
 #endif
     }
 }
@@ -471,9 +599,6 @@ void GPU_SACA<T_sym_>::setup_staging()
         F.enqueue(&s);
     }
 
-    for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
-        FS.enqueue(s_id);
-
     part_assembly = std::make_unique<Partition_Assembly[]>(p_);
 }
 
@@ -481,7 +606,7 @@ void GPU_SACA<T_sym_>::setup_staging()
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 {
-    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key));
+    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(beta_t) + 2 * MESSAGE_BYTES);
 }
 
 
@@ -519,7 +644,7 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, fixed_budget(), rho, n_, secondary_bits_);
+            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, host_budget, fixed_budget(), p_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -527,12 +652,15 @@ void GPU_SACA<T_sym_>::partition()
         }
 
 
-        // Add suffix indices along with their `ELL x 8`-byte prefixes to their corresponding partitions (through the buffers).
+        // Add suffix indices along with their `ELL_WORDS x 8`-byte prefixes to their corresponding partitions (through the buffers).
         {
             PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
-                P_buf[P_id[i]].unwrap().add(i, Prefix_Key::pack_prefix(T_h_ + i));
+            {
+                const p_id_t phi = (i + ell < n_ ? P_id[i + ell] : 0);  // Forward tag for generation 0.
+                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi), Prefix_Key::pack_prefix(T_h_ + i));   // Suffix packed with its forward tag, seeded at generation 0.
+            }
 
             #pragma omp parallel for schedule(static)
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -556,13 +684,21 @@ void GPU_SACA<T_sym_>::partition()
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::compute_partition_IDs()
 {
-    // Copy the pivots to the device constant-memory.
-    CUDA_CHECK(cudaMemcpyToSymbol(pivots_d, pivots.data(), pivots.size() * sizeof(Prefix_Key)));
+    // Copy the pivots to the device.
+    Pivot_Key* pivots_d = nullptr;
+    if(!pivots.empty())
+    {
+        const auto pivots_bytes = pivots.size() * sizeof(Pivot_Key);
+        CUDA_CHECK(cudaMalloc(&pivots_d, pivots_bytes));
+        CUDA_CHECK(cudaMemcpy(pivots_d, pivots.data(), pivots_bytes, cudaMemcpyHostToDevice));
+    }
 
     constexpr std::size_t BLOCK_SZ = 256;
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
     T_sym_* T_buf[STREAM_C];    // The text-chunk buffers.
     p_id_t* P_id_buf[STREAM_C]; // The partition-ID buffers.
+    T_sym_* T_stage[STREAM_C];  // Staging buffer for the text-chunks' uploads, per stream.
+    p_id_t* P_id_stage[STREAM_C];   // Staging buffer for the partition-IDs' downloads, per stream.
 
     idx_t* P_sz_d;  // Global partition-size histogram at the device.
     {
@@ -577,7 +713,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory for the chunk buffers.
         const std::size_t per_idx_mem = STREAM_C * (sizeof(T_sym_) + sizeof(p_id_t));   // Space required per-index across the three sets of buffers.
-        CHUNK_SZ = budget / per_idx_mem;
+        CHUNK_SZ = std::min<idx_t>(PID_CHUNK_CAP, budget / per_idx_mem);
         CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
         if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
         {
@@ -585,59 +721,67 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
             std::exit(EXIT_FAILURE);
         }
 
-        const std::size_t text_buf_bytes = (CHUNK_SZ + K - 1) * sizeof(T_sym_);
-        const std::size_t p_id_buf_bytes = CHUNK_SZ * sizeof(p_id_t);
+        const auto buf_sz = std::min(CHUNK_SZ, n_);
+        const std::size_t text_buf_bytes = (buf_sz + K - 1) * sizeof(T_sym_);
+        const std::size_t p_id_buf_bytes = buf_sz * sizeof(p_id_t);
         for(std::size_t b = 0; b < STREAM_C; ++b)
         {
             CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
             CUDA_CHECK(cudaMalloc(P_id_buf + b, p_id_buf_bytes));
+            CUDA_CHECK(pinned_allocate_host(T_stage[b], buf_sz + K - 1));
+            CUDA_CHECK(pinned_allocate_host(P_id_stage[b], buf_sz));
         }
     }
 
 
     // Stream text in chunks to device, compute partition-IDs and per-partition counts, and move the output to host.
     {
-        constexpr idx_t tile_bytes = (BLOCK_SZ + K - 1) * sizeof(T_sym_);
-        constexpr idx_t hist_off = ((tile_bytes + alignof(uint32_t) - 1) / alignof(uint32_t)) * alignof(uint32_t);
-        const idx_t hist_bytes = p_ * sizeof(uint32_t);
-        const auto s_mem_sz = hist_off + hist_bytes;    // Shared memory: text-tile | block-local histogram.
-
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
-        for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
-        {
-            const auto buf_id = c % STREAM_C;   // Which set of buffers (and stream) to use for this chunk.
-            const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
-            const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
-            const auto chunk_symbol_req = chunk_suf_count + K - 1;  // Number of symbols this chunk is required to have.
-            const auto chunk_symbol_count = std::min(chunk_symbol_req, n_ - chunk_off);    // Number of symbols to transfer from host to device for this chunk.
+        std::vector<std::thread> dispatchers;   // Dispatchers-pool; one dispatcher per device-stream.
+        std::atomic<idx_t> chunk_claimed(0);    // Count of chunks claimed for dispatch.
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            dispatchers.emplace_back(
+                [&, s_id]
+                {
+                    while(true)
+                    {
+                        const auto c = chunk_claimed.fetch_add(1, std::memory_order_relaxed);   // Claim a chunk.
+                        if(c >= chunk_count)
+                            break;
 
-            //  Asynchronously transfer this chunk to the device while the other stream's kernel is being executed (from the last iteration).
-            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, chunk_symbol_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
+                        const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
+                        const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
+                        const auto chunk_sym_count = chunk_suf_count + K - 1;   // Number of symbols this chunk requires. The text's tail-padding covers the overhang at the last chunk.
 
-            // Pad the tail of the chunk with null / terminator symbols if required.
-            if(chunk_symbol_count < chunk_symbol_req)   // Can happen at the last and at the previous-to-last chunks.
-                CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id] + chunk_symbol_count, null_d, (chunk_symbol_req - chunk_symbol_count) * sizeof(T_sym_), cudaMemcpyDeviceToDevice, stream[buf_id]));
+                        // Stage this chunk and asynchronously upload it to the device.
+                        std::memcpy(T_stage[s_id], T_h_ + chunk_off, chunk_sym_count * sizeof(T_sym_));
+                        CUDA_CHECK(cudaMemcpyAsync(T_buf[s_id], T_stage[s_id], chunk_sym_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[s_id]));
 
-            const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
-            compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, s_mem_sz, stream[buf_id] >>>
-                (T_buf[buf_id], chunk_suf_count, P_id_buf[buf_id], p_, P_sz_d);
-            CUDA_CHECK(cudaGetLastError());
+                        const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
+                        compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[s_id] >>>
+                            (T_buf[s_id], chunk_suf_count, pivots_d, P_id_buf[s_id], p_, P_sz_d);
+                        CUDA_CHECK(cudaGetLastError());
 
-            // Asynchronously copy this chunk's partition-IDs to the host.
-            CUDA_CHECK(cudaMemcpyAsync(P_id + chunk_off, P_id_buf[buf_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        }
+                        // Asynchronously download this chunk's partition-IDs to staging space, and drain those to `P_id`.
+                        CUDA_CHECK(cudaMemcpyAsync(P_id_stage[s_id], P_id_buf[s_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[s_id]));
+                        CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                        std::memcpy(P_id + chunk_off, P_id_stage[s_id], chunk_suf_count * sizeof(p_id_t));
+                    }
+                }
+            );
+
+        for(auto& d : dispatchers)  d.join();
     }
 
 
-    // Wait for the streams to finish.
-    for(std::size_t s = 0; s < STREAM_C; ++s)
-        CUDA_CHECK(cudaStreamSynchronize(stream[s]));
-
     // Free the buffers.
+    CUDA_CHECK(cudaFree(pivots_d));
     for(std::size_t b = 0; b < STREAM_C; ++b)
     {
         CUDA_CHECK(cudaFree(T_buf[b]));
         CUDA_CHECK(cudaFree(P_id_buf[b]));
+        CUDA_CHECK(deallocate_host(T_stage[b]));
+        CUDA_CHECK(deallocate_host(P_id_stage[b]));
     }
 
     // Move the partition-sizes to the host.
@@ -659,17 +803,6 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 #endif
     }
 
-    // Determine bit-width of primary-keys of suffixes.
-    {
-        const idx_t P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
-        key_bits_ = secondary_bits_ + util::math::bits_for(P_sz_max);
-        if(key_bits_ > 64)
-        {
-            std::cerr << "Packed (primary, secondary) key needs " << key_bits_ << ". The skew in partitioning is adversarial. Aborting.\n";
-            std::exit(EXIT_FAILURE);
-        }
-    }
-
 #ifdef TESTS
     std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
 #endif
@@ -677,32 +810,43 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
 template <typename T_sym_>
+idx_t GPU_SACA<T_sym_>::active_set_size() const
+{
+    idx_t unsorted = 0;
+    for(const auto a : Active_sz)
+        unsorted += a;
+
+    return unsorted;
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
+{
+    ctx_ = ctx;
+    backend_->open_generation(gen);
+
+    cohort_sz.push_back(active_set_size());
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::initial_rank()
 {
+    INSTRUMENT(probe::P().begin_iteration(0, 0, n_));
+
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
+        set_context(ell, 0);
         drive_pipeline<true>();
-    }
-
-    // Drop the prefix-keys (used in seeding) from the backend.
-    {
-        PROFILE_SCOPE("drop_prefixes");
-        backend_->drop_prefixes();
     }
 
 #ifdef TESTS
     // std::cerr << "Initial rankings verification: " << (test::validate_local_rankings(P_, sorted_key, sorted_suf) ? "Passes" : "Fails") << "\n";
 #endif
 
-
-    // Compute the initial global ranking.
-    {
-        PROFILE_SCOPE("update_global_ranks");
-        update_global_ranks();}
-
     // Resize the partitions to their active-set size.
-    // NB: this compaction must land *after* the preceding global rankings have been updated.
     {
         PROFILE_SCOPE("collect_active_set_sizes");
         CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
@@ -711,17 +855,17 @@ void GPU_SACA<T_sym_>::initial_rank()
 
 #ifdef STATS
     {
-        constexpr idx_t ell = K;
         p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `ell`).
-        idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
+        const auto unsorted = active_set_size();    // Count of suffixes with non-unique ranks.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            sorted_part += (Active_sz[p_id] == 0),
-            unsorted += Active_sz[p_id];
+            sorted_part += (Active_sz[p_id] == 0);
 
         std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
     }
 #endif
+
+    INSTRUMENT(probe::P().report_log());
 }
 
 
@@ -730,54 +874,123 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 {
     PROFILE_SCOPE_FMT("sort_and_init_rank_and_filter_p%d", static_cast<int>(p_id));
 
-    const auto part_sz = Active_sz[p_id];    // Size of this partition.
 
-    cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);  // Input and output buffers for the prefix-keys of suffixes at the device.
-    cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);   // Input and output buffers for the suffixes at the device.
-    auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
-    auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
+    cub::DoubleBuffer<Prefix_Key> key(key_buf[buf_id][0], key_buf[buf_id][1]);
+    cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
+    cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
+    cub::DoubleBuffer<beta_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
+
 
     // Asynchronously upload this partition's chunks of suffixes and their prefix-keys to the device.
     {
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(key_buf[buf_id][0] + s->off(), s->key(), s->size() * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0] + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(key.Current() + s->off(), s->key(), s->size() * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
 
 
-    // Sort the partition by the initial packed prefixes.
+    const auto part_sz = Active_sz[p_id];   // Size of this partition.
+    auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
+    auto ws_sz = workspace_sz;              // Size of the workspace; `cub` takes it via a non-const reference.
+    auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
+
+    constexpr std::size_t BLOCK_SZ = 256;
+    const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+
+    Prefix_Key* K_sorted = nullptr; // Sorted prefix-keys.
+    idx_t* SA_sorted = nullptr; // Suffixes corresponding to the sorted prefix-keys.
+    beta_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
+    Prefix_Key* K_ranked = nullptr; // Ranked keys.
+    idx_t* SA_ranked = nullptr; // Suffixes in ranked order (bar the active | retired split).
+    beta_t* beta_ranked = nullptr;  // Backward tags corresponding to the ranked suffixes.
+    idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
+    msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
+    p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
+    p_sz_t* local_rank = nullptr;   // Final primary ranks computed.
+
+
+    // Sort the partition by the (packed-prefix, forward-tag): two-phase radix-sort.
     {
-        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            workspace, workspace_sz,
-            key, suf,
-            part_sz,
-            Prefix_Key_Decomposer{},
-            0, Prefix_Key::PREFIX_WORDS * 64,
-            stream[buf_id]
-        ));
+        // Sort by the forward tag.
+        {
+            // Populate identity permutation.
+            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            // Sort the forward tags.
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                workspace, ws_sz,
+                suf, perm,  // The forward tag is packed in suffix.
+                part_sz,
+                static_cast<int>(bit_layout::TAG_SHIFT), static_cast<int>(bit_layout::WORD_BITS),
+                stream[buf_id]
+            ));
+
+            // Shuffle keys and backward tags per the forward-tag-order permutation.
+            shuffle_kernel<Prefix_Key, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (key.Alternate(), key.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            key.selector ^= 1;
+
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            beta.selector ^= 1;
+        }
+
+        // Sort by the packed-prefix.
+        {
+            // Populate identity permutation.
+            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            // Sort the packed-prefixes.
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                workspace, ws_sz,
+                key, perm,
+                part_sz,
+                Prefix_Key_Decomposer{},
+                0, ELL_WORDS * 64,
+                stream[buf_id]
+            ));
+
+            // Shuffle suffixes and backward tags per the packed-prefix-order permutation.
+            shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            suf.selector ^= 1;
+
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            beta.selector ^= 1;
+
+            K_sorted = key.Current(), K_ranked = key.Alternate();
+            SA_sorted = suf.Current(), SA_ranked = suf.Alternate();
+            beta_sorted = beta.Current(), beta_ranked = beta.Alternate();
+        }
     }
 
 
     // Rank and filter the sort-output.
-    const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
-        const Prefix_Key* const K   = key_buf[buf_id][sort_op_selector];    // The sort-output.
-        idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Ranks of the distinct key groups.
-        idx_t* const key_rank       = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);      // Ranks of the distinct keys.
-
-        constexpr std::size_t BLOCK_SZ = 256;
-        const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+        idx_t* const key_group_rank = reinterpret_cast<idx_t*>(K_ranked);   // Distinct key groups' ranks.
+        idx_t* const key_rank = reinterpret_cast<idx_t*>(K_sorted); // Distinct keys' ranks.
 
         // Track groups with distinct prefixes and rank by the groups' offsets, and mark non-unique keys as active.
         {
             initialize_key_group_ranks_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, key_group_rank, is_active);
+                (K_sorted, SA_sorted, part_sz, key_group_rank, is_active);
             CUDA_CHECK(cudaGetLastError());
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 key_group_rank, key_rank,
                 cub::Max(),
                 part_sz,
@@ -788,16 +1001,11 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
         // Group non-unique rank keys and suffixes to the head and the rest to the tail of the partition.
         {
-            const idx_t* const K_in     = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);  assert(K_in == key_rank);
-            const idx_t* const SA_in    = suf_buf[buf_id][sort_op_selector];
-            idx_t* const K_out          = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
-            idx_t* const SA_out         = suf_buf[buf_id][1 - sort_op_selector];
-
             CUDA_CHECK(cub::DevicePartition::Flagged(
-                workspace, workspace_sz,
-                thrust::make_zip_iterator(thrust::make_tuple(K_in, SA_in)),
+                workspace, ws_sz,
+                thrust::make_zip_iterator(thrust::make_tuple(key_rank, SA_sorted, beta_sorted)),
                 is_active,
-                thrust::make_zip_iterator(thrust::make_tuple(K_out, SA_out)),
+                thrust::make_zip_iterator(thrust::make_tuple(reinterpret_cast<idx_t*>(K_ranked), SA_ranked, beta_ranked)),
                 active_set_sz_d + p_id,
                 part_sz,
                 stream[buf_id]
@@ -806,14 +1014,59 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     }
 
 
+    // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
+    {
+        msg_target = reinterpret_cast<idx_t*>(K_sorted);
+        msg_rank = reinterpret_cast<msg_rank_t*>(SA_sorted);
+        msg_off = msg_off_buf[buf_id];
+
+        CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
+        count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_ranked, reinterpret_cast<const idx_t*>(K_ranked), beta_ranked, part_sz, ctx_, msg_off);
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            workspace, ws_sz,
+            msg_off, msg_off,
+            p_ + 1,
+            stream[buf_id]
+        ));
+
+        emit_messages_kernel<false, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_ranked, reinterpret_cast<const idx_t*>(K_ranked), beta_ranked, part_sz, ctx_, active_set_sz_d + p_id, msg_target, msg_rank, msg_off);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
+    // Narrow the rank-width for persisting as `p_sz_t`.
+    {
+        local_rank = reinterpret_cast<p_sz_t*>(reinterpret_cast<idx_t*>(K_ranked) + P_sz_max);  // `K_ranked[0, part_sz)` contains primary keys.
+        extract_primary_keys_kernel<false, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (reinterpret_cast<const idx_t*>(K_ranked), local_rank, part_sz);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
-        const idx_t* const K_out    = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
-        const idx_t* const SA_out   = suf_buf[buf_id][1 - sort_op_selector];
+        CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
+        const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
+
+        idx_t c_id = 0; // Chunk-ID.
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            const auto chunk_outbox_off = 2 * c_id++ * chunk_cap_;  // Offset in the outbox for this slab.
+            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(2 * chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
+            s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
+
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            if(chunk_outbox_sz > 0)
+            {
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            }
         }
     }
 }
@@ -823,55 +1076,152 @@ template <typename T_sym_>
 template <bool init_rank_>
 void GPU_SACA<T_sym_>::drive_pipeline()
 {
+#ifdef PROBE
+    uint64_t pipeline_ns = 0;
+#endif
+{
+    INSTRUMENT_TIMER(pipeline_ns);
+
+    INSTRUMENT(probe::P().set_depth_reader([this](uint64_t* const d)
+    {
+        d[0] = F.size_approx();
+        d[1] = C.size_approx();
+        d[2] = R.size_approx();
+        d[3] = W.size_approx();
+    }));
+    INSTRUMENT(probe::P().start_sampler());
+
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
     p_id_t active_part_c = 0;   // Count of active partitions in the current iteration.
 
-    // Post read-tasks in partition order.
+    std::thread read_poster;
+    moodycamel::LightweightSemaphore admit(admit_budget_);
+    // Post read-tasks under admission control: a partition's read-tasks are posted only if
+    // `admit_budget_` has room for its whole assembly.
     {
+        // Prepare read-tasks in partition order.
         for(p_id_t p_id = 0; p_id < p_; ++p_id)
         {
             if(Active_sz[p_id] == 0)    // Skip partitions with empty active-sets.
                 continue;
 
             active_part_c++;
-            const idx_t part_chunk_c = (Active_sz[p_id] + chunk_cap_ - 1) / chunk_cap_; // Number of chunks / slabs required for this partition.
-            total_chunk += part_chunk_c;
+
+            const auto active_set_sz = Active_sz[p_id];
+            const auto inbox_sz = backend_->inbox_size(p_id);
+            const idx_t content_chunk_c = (active_set_sz + chunk_cap_ - 1) / chunk_cap_;    // Number of slabs required for this partition's content.
+            const idx_t inbox_chunk_c = (inbox_sz + chunk_cap_ - 1) / chunk_cap_; // Number of slabs required for this partition's inbox.
+            const idx_t chunk_c = std::max(content_chunk_c, inbox_chunk_c); // Number of slabs required in aggregate to hold this partition.
+            total_chunk += chunk_c;
 
             // Prepare skeleton chain of chunks of this partition.
-            part_assembly[p_id].slab.assign(part_chunk_c, nullptr);
-            part_assembly[p_id].chunks_to_read.store(part_chunk_c, std::memory_order_relaxed);
-
-            for(idx_t c = 0; c < part_chunk_c; ++c) // Post a read-task for each chunk of this partition.
-            {
-                const auto chunk_off = c * chunk_cap_;
-                const auto chunk_sz = std::min(chunk_cap_, Active_sz[p_id] - chunk_off);
-                RT.enqueue(Read_Task{p_id, c, chunk_off, chunk_sz});
-            }
+            part_assembly[p_id].slab.assign(chunk_c, nullptr);
+            part_assembly[p_id].slabs_to_stage.store(chunk_c, std::memory_order_relaxed);
         }
+
+        read_poster = std::thread(
+            [&]
+            {
+                for(p_id_t p_id = 0; p_id < p_; ++p_id)
+                {
+                    if(Active_sz[p_id] == 0)    // Skip partitions with empty active-sets.
+                        continue;
+
+                    const idx_t chunk_c = part_assembly[p_id].slab.size();  // Number of slabs required to hold this partition's content and inbox.
+                    for(idx_t chunk_res = 0; chunk_res < chunk_c;)  // Reserve the assembly's slabs, piecemeal.
+                        chunk_res += static_cast<idx_t>(admit.waitMany(chunk_c - chunk_res));
+
+                    const auto active_set_sz = Active_sz[p_id];
+                    const auto inbox_sz = backend_->inbox_size(p_id);
+                    for(idx_t c = 0; c < chunk_c; ++c) // Post a read-task for each chunk of this partition.
+                    {
+                        const auto chunk_off = c * chunk_cap_;
+                        const auto content_chunk_sz = (chunk_off < active_set_sz ? std::min(chunk_cap_, active_set_sz - chunk_off) : 0);
+                        const auto msg_chunk_sz = (chunk_off < inbox_sz ? std::min<p_sz_t>(chunk_cap_, inbox_sz - chunk_off) : 0);
+                        RT.enqueue(Read_Task{p_id, c, chunk_off, content_chunk_sz, static_cast<p_sz_t>(chunk_off), msg_chunk_sz});
+                    }
+                }
+            }
+        );
     }
 
 
     std::vector<std::thread> readers;   // Readers-pool.
     std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
-    // Launch readers thread-pool to read chunks from the partition-backend to staging slabs.
+    // Launch the readers thread-pool to read chunks from the partition-backend to staging slabs.
     {
         for(idx_t r = 0; r < reader_c_; ++r)
             readers.emplace_back(
-                [&]
+                [&, r]
                 {
+                    INSTRUMENT(probe::P().bind(probe::Role::reader, r));
                     while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
-                        Read_Task rt;       RT.wait_dequeue(rt);    // Get a read-task.
-                        Staging_Slab* s;    F.wait_dequeue(s);      // Get a free slab for the chunk.
+                        Read_Task rt;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            RT.wait_dequeue(rt);    // Get a read-task.
+                        }
 
-                        s->assign(rt.p_id, rt.off, rt.sz);
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_slab_ns);
+                            F.wait_dequeue(s);      // Get a free slab.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
+                        s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
                         if constexpr(init_rank_)    backend_->read_prefixes(*s);
                         else                        backend_->read_keys(*s);
 
+                        if(s->inbox_sz() > 0)
+                            backend_->read_messages(*s);
+
                         auto& p_assembly = part_assembly[rt.p_id];
                         p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
-                        if(p_assembly.chunks_to_read.fetch_sub(1, std::memory_order_acq_rel) == 1)  // Last chunk read off for this partition; chunked-assembly is ready for the device.
+                        C.enqueue(s);   // This slab now moves to the staging-compute queue.
+                    }
+                }
+            );
+    }
+
+
+    std::vector<std::thread> stagers;   // Stagers-pool.
+    std::atomic<int64_t> st_remain(total_chunk);    // Count of slabs left to stage.
+    // Launch the stagers thread-pool to apply host-side compute to each slab as soon as it's been read from
+    // the backend, add it to its partition's assembly, and post completed assemblies for dispatch.
+    {
+        for(idx_t c = 0; c < stager_c_; ++c)
+            stagers.emplace_back([&, c]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::stager, c));
+                    while(st_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            C.wait_dequeue(s);  // Get a slab with read data.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+#ifdef TESTS
+                        if(!test::validate_inbox_routing(*s, P_id, n_))
+                        {
+                            std::cerr << "Inboxes contain messages routed to wrong partitions. Aborting.\n";
+                            std::exit(EXIT_FAILURE);
+                        }
+#endif
+                        stage_slab<init_rank_>(*s);
+
+                        auto& p_assembly = part_assembly[s->p_id()];
+                        const auto prev = p_assembly.slabs_to_stage.fetch_sub(1, std::memory_order_acq_rel);
+                        INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
+                        if(prev == 1)   // Last slab staged for this partition; chunked-assembly is ready for the device.
+                        {
                             R.enqueue(&p_assembly);
+                            admit.signal(p_assembly.slab.size());   // These slabs are guaranteed to return to the free-pool `F`, so early signalling is safe.
+                        }
                     }
                 }
             );
@@ -879,18 +1229,32 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
 
     std::vector<std::thread> writers;   // Writers-pool.
-    std::atomic<int64_t> dl_remain(total_chunk);    // Count of chunks left to download from the device.
-    // Launch writers thread-pool to drain the processed chunks to the partition-backend from staging slabs.
+    std::atomic<int64_t> dl_remain(total_chunk);    // Count of slabs left to download from the device.
+    // Launch the writers thread-pool to drain the processed slabs to the partition-backend.
     {
         for(idx_t w = 0; w < writer_c_; ++w)
             writers.emplace_back(
-                [&]
+                [&, w]
                 {
+                    INSTRUMENT(probe::P().bind(probe::Role::writer, w));
                     while(dl_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
                     {
                         Staging_Slab* s;
-                        W.wait_dequeue(s);  // Get a processed slab.
-                        backend_->write(*s);    // Drain the slab.
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            W.wait_dequeue(s);  // Get a processed slab.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+#ifdef TESTS
+                        if(!test::validate_messages(*s, this, backend_->msg_off(s->p_id())))
+                        {
+                            std::cerr << "Message consistency verification: " << "Fails" << ". Aborting.\n";
+                            std::exit(EXIT_FAILURE);
+                        }
+#endif
+                        backend_->write(*s);    // Drain the slab's partition-content.
+                        backend_->write_messages(*s);   // Drain the slab's messages.
                         F.enqueue(s);   // This slab is free now.
                     }
                 }
@@ -898,31 +1262,118 @@ void GPU_SACA<T_sym_>::drive_pipeline()
     }
 
 
-    // Current thread itself is the GPU-dispatcher thread. It dispatches device-tasks by repeatedly:
-    // pulling a complete assembly and a free device-stream, and then dispatching these to the device
-    // (with an attached callback to add processed slabs to write-queue and free the device-stream).
+    std::vector<std::thread> dispatchers;   // Dispatchers-pool; one dispatcher per device-stream.
+    std::atomic<int64_t> dp_remain(active_part_c);  // Count of partitions left to dispatch to the device.
+    // Launch the dispatchers threads-pool to dispatch the device-tasks, by repeatedly
+    // pulling a complete assembly, dispatching it to its device-stream, and then
+    // handing it over to the writers after device-execution.
     {
-        for(p_id_t dispatched = 0; dispatched < active_part_c; ++dispatched)
-        {
-            idx_t s_id;                     FS.wait_dequeue(s_id);      // Get a free device-stream.
-            Partition_Assembly* p_assembly; R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
-            const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            dispatchers.emplace_back(
+                [&, s_id]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::dispatcher, s_id));
+                    while(dp_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Partition_Assembly* p_assembly;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
+                        }
 
-            if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
-            else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
+                        INSTRUMENT(probe::P().me().items++);
 
-            CUDA_CHECK(cudaLaunchHostFunc(stream[s_id], on_partition_download, new Partition_Download_Callback_Args{this, p_assembly, s_id}));
-        }
+                        const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
+#ifdef TESTS
+                        {
+                            idx_t read_msg = 0;
+                            for(auto* s : p_assembly->slab)
+                                read_msg += s->inbox_sz();
+
+                            if(read_msg != backend_->inbox_size(p_id))
+                            {
+                                std::cerr << "Read inbox size at current generation does not equal to written inbox size at previous generation. Aborting.\n";
+                                std::exit(EXIT_FAILURE);
+                            }
+                        }
+#endif
+                        if constexpr(init_rank_)    // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
+                            backend_->retire_prefix_and_open_key(p_id);
+
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().device_ns);
+                            if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
+                            else                        sort_and_re_rank_and_filter(p_id, *p_assembly, s_id);
+
+                            CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                        }
+
+                        for(auto* s : p_assembly->slab) // The processed slabs now move to the write queue.
+                            W.enqueue(s);
+                    }
+                }
+            );
     }
 
 
     // Wait for the pipeline to finish.
     {
-        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
-            CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-
+        read_poster.join();
         for(auto& r : readers)  r.join();
+        for(auto& c : stagers)  c.join();
+        for(auto& d : dispatchers)  d.join();   // Dispatchers feed the write-queue, so they must drain before the writers.
         for(auto& w : writers)  w.join();
+
+        INSTRUMENT(probe::P().stop_sampler());
+
+        backend_->close_generation();
+    }
+}
+
+    INSTRUMENT(probe::P().accumulate_pipeline_ns(pipeline_ns));
+}
+
+
+template <typename T_sym_>
+template <bool init_rank_>
+void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
+{
+    INSTRUMENT_TIMER(probe::P().me().stage_ns);
+
+    const auto stride = ctx_ / 2;   // Previous generation's context.
+    const auto sz = s.size();
+    const auto* const suf = s.suf();
+
+#ifdef TESTS
+    if constexpr(!init_rank_)
+    {
+        const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
+
+        for(idx_t i = 0; i < sz; ++i)
+        {
+            // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
+            // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
+            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, P_id))
+            {
+                std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+
+            if(i > 0 && !test::validate_coherent_tags(suf[i - 1], key[i - 1], suf[i], key[i]))
+            {
+                std::cerr << "Target coherence invariant broken. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+        }
+    }
+#endif
+
+    auto* const beta = s.beta();
+    for(idx_t i = 0; i < sz; ++i)
+    {
+        const auto j = bit_layout::suffix_of(suf[i]);
+        beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
+                                        init_rank_ || j < stride ? 0 : P_id[j - stride]);
     }
 }
 
@@ -932,53 +1383,200 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 {
     PROFILE_SCOPE_FMT("sort_and_re_rank_and_filter_p%d", static_cast<int>(p_id));
 
-    const auto part_sz = Active_sz[p_id];   // Size of the active-set of this partition.
 
-    cub::DoubleBuffer<idx_t> key(reinterpret_cast<idx_t*>(key_buf[buf_id][0]), reinterpret_cast<idx_t*>(key_buf[buf_id][1]));   // Input and output buffers for the keys of suffixes at the device.
-    cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);   // Input and output buffers for the suffixes at the device.
-    auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
-    auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
+    cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
+    cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
+    cub::DoubleBuffer<beta_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
+
+    static_assert(DEV_KEY_BYTES >= 2 * sizeof(idx_t), "Current device floor-plan requires at least two `idx_t` per entry.");
+    const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
+    idx_t* const A = reinterpret_cast<idx_t*>(key_buf[buf_id][0]);
+    idx_t* const B = reinterpret_cast<idx_t*>(key_buf[buf_id][1]);
+    p_sz_t* const primary = reinterpret_cast<p_sz_t*>(A);   // Bare local ranks, staged in.
+    p_sz_t* const primary_suf_ordered = primary + P_sz_max; // Local ranks in suffix-order.
+    idx_t* const K = B; // Composite keys, produced from join.
+    p_sz_t* local_rank = nullptr;   // Final primary ranks computed.
+
 
     // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
     {
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(key_buf[buf_id][0]) + s->off(), s->key(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(suf_buf[buf_id][0] + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(primary + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
 
 
-    // Sort the partition by (primary, secondary).
+    const auto part_sz = Active_sz[p_id];   // Size of the active-set of this partition.
+    auto workspace = workspace_buf[buf_id]; // Scratch space for `cub`.
+    auto ws_sz = workspace_sz;              // Size of the workspace; `cub` takes it via a non-const reference.
+    auto is_active = is_active_buf[buf_id]; // Activeness-marker flags.
+
+    constexpr std::size_t BLOCK_SZ = 256;
+    const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+
+    idx_t* K_sorted = nullptr;  // Sorted keys.
+    idx_t* SA_sorted = nullptr; // Suffixes corresponding to the sorted keys.
+    beta_t* beta_sorted = nullptr;  // Backward tags corresponding to the key-sorted suffixes.
+    idx_t* K_re_ranked = nullptr;   // Re-ranked keys.
+    idx_t* SA_re_ranked = nullptr;  // Suffixes in re-ranked order (bar the active | retired split).
+    beta_t* beta_re_ranked = nullptr;   // Backward tags corresponding to the re-ranked suffixes.
+    p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
+    idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
+    msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
+    idx_t* inbox_target = nullptr;  // Message-targets in the inbox of this partition.
+    msg_rank_t* inbox_rank = nullptr;   // Message-ranks in the inbox of this partition.
+    const auto inbox_sz = backend_->inbox_size(p_id);   // Size of the inbox.
+
+
+    // Sort the partition by suffix indices and consume the received messages.
     {
+        iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+
         CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-            workspace, workspace_sz,
-            key, suf,
+            workspace, ws_sz,
+            suf, perm,
             part_sz,
-            0, static_cast<int>(key_bits_),
+            0, static_cast<int>(bit_layout::SUF_BITS),
             stream[buf_id]
         ));
+
+        // Shuffle keys and backward tags per the suffix-index-order permutation.
+        shuffle_kernel<p_sz_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (primary_suf_ordered, primary, perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+
+        shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+        beta.selector ^= 1;
+    }
+
+
+    // Asynchronously upload this partition's inbox to the device.
+    {
+        inbox_target = A + P_sz_max;    // Bare local ranks have moved to `primary_suf_ordered`, at `A[4P, 8P)`.
+        inbox_rank = reinterpret_cast<msg_rank_t*>(B + P_sz_max);
+        if(inbox_sz > P_sz_max) // By injectivity, a partition cannot receive more messages than its capacity.
+        {
+            std::cerr <<    "Device-space for partition does not have enough space for its messages."
+                            " This is impossible due to the injectivity of rank-propagation messaging in a generation. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        for(auto* s : p_assembly.slab)
+            if(s->inbox_sz() > 0)
+            {
+                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->inbox_off(), s->msg_target(), s->inbox_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->inbox_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            }
+    }
+
+
+     // Join the inbox to the partition.
+    {
+        // Seed every key with `SECONDARY_ABSENT` to optionally catch any suffix which hasn't received a message, during the join.
+        CUDA_CHECK(cudaMemsetAsync(K, 0xFF, part_sz * sizeof(idx_t), stream[buf_id]));
+
+        if(inbox_sz > 0)
+        {
+            const auto block_count = (inbox_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+            join_messages_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (inbox_target, inbox_rank, inbox_sz, suf.Current(), primary_suf_ordered, K, part_sz);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    }
+
+
+    cub::DoubleBuffer<idx_t> key(K, A);
+
+
+    // Sort the partition by (primary, secondary, tertiary): two phase radix sort.
+    {
+        // Sort by the tertiary (forward tag).
+        {
+            // Populate identity permutation.
+            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            // Sort the forward tags.
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                workspace, ws_sz,
+                suf, perm,  // The tertiary (forward tag) is packed in suffix.
+                part_sz,
+                static_cast<int>(bit_layout::TAG_SHIFT), static_cast<int>(bit_layout::WORD_BITS),
+                stream[buf_id]
+            ));
+
+            // Shuffle keys and backward tags per the forward-tag-order permutation.
+            shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (key.Alternate(), key.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            key.selector ^= 1;
+
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            beta.selector ^= 1;
+        }
+
+
+        // Sort by (primary, secondary).
+        {
+            // Populate identity permutation.
+            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+
+            // Sort the (primary, secondary) ranks.
+            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+                workspace, ws_sz,
+                key, perm,
+                part_sz,
+                0, bit_layout::KEY_BITS,
+                stream[buf_id]
+            ));
+
+            // Shuffle suffixes and backward tags per the (primary, secondary)-order permutation.
+            shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            suf.selector ^= 1;
+
+            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+                (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
+            CUDA_CHECK(cudaGetLastError());
+            beta.selector ^= 1;
+
+            K_sorted = key.Current(), K_re_ranked = key.Alternate();
+            SA_sorted = suf.Current(), SA_re_ranked = suf.Alternate();
+            beta_sorted = beta.Current(), beta_re_ranked = beta.Alternate();
+        }
     }
 
 
     // Re-rank and filter the sort-output.
-    const auto sort_op_selector = key.selector; // Which buffer holds the sort-output.
     {
-        idx_t* const K = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);   // The sort-output.
-        idx_t* const key_group_rank = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);  // Distinct key groups' ranks.
-        idx_t* const primary_key_group_rank = key_group_rank + part_sz; // Distinct primary-key groups' ranks.
-
-        constexpr std::size_t BLOCK_SZ = 256;
-        const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+        idx_t* const key_group_rank = K_re_ranked;    // Distinct key groups' ranks.
+        idx_t* const primary_key_group_rank = key_group_rank + P_sz_max;    // Distinct primary-key groups' ranks.
 
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank, is_active);
+                (K_sorted, SA_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active, unserved_c_d);
+#ifdef TESTS
+            cudaLaunchHostFunc(stream[buf_id], fatal_error_callback, std::string("target coherence invariant violated").data());
+#else
             CUDA_CHECK(cudaGetLastError());
+#endif
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 key_group_rank, key_group_rank,
                 cub::Max(),
                 part_sz,
@@ -986,7 +1584,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             ));
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
-                workspace, workspace_sz,
+                workspace, ws_sz,
                 primary_key_group_rank, primary_key_group_rank,
                 cub::Max(),
                 part_sz,
@@ -998,7 +1596,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Refine rankings to finer resolution based on the in-primary-key-group offsets of different key groups.
         {
             refine_primary_keys_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K, part_sz, secondary_bits_, key_group_rank, primary_key_group_rank);
+                (K_sorted, part_sz, key_group_rank, primary_key_group_rank);
             CUDA_CHECK(cudaGetLastError());
         }
 
@@ -1006,16 +1604,11 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // TODO: refactor all the repeated code between sort-and-initial-rank and sort-and-rank, with a `bool` template parameter.
         // Group non-unique rank keys and suffixes to the head and the rest to the tail of the partition.
         {
-            const idx_t* const K_in     = reinterpret_cast<idx_t*>(key_buf[buf_id][sort_op_selector]);  assert(K_in == K);
-            const idx_t* const SA_in    = suf_buf[buf_id][sort_op_selector];
-            idx_t* const K_out          = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
-            idx_t* const SA_out         = suf_buf[buf_id][1 - sort_op_selector];
-
             CUDA_CHECK(cub::DevicePartition::Flagged(
-                workspace, workspace_sz,
-                thrust::make_zip_iterator(thrust::make_tuple(K_in, SA_in)),
+                workspace, ws_sz,
+                thrust::make_zip_iterator(thrust::make_tuple(K_sorted, SA_sorted, beta_sorted)),
                 is_active,
-                thrust::make_zip_iterator(thrust::make_tuple(K_out, SA_out)),
+                thrust::make_zip_iterator(thrust::make_tuple(K_re_ranked, SA_re_ranked, beta_re_ranked)),
                 active_set_sz_d + p_id,
                 part_sz,
                 stream[buf_id]
@@ -1024,81 +1617,59 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     }
 
 
+    // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
+    {
+        msg_target = K_sorted;
+        msg_rank = reinterpret_cast<msg_rank_t*>(SA_sorted);
+        msg_off = msg_off_buf[buf_id];
+
+        CUDA_CHECK(cudaMemsetAsync(msg_off, 0, (p_ + 1) * sizeof(p_sz_t), stream[buf_id]));
+        count_message_destination_distribution_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_re_ranked, K_re_ranked, beta_re_ranked, part_sz, ctx_, msg_off);
+        CUDA_CHECK(cudaGetLastError());
+
+        CUDA_CHECK(cub::DeviceScan::ExclusiveSum(
+            workspace, ws_sz,
+            msg_off, msg_off,
+            p_ + 1,
+            stream[buf_id]
+        ));
+
+        emit_messages_kernel<true, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_re_ranked, K_re_ranked, beta_re_ranked, part_sz, ctx_, active_set_sz_d + p_id, msg_target, msg_rank, msg_off);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
+    // Narrow the rank-width for persisting as `p_sz_t`.
+    {
+        local_rank = reinterpret_cast<p_sz_t*>(K_re_ranked + P_sz_max);
+        extract_primary_keys_kernel<true, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (K_re_ranked, local_rank, part_sz);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
-        const idx_t* const K_out    = reinterpret_cast<idx_t*>(key_buf[buf_id][1 - sort_op_selector]);
-        const idx_t* const SA_out   = suf_buf[buf_id][1 - sort_op_selector];
+        CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
+        const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
+
+        idx_t c_id = 0; // Chunk-ID.
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<idx_t*>(s->key()), K_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_out + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        }
-    }
-}
+            const auto chunk_outbox_off = 2 * c_id++ * chunk_cap_;  // Offset in the outbox for this slab.
+            const auto chunk_outbox_sz = (chunk_outbox_off < outbox_sz ? std::min<idx_t>(2 * chunk_cap_, outbox_sz - chunk_outbox_off) : 0);    // Count of outbox messages for this slab.
+            s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
-
-template <typename T_sym_>
-void CUDART_CB GPU_SACA<T_sym_>::on_partition_download(void* const arg)
-{
-    auto* const cb_arg = static_cast<Partition_Download_Callback_Args*>(arg);
-    auto* const self = cb_arg->self;
-    auto* const p_assembly = cb_arg->p_assembly;
-    const auto s_id = cb_arg->s_id;
-
-    for(auto* s : p_assembly->slab) // The processed slabs move to the write queue.
-        self->W.enqueue(s);
-
-    self->FS.enqueue(s_id);   // This stream is now free to process a new partition.
-    delete cb_arg;
-}
-
-
-template <typename T_sym_>
-void GPU_SACA<T_sym_>::update_global_ranks()
-{
-    for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        if(Active_sz[p_id] != 0)    // Skip partitions with empty active-sets.
-            update_global_rank(p_id);
-}
-
-
-template <typename T_sym_>
-void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
-{
-    const auto sz = Active_sz[p_id];
-    const auto rank_off = P_off[p_id];
-
-    if(backend_->resident_suf(p_id) != nullptr) // Resident fast path.
-    {
-        const auto* const suf = backend_->resident_suf(p_id);
-        const auto* const key = backend_->resident_key(p_id);
-
-        #pragma omp parallel for schedule(static)
-        for(idx_t i = 0; i < sz; ++i)
-        {
-            const auto j = suf[i];  // Suffix.
-            const auto r_j = key[i];    // Local rank.
-            rho[j] = rank_off + r_j;    // Global rank.
-        }
-
-        return;
-    }
-
-    auto& s = S[0];
-    idx_t* const suf = s.suf();
-    idx_t* const key = reinterpret_cast<idx_t*>(s.key());
-    for(idx_t off = 0; off < sz;)
-    {
-        const idx_t to_read = std::min(chunk_cap_, sz - off);
-        backend_->read_chunk(p_id, off, to_read, suf, key);
-        off += to_read;
-
-        #pragma omp parallel for schedule(static)
-        for(idx_t i = 0; i < to_read; ++i)
-        {
-            const auto j = suf[i];  // Suffix.
-            const auto r_j = key[i];    // Local rank.
-            rho[j] = rank_off + r_j;    // Global rank.
+            CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            if(chunk_outbox_sz > 0)
+            {
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            }
         }
     }
 }
@@ -1107,28 +1678,51 @@ void GPU_SACA<T_sym_>::update_global_rank(const p_id_t p_id)
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
-    constexpr idx_t ell = K;
-    for(idx_t k = ell; k < n_; k *= 2)
+    // Open the inboxes that initial-ranking didn't need to write to.
+    {
+        PROFILE_SCOPE("open_deferred_inboxes");
+        backend_->open_deferred_inboxes();
+    }
+
+
+    idx_t gen = 1;
+    for(idx_t k = ell; k < n_; k *= 2, ++gen)
     {
         PROFILE_SCOPE_FMT("doubling_iter_k_%lu", static_cast<unsigned long>(k));
-        const auto t_0 = caps_sa::timer::now();
+
+#ifdef STATS
+        {
+            const idx_t msg_count = backend_->inbox_mass_last_gen();
+            const idx_t active = active_set_size();
+            std::cerr <<    "Total inbox-size for generation " << gen << ": " << msg_count << "; number of recipients: " << active_set_size() <<
+                            ". Amplification: " << (static_cast<double>(msg_count) / active) << "x.\n";
+        }
+#endif
+
+#ifdef TESTS
+        if(!test::validate_inbox_mass(*backend_))
+        {
+            std::cerr << "Inbox-mass validation failed for generation " << gen << ". Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+#endif
+
+        INSTRUMENT(probe::P().begin_iteration(gen, k, std::accumulate(Active_sz.cbegin(), Active_sz.cend(), idx_t(0))));
+        const auto t_0 = gpu_saca::timer::now();
 
         // Pass current prefix-context size to the backend so that readers can exponentiate the context-sizes.
         {
             // PROFILE_SCOPE("cpu_gather"); // TODO: relocate properly.
-            backend_->set_prefix_context(k);
+            set_context(2 * k, gen);
         }
 
         // Sort-and-rank each partition.
         {
             PROFILE_SCOPE("sort_and_rank_dispatch");
+#ifdef TESTS
+            CUDA_CHECK(cudaMemset(unserved_c_d, 0, sizeof(idx_t)));
+#endif
             drive_pipeline<false>();
-        }
-
-        // Update global-ranks based on the updated local-ranks.
-        {
-            PROFILE_SCOPE("update_global_ranks");
-            update_global_ranks();
         }
 
         // Resize the partitions to their active-set size.
@@ -1138,21 +1732,34 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
         }
 
-        const auto t_1 = caps_sa::timer::now();
+#ifdef TESTS
+        {
+            idx_t unserved_c_h;
+            CUDA_CHECK(cudaMemcpy(&unserved_c_h, unserved_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
+            if(unserved_c_h > 0)
+            {
+                std::cerr << "Active suffixes with no message received: " << unserved_c_h << ". Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+        }
+#endif
+
+        const auto t_1 = gpu_saca::timer::now();
         (void)t_0, (void)t_1;
 
 
         // Check for early-exit.
         {
             p_id_t sorted_part = 0; // Count of partitions that are already fully-sorted (by prefix-context size `2k`).
-            idx_t unsorted = 0; // Count of suffixes with non-unique ranks.
+            const auto unsorted = active_set_size();    // Count of suffixes with non-unique ranks.
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                sorted_part += (Active_sz[p_id] == 0),
-                unsorted += Active_sz[p_id];
+                sorted_part += (Active_sz[p_id] == 0);
 #ifdef STATS
-            std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << ". Time taken in iteration: " << caps_sa::timer::duration(t_1 - t_0) << "s."
+            std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << ". Time taken in iteration: " << gpu_saca::timer::duration(t_1 - t_0) << "s."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
 #endif
+
+            INSTRUMENT(probe::P().report_log());
 
             if(sorted_part == p_)   // All partitions have already been sorted.
                 break;
@@ -1162,53 +1769,264 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
+void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assembly& p_assembly, const idx_t buf_id)
 {
-    SA = rho;
-    rho = nullptr;
+    PROFILE_SCOPE_FMT("scatter_to_rank_order_p%d", static_cast<int>(p_id));
 
-    auto& s = S[0];
-    idx_t* const suf = s.suf();
-    idx_t* const key = reinterpret_cast<idx_t*>(s.key());
+    static_assert(DEV_KEY_BYTES >= sizeof(p_sz_t), "Current device floor-plan requires at least one local-rank per entry.");
+    idx_t* const suf = suf_buf[buf_id][0];
+    p_sz_t* const rank = reinterpret_cast<p_sz_t*>(key_buf[buf_id][0]);
+    idx_t* const SA_local = suf_buf[buf_id][1]; // The partition's slice of the suffix array.
+    const auto part_sz = P_cap[p_id];
 
-    // Place the partitions at their appropriate offsets and shuffle the in-
-    // partition suffixes per their local-rank.
-    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+    // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
     {
-        const auto sz = P_cap[p_id];
-        const auto off = P_off[p_id];
-
-        if(backend_->resident_suf(p_id) != nullptr) // Resident fast path.
+        for(auto* s : p_assembly.slab)
         {
-            const auto* const suf = backend_->resident_suf(p_id);
-            const auto* const key = backend_->resident_key(p_id);
-
-            #pragma omp parallel for schedule(static)
-            for(idx_t i = 0; i < sz; ++i)
-            {
-                const auto j = suf[i];  // Suffix.
-                const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
-                SA[off + r_j] = j;
-            }
-
-            continue;
-        }
-
-        for(idx_t chunk_off = 0; chunk_off < sz;)
-        {
-            const auto chunk_sz = std::min(chunk_cap_, sz - chunk_off);
-            backend_->read_chunk(p_id, chunk_off, chunk_sz, suf, key);
-            chunk_off += chunk_sz;
-
-            #pragma omp parallel for schedule(static)
-            for(idx_t i = 0; i < chunk_sz; ++i)
-            {
-                const auto j = suf[i];  // Suffix.
-                const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
-                SA[off + r_j] = j;
-            }
+            CUDA_CHECK(cudaMemcpyAsync(suf + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(rank + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
+
+
+    // Shuffle the suffixes into their rank-order.
+    {
+        constexpr std::size_t BLOCK_SZ = 256;
+        const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
+
+        scatter_suffixes_to_rank_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (suf, rank, SA_local, part_sz);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
+    // Asynchronously download the rank-ordered partition in a chunked manner to host slabs.
+    {
+        for(auto* s : p_assembly.slab)
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_local + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+    }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
+{
+#ifdef PROBE
+    uint64_t pipeline_ns = 0;
+#endif
+{
+    INSTRUMENT_TIMER(pipeline_ns);
+
+    INSTRUMENT(probe::P().init(reader_c_, 0, dispatcher_c_, writer_c_, slab_c_, admit_budget_));
+    INSTRUMENT(probe::P().begin_iteration(cohort_sz.size(), 0, n_));
+    INSTRUMENT(probe::P().set_depth_reader([this](uint64_t* const d)
+    {
+        d[0] = F.size_approx();
+        d[1] = probe::QUEUE_ABSENT; // No host-side staging-compute in concatenation.
+        d[2] = R.size_approx();
+        d[3] = W.size_approx();
+    }));
+    INSTRUMENT(probe::P().start_sampler());
+
+    // Open the output file and preallocate it.
+    const auto fd = ::open(op.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); // Only owner can read-write, others read-only.
+    if(fd < 0)
+        util::file::exit_on_io_failure("open", op);
+
+    if(::fallocate(fd, 0, 0, n_ * sizeof(idx_t)) != 0)
+        util::file::exit_on_io_failure("fallocate", op);
+
+
+    idx_t total_chunk = 0;  // Total count of chunks across all partitions.
+    p_id_t part_c = 0;  // Count of non-empty partitions.
+
+    std::thread read_poster;
+    moodycamel::LightweightSemaphore admit(admit_budget_);
+    // Post read-tasks under admission control: a partition's read-tasks are posted only if
+    // `admit_budget_` has room for its whole assembly.
+    {
+        // Prepare read-tasks in partition order.
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        {
+            if(P_cap[p_id] == 0)    // Skip empty partitions; they have no content to concatenate.
+                continue;
+
+            part_c++;
+
+            const idx_t chunk_c = (P_cap[p_id] + chunk_cap_ - 1) / chunk_cap_;  // Number of slabs required to hold this partition.
+            total_chunk += chunk_c;
+
+            // Prepare skeleton chain of chunks of this partition.
+            part_assembly[p_id].slab.assign(chunk_c, nullptr);
+            part_assembly[p_id].slabs_to_stage.store(chunk_c, std::memory_order_relaxed);
+        }
+
+        read_poster = std::thread(
+            [&]
+            {
+                for(p_id_t p_id = 0; p_id < p_; ++p_id)
+                {
+                    if(P_cap[p_id] == 0)    // Skip empty partitions.
+                        continue;
+
+                    const idx_t chunk_c = part_assembly[p_id].slab.size();  // Number of slabs required to hold this partition.
+                    for(idx_t chunk_res = 0; chunk_res < chunk_c;)  // Reserve the assembly's slabs, piecemeal.
+                        chunk_res += static_cast<idx_t>(admit.waitMany(chunk_c - chunk_res));
+
+                    const auto sz = P_cap[p_id];
+                    for(idx_t c = 0; c < chunk_c; ++c) // Post a read-task for each chunk of this partition.
+                    {
+                        const auto chunk_off = c * chunk_cap_;
+                        RT.enqueue(Read_Task{p_id, c, chunk_off, std::min(chunk_cap_, sz - chunk_off), 0, 0});
+                    }
+                }
+            }
+        );
+    }
+
+
+    std::vector<std::thread> readers;   // Readers-pool.
+    std::atomic<int64_t> rt_remain(total_chunk);    // Count of read-tasks left to claim.
+    // Launch the readers thread-pool to read chunks from the partition-backend to staging slabs, and post
+    // completed assemblies for dispatch.
+    {
+        for(idx_t r = 0; r < reader_c_; ++r)
+            readers.emplace_back(
+                [&, r]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::reader, r));
+                    while(rt_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Read_Task rt;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            RT.wait_dequeue(rt);    // Get a read-task.
+                        }
+
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_slab_ns);
+                            F.wait_dequeue(s);      // Get a free slab.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
+                        s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
+                        backend_->read_keys(*s);
+
+                        auto& p_assembly = part_assembly[rt.p_id];
+                        p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
+                        const auto prev = p_assembly.slabs_to_stage.fetch_sub(1, std::memory_order_acq_rel);
+                        INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
+                        if(prev == 1)   // Last slab read for this partition; chunked-assembly is ready for the device.
+                        {
+                            backend_->retire_partition(rt.p_id);    // The partition's backend is dead onward.
+                            R.enqueue(&p_assembly);
+                            admit.signal(p_assembly.slab.size());   // These slabs are guaranteed to return to the free-pool `F`, so early signalling is safe.
+                        }
+                    }
+                }
+            );
+    }
+
+
+    std::vector<std::thread> writers;   // Writers-pool.
+    std::atomic<int64_t> dl_remain(total_chunk);    // Count of slabs left to download from the device.
+    // Launch the writers thread-pool to drain the processed slabs to the output file.
+    {
+        for(idx_t w = 0; w < writer_c_; ++w)
+            writers.emplace_back(
+                [&, w]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::writer, w));
+                    while(dl_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Staging_Slab* s;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            W.wait_dequeue(s);  // Get a processed slab.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().io_ns);
+                            INSTRUMENT(probe::P().me().bytes += s->size() * sizeof(idx_t));
+
+                            // Drain the slab's suffixes.
+                            util::file::write_and_flush(fd, op, s->suf(), s->size() * sizeof(idx_t), (P_off[s->p_id()] + s->off()) * sizeof(idx_t));
+                        }
+
+                        F.enqueue(s);   // This slab is free now.
+                    }
+                }
+            );
+    }
+
+
+    std::vector<std::thread> dispatchers;   // Dispatchers-pool; one dispatcher per device-stream.
+    std::atomic<int64_t> dp_remain(part_c); // Count of partitions left to dispatch to the device.
+    // Launch the dispatchers threads-pool to dispatch the device-tasks, by repeatedly
+    // pulling a complete assembly, dispatching it to its device-stream, and then
+    // handing it over to the writers after device-execution.
+    {
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            dispatchers.emplace_back(
+                [&, s_id]
+                {
+                    INSTRUMENT(probe::P().bind(probe::Role::dispatcher, s_id));
+                    while(dp_remain.fetch_sub(1, std::memory_order_relaxed) > 0)    // Claim a ticket.
+                    {
+                        Partition_Assembly* p_assembly;
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
+                            R.wait_dequeue(p_assembly); // Get the complete chunked-assembly of a partition.
+                        }
+
+                        INSTRUMENT(probe::P().me().items++);
+
+                        const p_id_t p_id = p_assembly - part_assembly.get();       // ID of the partition this assembly corresponds to.
+
+                        {
+                            INSTRUMENT_TIMER(probe::P().me().device_ns);
+                            scatter_to_rank_order(p_id, *p_assembly, s_id);
+
+                            CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                        }
+
+                        for(auto* s : p_assembly->slab) // The processed slabs now move to the write queue.
+                            W.enqueue(s);
+                    }
+                }
+            );
+    }
+
+
+    // Wait for the pipeline to finish.
+    {
+        read_poster.join();
+        for(auto& r : readers)  r.join();
+        for(auto& d : dispatchers)  d.join();   // Dispatchers feed the write-queue, so they must drain before the writers.
+        for(auto& w : writers)  w.join();
+
+        INSTRUMENT(probe::P().stop_sampler());
+    }
+
+
+    // Close the output file.
+    {
+        // The earlier per-chunk `sync_file_range`s only queued writebacks, with no guarantees on
+        // actual completions. Therefore block until the writes physically complete.
+        if(::fsync(fd) != 0)
+            util::file::exit_on_io_failure("fsync", op);
+
+        if(::close(fd) != 0)
+            util::file::exit_on_io_failure("close", op);
+    }
+}
+
+    INSTRUMENT(probe::P().accumulate_pipeline_ns(pipeline_ns));
+    INSTRUMENT(probe::P().report_log());
 }
 
 

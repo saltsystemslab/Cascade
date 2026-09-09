@@ -1,5 +1,7 @@
 
 #include "tests.hpp"
+#include "Packed_Prefix.hpp"
+#include "bit-layout.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
@@ -20,6 +22,7 @@ bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p
     auto* const suf_buf = util::aligned_allocate<idx_t>(Direct_File::block_up(P_sz_max * sizeof(idx_t)) / sizeof(idx_t), Direct_File::DISK_BLOCK);  // Buffer to read-in the whole suffix-file of a partition.
     auto* const pre_buf = util::aligned_allocate<Prefix_Key>(Direct_File::block_up(P_sz_max * sizeof(Prefix_Key)) / sizeof(Prefix_Key), Direct_File::DISK_BLOCK);   // Buffer to read-in the whole prefix-key-file of a partition.
     uint8_t* present = util::allocate<uint8_t>(n); // Whether each suffix is present in the partitions.
+    constexpr idx_t ell = ELL_WORDS * sizeof(idx_t) / sizeof(T_sym_);   // Prefix-size of the initial sort-keys.    TODO: tie it to the actual `GPU_SACA::ell` instead of recomputing it here.
 
     #pragma omp parallel for schedule(static)
     for(idx_t i = 0; i < n; ++i)
@@ -37,8 +40,9 @@ bool validate_partition_contents(const T_sym_* const T_h, const idx_t n, const p
         #pragma omp parallel for schedule(static) reduction(&& : content_match)
         for(idx_t i = 0; i < sz; ++i)
         {
-            const auto j = suf_buf[i];
-            if(j >= n || P_id[j] != p_id || present[j] || pre_buf[i] != Prefix_Key::pack_prefix(T_h + j))
+            const auto j = bit_layout::suffix_of(suf_buf[i]);
+            const auto phi = (j + ell < n ? P_id[j + ell] : p_id_t(0));
+            if(j >= n || P_id[j] != p_id || present[j] || pre_buf[i] != Prefix_Key::pack_prefix(T_h + j) || bit_layout::tag_of(suf_buf[i]) != phi)
                 content_match = false;
 
             present[j] = 1;

@@ -4,7 +4,7 @@
 
 
 
-#include "Prefix_Key.hpp"
+#include "Packed_Prefix.hpp"
 #include "Direct_File.hpp"
 #include "types.hpp"
 #include "utility.hpp"
@@ -25,7 +25,7 @@ class Suffix_Buffer
 {
 private:
 
-    static constexpr std::size_t w_buf_cap = 256 * 1024llu / sizeof(idx_t); // Worker-local buffers overflow at reaching 256 KB worth of suffixes.
+    static constexpr std::size_t w_buf_cap = 32 * 1024llu / sizeof(idx_t);  // Worker-local buffers overflow at reaching 32 KBs worth of suffixes.
 
     static_assert((w_buf_cap * sizeof(idx_t)) % Direct_File::DISK_BLOCK == 0);
     static_assert((w_buf_cap * sizeof(Prefix_Key)) % Direct_File::DISK_BLOCK == 0);

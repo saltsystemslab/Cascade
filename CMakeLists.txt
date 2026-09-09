@@ -83,8 +83,12 @@ list(APPEND COMPILE_FLAGS $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
 add_compile_definitions(PROJECT_VERSION=${CMAKE_PROJECT_VERSION})
 add_compile_definitions(_GNU_SOURCE)    # For `O_DIRECT` support.
 
-if(ELL)
-    add_compile_definitions(ELL=${ELL})
+if(PREF_KEY_WORDS)
+    add_compile_definitions(PREF_KEY_WORDS=${PREF_KEY_WORDS})
+endif()
+
+if(PIVOT_WORDS)
+    add_compile_definitions(PIVOT_WORDS=${PIVOT_WORDS})
 endif()
 
 if(TESTS)
@@ -97,6 +101,10 @@ endif()
 
 if(STATS)
     add_compile_definitions(STATS)
+endif()
+
+if(PROBE)
+    add_compile_definitions(PROBE)
 endif()
 
 if(PROFILE)
@@ -166,9 +174,16 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 
+# This controls the `-I` (include paths) switch of the compiler invocation.
+set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
+set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
+
+
 # Add required subdirectories to the build.
 add_subdirectory(src)
 add_subdirectory(test)
+
+add_subdirectory(benchmark)
 
 
 # Set some CUDA-specific properties.
@@ -191,11 +206,13 @@ set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 # Define dependencies between the targets.
 add_dependencies(${PROJECT_NAME} core)
 add_dependencies(core prj_concurrentqueue)
+add_dependencies(tests prj_concurrentqueue) # TODO: fix this hack.
 
 
 # Set the compile flags for the targets.
 
 target_compile_options(core PRIVATE ${COMPILE_FLAGS})
+target_compile_options(tests PRIVATE ${COMPILE_FLAGS})
 target_compile_options(libcubwt PRIVATE ${COMPILE_FLAGS})
 
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_FLAGS})
@@ -205,6 +222,7 @@ target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
 # `nvcc` does not recognize OpenMP directives.
 target_compile_options(core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
+target_compile_options(tests PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
 
 
 # Link appropriate libraries and targets.
@@ -215,6 +233,7 @@ target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
 target_link_libraries(core PRIVATE CUDA::cudart)
+target_link_libraries(tests PRIVATE CUDA::cudart)
 
 # Link to OpenMP for host-side parallel tasks.
 target_link_libraries(core PRIVATE OpenMP::OpenMP_CXX)
