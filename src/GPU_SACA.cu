@@ -120,6 +120,14 @@ void GPU_SACA<T_sym_>::build_SA()
 
     std::cerr << "Sequence length: " << n_ << "\n";
 
+    {
+        const auto t_a = now();
+        {   PROFILE_SCOPE("fault_in_partition_IDs");    util::prepage(P_id, n_);   }
+        const auto t_b = now();
+        std::cerr   << "Partition-ID map prepaging completed. Time taken: " << duration(t_b - t_a) << "s"
+                    << " (" << (n_ * sizeof(p_id_t) / (1024.0 * 1024.0 * 1024.0) / duration(t_b - t_a)) << " GBs/s).\n";
+    }
+
     {   PROFILE_SCOPE("load_text");                 load_text();    }
 
     const auto t_0 = now();
@@ -190,15 +198,20 @@ void GPU_SACA<T_sym_>::load_text()
     T_h_ = util::checked_allocate<T_sym_>(sym_count + null_count);
     const auto t_1 = timer::now();
 
+    util::prepage(T_h_, sym_count + null_count);
+    const auto t_2 = timer::now();
+
     util::read_file(ip_path_, T_h_, sym_count);
     for(idx_t i = 0; i < null_count; ++i)
         T_h_[sym_count + i] = std::numeric_limits<T_sym_>::min();
-    const auto t_2 = timer::now();
+    const auto t_3 = timer::now();
 
     std::cerr   << "Text-buffer allocation completed. Time taken: " << timer::duration(t_1 - t_0) << "s"
                 << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_1 - t_0)) << " GBs/s).\n";
-    std::cerr   << "Text-read completed. Time taken: " << timer::duration(t_2 - t_1) << "s"
+    std::cerr   << "Text-buffer prepaging completed. Time taken: " << timer::duration(t_2 - t_1) << "s"
                 << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_2 - t_1)) << " GBs/s).\n";
+    std::cerr   << "Text-read completed. Time taken: " << timer::duration(t_3 - t_2) << "s"
+                << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_3 - t_2)) << " GBs/s).\n";
 }
 
 

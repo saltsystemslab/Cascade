@@ -78,6 +78,7 @@ namespace gpu_saca::util
 {
 
 constexpr std::size_t L1_CACHE_LINE_SIZE = 64;
+constexpr std::size_t PAGE_SIZE = 4096;
 
 
 // Wrapper class for a data-element of type `T_` to ensure that in a linear
@@ -177,6 +178,20 @@ template <typename T_>
 void deallocate(T_* const ptr)
 {
     std::free(ptr);
+}
+
+
+// Prepages `size` elements (of type `T_`) from address `ptr`, in parallel. The
+// pages are supposed to be first-touched here; if data already exists, some of
+// it will be destroyed.
+template <typename T_>
+void prepage(T_* const ptr, const std::size_t size)
+{
+    constexpr std::size_t stride = (PAGE_SIZE + sizeof(T_) - 1) / sizeof(T_);   // Elements spanning a page.
+
+    #pragma omp parallel for schedule(static)
+    for(std::size_t i = 0; i < size; i += stride)
+        ptr[i] = T_();
 }
 
 
