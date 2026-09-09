@@ -1,6 +1,5 @@
 
 #include "Residency_Plan.hpp"
-#include "utility.hpp"
 #include "env.hpp"
 
 #include <numeric>
@@ -12,13 +11,12 @@
 namespace gpu_saca
 {
 
-Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_t fixed_bytes, const std::size_t prefix_elem_bytes):
+Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_t budget, const std::size_t fixed_bytes, const std::size_t prefix_elem_bytes):
       data_(P_cap.size(), 0)
     , prefix_(P_cap.size(), 0)
 {
-    const auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
 
-    const auto budget = env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>(MEM_SAFETY_FRACTION * util::available_memory()));
     if(budget < fixed_bytes)
     {
         std::cerr << "The host memory-budget of " << GB(budget) << "GBs cannot fit the fixed requirement of " << GB(fixed_bytes) << "GBs. Aborting.\n";
@@ -45,10 +43,11 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
         return admitted;
     };
 
+    constexpr auto data_elem_bytes = sizeof(idx_t) + sizeof(p_sz_t);    // Per-suffix cost of a partition's content: suffix index and local rank.
     std::size_t data_resident = 0, prefix_resident = 0;
     if(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) == 0)   // `GPU_SACA_FORCE_SPILL` spills all data regardless of the budget.
     {
-        data_resident = admit(data_, 2 * sizeof(idx_t));
+        data_resident = admit(data_, data_elem_bytes);
         prefix_resident = admit(prefix_, prefix_elem_bytes);
     }
 
@@ -58,7 +57,7 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
     const auto prefix_c = std::count(prefix_.cbegin(), prefix_.cend(), 1);
         std::cerr << "Residency plan (budget: " << GB(budget) << "GBs, fixed: " << GB(fixed_bytes) << "GBs):\n"
               << "\tdata:   " << data_c << "/" << P_cap.size() << " partitions, "
-              << GB(data_resident) << "GBs resident, " << GB(2 * sizeof(idx_t) * n - data_resident) << "GBs spilled.\n"
+              << GB(data_resident) << "GBs resident, " << GB(n * data_elem_bytes - data_resident) << "GBs spilled.\n"
               << "\tprefix: " << prefix_c << "/" << P_cap.size() << " partitions, "
               << GB(prefix_resident) << "GBs resident, " << GB(prefix_elem_bytes * n - prefix_resident) << "GBs spilled.\n";
 #else

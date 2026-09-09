@@ -13,14 +13,33 @@
 namespace gpu_saca
 {
 
-// Types / roles of per-partition spill files. A partition has three separate
-// spill files: `suf`- / `key`-file holds the partition's suffix- / key-content.
+// Types / roles of per-partition spill files. A partition has the following
+// spill files: `suf`- / `key`-file holds the partition's suffix- / key-content,
+// `prefix`-file holds the initial prefix-keys, and two pairs (for alternating
+// generations) of message-inbox files (`tgt_tag` holds the targets with the
+// senders' forward tags packed in, and `rank` holds the senders' ranks).
 enum class Spill_Role
 {
+    // Following are partition-content.
     prefix, // Initial packed-prefixes.
     suf,    // Suffixes, parallel to `prefix` and `key`.
     key,    // Keys (local ranks), parallel to `suf`.
+
+    // Following are message-inboxes.
+    msg_tgt_tag_0,  // Message targets, with senders' forward tags packed in; even-parity inbox.
+    msg_rank_0,     // Senders' ranks, parallel to `tgt_tag_0`.
+    msg_tgt_tag_1,  // Message targets, with senders' forward tags packed in; odd-parity inbox.
+    msg_rank_1,     // Senders' ranks, parallel to `tgt_tag_1`.
 };
+
+
+// Returns the message-target inbox role a generation with parity `parity`
+// writes to.
+constexpr Spill_Role msg_tgt_tag_role(const idx_t parity) { return parity ? Spill_Role::msg_tgt_tag_1 : Spill_Role::msg_tgt_tag_0;  }
+
+// Returns the message-rank inbox role a generation with parity `parity` writes
+// to.
+constexpr Spill_Role msg_rank_role(const idx_t parity) { return parity ? Spill_Role::msg_rank_1 : Spill_Role::msg_rank_0; }
 
 
 // Manager of a partition's spill-files.

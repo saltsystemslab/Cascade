@@ -22,13 +22,40 @@
 #include <chrono>
 
 
-namespace caps_sa::timer
+namespace gpu_saca::timer
 {
     // Fields for profiling time.
 
     typedef std::chrono::high_resolution_clock::time_point time_point_t;
     const static auto now = std::chrono::high_resolution_clock::now;
     const static auto duration = [](const std::chrono::nanoseconds& d) { return std::chrono::duration_cast<std::chrono::duration<double>>(d).count(); };
+
+    // Scope-timer, based on RAII mechanism.
+    class Scope_Timer
+    {
+    private:
+
+        uint64_t* const sink_;  // Where to accumulate the scope's timing.
+        const uint64_t t0_; // Initial timestamp of the timer's scope.
+
+        // Returns the current timestamp in nanoseconds.
+        static uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+
+    public:
+
+        // Constructs a scope-timer accumulating its timing to `sink`.
+        explicit Scope_Timer(uint64_t& sink):
+              sink_(&sink)
+            , t0_(now_ns())
+        {}
+
+        ~Scope_Timer() { *sink_ += (now_ns() - t0_); }
+
+        Scope_Timer(const Scope_Timer&) = delete;
+        Scope_Timer& operator=(const Scope_Timer&) = delete;
+        Scope_Timer(Scope_Timer&&) = delete;
+        Scope_Timer& operator=(Scope_Timer&&) = delete;
+    };
 }
 
 
@@ -51,6 +78,7 @@ namespace gpu_saca::util
 {
 
 constexpr std::size_t L1_CACHE_LINE_SIZE = 64;
+constexpr std::size_t PAGE_SIZE = 4096;
 
 
 // Wrapper class for a data-element of type `T_` to ensure that in a linear
@@ -153,22 +181,22 @@ void deallocate(T_* const ptr)
 }
 
 
+// Prepages `size` elements (of type `T_`) from address `ptr`, in parallel. The
+// pages are supposed to be first-touched here; if data already exists, some of
+// it will be destroyed.
+template <typename T_>
+void prepage(T_* const ptr, const std::size_t size)
+{
+    constexpr std::size_t stride = (PAGE_SIZE + sizeof(T_) - 1) / sizeof(T_);   // Elements spanning a page.
+
+    #pragma omp parallel for schedule(static)
+    for(std::size_t i = 0; i < size; i += stride)
+        ptr[i] = T_();
+}
+
+
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
-
-
-// Generates a random text of symbols of type `T_sym_` and of length `n` at `T`.
-// `T` must have enough space allocated beforehand.
-template <typename T_sym_>
-void generate_random_text(T_sym_* const T, const std::size_t n)
-{
-    std::random_device rd;
-    std::mt19937 rng(rd());
-    std::uniform_int_distribution<uint64_t> dist(std::numeric_limits<T_sym_>::min(), std::numeric_limits<T_sym_>::max());
-
-    for(std::size_t i = 0; i < n; ++i)
-        T[i] = static_cast<T_sym_>(dist(rng));
-}
 
 
 // Returns the size of the file of elements of type `T_` at path `file_path`.
@@ -183,6 +211,21 @@ std::size_t file_size(const std::string& file_path)
     }
 
     return file_bytes / sizeof(T_);
+}
+
+
+// Reads `count` elements of type `T_` from the file at path `file_path` into
+// `dst`, which must have enough space allocated beforehand.
+template <typename T_>
+void read_file(const std::string& file_path, T_* const dst, const std::size_t count)
+{
+    std::ifstream is(file_path, std::ios::binary);
+    is.read(reinterpret_cast<char*>(dst), count * sizeof(T_));
+    if(!is)
+    {
+        std::cerr << "Could not read " << (count * sizeof(T_)) << " bytes from the file at path " << file_path << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 
@@ -247,6 +290,20 @@ struct Collection_Stats
         return Collection_Stats{n, total, min, max, mean, median, std_dev, imbalance};
     }
 };
+
+}
+
+
+namespace gpu_saca::util::file
+{
+
+// Exits the executions due to reason `op` on the file at path `path`.
+void exit_on_io_failure(const char* op, const std::string& path);
+
+// Writes `bytes`-many bytes from `buf` to the file-offset `off` of the file
+// `fd`, opened at path `path`. Additionally queues the bytes for writeback, so
+// that dirty pages do not pile up from a long output-stream.
+void write_and_flush(int fd, const std::string& path, const void* buf, std::size_t bytes, std::size_t off);
 
 }
 

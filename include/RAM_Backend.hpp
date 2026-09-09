@@ -4,9 +4,9 @@
 
 
 
+#include "types.hpp"
 #include "Packed_Prefix.hpp"
 #include "Residency_Plan.hpp"
-#include "types.hpp"
 
 #include <vector>
 
@@ -21,7 +21,7 @@ class RAM_Backend
 private:
 
     std::vector<idx_t*> suf_;   // Suffixes of the partitions.
-    std::vector<idx_t*> key_;   // Keys of the partitions.
+    std::vector<p_sz_t*> key_;  // Keys of the partitions.
     std::vector<Prefix_Key*> prefix_;   // Prefix-keys of the partitions.
 
 public:
@@ -36,13 +36,13 @@ public:
     ~RAM_Backend();
 
     // Returns the `p_id`'th partition's resident suffixes.
-    idx_t* suf(const p_id_t p_id) { return suf_[p_id]; }
+    auto* suf(const p_id_t p_id) { return suf_[p_id]; }
 
     // Returns the `p_id`'th partition's resident keys.
-    idx_t* key(const p_id_t p_id) { return key_[p_id]; }
+    auto* key(const p_id_t p_id) { return key_[p_id]; }
 
     // Returns the `p_id`'th partition's resident prefix-keys.
-    Prefix_Key* prefix(const p_id_t p_id) { return prefix_[p_id]; }
+    auto* prefix(const p_id_t p_id) { return prefix_[p_id]; }
 
     // Reads `sz`-many initial prefixes of the `p_id`'th partition, from its
     // offset `off`, into `dst`.
@@ -54,11 +54,14 @@ public:
 
     // Reads `sz`-many keys of the `p_id`'th partition, from its offset `off`,
     // into `dst`.
-    void read_key(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
+    void read_key(p_id_t p_id, idx_t off, idx_t sz, p_sz_t* dst) const;
 
     // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
     // offset `off`, from `suf` and `key`.
-    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const idx_t* key);
+    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
+
+    // Releases the `p_id`'th partition's suffixes and keys.
+    void retire_data(p_id_t p_id);
 
     // Drops the prefix-keys from the backend.
     void drop_prefixes();
