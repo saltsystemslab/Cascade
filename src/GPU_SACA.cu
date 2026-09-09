@@ -86,7 +86,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
-    CUDA_CHECK(deallocate_host(T_h_));
+    util::deallocate(T_h_);
     util::deallocate(P_id);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
@@ -138,7 +138,7 @@ void GPU_SACA<T_sym_>::build_SA()
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
-    {   PROFILE_SCOPE("drop_text");                 CUDA_CHECK(deallocate_host(T_h_));   T_h_ = nullptr;   }
+    {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
 
     {
         PROFILE_SCOPE("allocate_device_space");
@@ -187,7 +187,7 @@ void GPU_SACA<T_sym_>::load_text()
     const auto bytes = (sym_count + null_count) * sizeof(T_sym_);   // Size of the text's buffer.
 
     const auto t_0 = timer::now();
-    CUDA_CHECK(pinned_allocate_host(T_h_, sym_count + null_count));
+    T_h_ = util::checked_allocate<T_sym_>(sym_count + null_count);
     const auto t_1 = timer::now();
 
     util::read_file(ip_path_, T_h_, sym_count);
@@ -195,7 +195,7 @@ void GPU_SACA<T_sym_>::load_text()
         T_h_[sym_count + i] = std::numeric_limits<T_sym_>::min();
     const auto t_2 = timer::now();
 
-    std::cerr   << "Text-buffer pinned-allocation completed. Time taken: " << timer::duration(t_1 - t_0) << "s"
+    std::cerr   << "Text-buffer allocation completed. Time taken: " << timer::duration(t_1 - t_0) << "s"
                 << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_1 - t_0)) << " GBs/s).\n";
     std::cerr   << "Text-read completed. Time taken: " << timer::duration(t_2 - t_1) << "s"
                 << " (" << (bytes / (1024.0 * 1024.0 * 1024.0) / timer::duration(t_2 - t_1)) << " GBs/s).\n";
@@ -684,6 +684,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
     T_sym_* T_buf[STREAM_C];    // The text-chunk buffers.
     p_id_t* P_id_buf[STREAM_C]; // The partition-ID buffers.
+    T_sym_* T_stage[STREAM_C];  // Staging buffer for the text-chunks' uploads, per stream.
+    p_id_t* P_id_stage[STREAM_C];   // Staging buffer for the partition-IDs' downloads, per stream.
 
     idx_t* P_sz_d;  // Global partition-size histogram at the device.
     {
@@ -713,6 +715,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         {
             CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
             CUDA_CHECK(cudaMalloc(P_id_buf + b, p_id_buf_bytes));
+            CUDA_CHECK(pinned_allocate_host(T_stage[b], buf_sz + K - 1));
+            CUDA_CHECK(pinned_allocate_host(P_id_stage[b], buf_sz));
         }
     }
 
@@ -720,30 +724,42 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     // Stream text in chunks to device, compute partition-IDs and per-partition counts, and move the output to host.
     {
         const idx_t chunk_count = (n_ + CHUNK_SZ - 1) / CHUNK_SZ;   // Number of chunks the text is broken into for processing in a streaming manner.
-        for(idx_t c = 0; c < chunk_count; ++c)  // Triple-buffered chunk loop.
-        {
-            const auto buf_id = c % STREAM_C;   // Which set of buffers (and stream) to use for this chunk.
-            const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
-            const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
-            const auto chunk_sym_count = chunk_suf_count + K - 1;   // Number of symbols this chunk requires. The text's tail-padding covers the overhang at the last chunk.
+        std::vector<std::thread> dispatchers;   // Dispatchers-pool; one dispatcher per device-stream.
+        std::atomic<idx_t> chunk_claimed(0);    // Count of chunks claimed for dispatch.
+        for(idx_t s_id = 0; s_id < STREAM_C; ++s_id)
+            dispatchers.emplace_back(
+                [&, s_id]
+                {
+                    while(true)
+                    {
+                        const auto c = chunk_claimed.fetch_add(1, std::memory_order_relaxed);   // Claim a chunk.
+                        if(c >= chunk_count)
+                            break;
 
-            //  Asynchronously transfer this chunk to the device while the other stream's kernel is being executed (from the last iteration).
-            CUDA_CHECK(cudaMemcpyAsync(T_buf[buf_id], T_h_ + chunk_off, chunk_sym_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[buf_id]));
+                        const auto chunk_off = c * CHUNK_SZ;    // Offset of this chunk into the text.
+                        const auto chunk_suf_count = std::min(CHUNK_SZ, n_ - chunk_off);    // Count of suffixes in this chunk.
+                        const auto chunk_sym_count = chunk_suf_count + K - 1;   // Number of symbols this chunk requires. The text's tail-padding covers the overhang at the last chunk.
 
-            const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
-            compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (T_buf[buf_id], chunk_suf_count, pivots_d, P_id_buf[buf_id], p_, P_sz_d);
-            CUDA_CHECK(cudaGetLastError());
+                        // Stage this chunk and asynchronously upload it to the device.
+                        std::memcpy(T_stage[s_id], T_h_ + chunk_off, chunk_sym_count * sizeof(T_sym_));
+                        CUDA_CHECK(cudaMemcpyAsync(T_buf[s_id], T_stage[s_id], chunk_sym_count * sizeof(T_sym_), cudaMemcpyHostToDevice, stream[s_id]));
 
-            // Asynchronously copy this chunk's partition-IDs to the host.
-            CUDA_CHECK(cudaMemcpyAsync(P_id + chunk_off, P_id_buf[buf_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-        }
+                        const auto block_count = (chunk_suf_count + BLOCK_SZ - 1) / BLOCK_SZ;
+                        compute_partition_IDs_kernel<T_sym_, K, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[s_id] >>>
+                            (T_buf[s_id], chunk_suf_count, pivots_d, P_id_buf[s_id], p_, P_sz_d);
+                        CUDA_CHECK(cudaGetLastError());
+
+                        // Asynchronously download this chunk's partition-IDs to staging space, and drain those to `P_id`.
+                        CUDA_CHECK(cudaMemcpyAsync(P_id_stage[s_id], P_id_buf[s_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[s_id]));
+                        CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
+                        std::memcpy(P_id + chunk_off, P_id_stage[s_id], chunk_suf_count * sizeof(p_id_t));
+                    }
+                }
+            );
+
+        for(auto& d : dispatchers)  d.join();
     }
 
-
-    // Wait for the streams to finish.
-    for(std::size_t s = 0; s < STREAM_C; ++s)
-        CUDA_CHECK(cudaStreamSynchronize(stream[s]));
 
     // Free the buffers.
     CUDA_CHECK(cudaFree(pivots_d));
@@ -751,6 +767,8 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     {
         CUDA_CHECK(cudaFree(T_buf[b]));
         CUDA_CHECK(cudaFree(P_id_buf[b]));
+        CUDA_CHECK(deallocate_host(T_stage[b]));
+        CUDA_CHECK(deallocate_host(P_id_stage[b]));
     }
 
     // Move the partition-sizes to the host.
