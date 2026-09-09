@@ -199,20 +199,6 @@ void prepage(T_* const ptr, const std::size_t size)
 std::size_t available_memory();
 
 
-// Generates a random text of symbols of type `T_sym_` and of length `n` at `T`.
-// `T` must have enough space allocated beforehand.
-template <typename T_sym_>
-void generate_random_text(T_sym_* const T, const std::size_t n)
-{
-    std::random_device rd;
-    std::mt19937 rng(rd());
-    std::uniform_int_distribution<uint64_t> dist(std::numeric_limits<T_sym_>::min(), std::numeric_limits<T_sym_>::max());
-
-    for(std::size_t i = 0; i < n; ++i)
-        T[i] = static_cast<T_sym_>(dist(rng));
-}
-
-
 // Returns the size of the file of elements of type `T_` at path `file_path`.
 template <typename T_>
 std::size_t file_size(const std::string& file_path)

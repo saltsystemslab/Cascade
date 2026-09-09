@@ -1769,55 +1769,6 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
 
 template <typename T_sym_>
-void GPU_SACA<T_sym_>::concatenate_partitions(idx_t*& SA)
-{
-    SA = util::allocate<idx_t>(n_);
-    auto& s = S[0];
-    auto* const suf = s.suf();
-    auto* const key = reinterpret_cast<p_sz_t*>(s.key());
-
-    // Place the partitions at their appropriate offsets and shuffle the in-
-    // partition suffixes per their local-rank.
-    for(p_id_t p_id = 0; p_id < p_; ++p_id)
-    {
-        const auto sz = P_cap[p_id];
-        const auto off = P_off[p_id];
-
-        if(backend_->resident_suf(p_id) != nullptr) // Resident fast path.
-        {
-            const auto* const suf = backend_->resident_suf(p_id);
-            const auto* const key = backend_->resident_key(p_id);
-
-            #pragma omp parallel for schedule(static)
-            for(idx_t i = 0; i < sz; ++i)
-            {
-                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
-                const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
-                SA[off + r_j] = j;
-            }
-
-            continue;
-        }
-
-        for(idx_t chunk_off = 0; chunk_off < sz;)
-        {
-            const auto chunk_sz = std::min(chunk_cap_, sz - chunk_off);
-            backend_->read_chunk(p_id, chunk_off, chunk_sz, suf, key);
-            chunk_off += chunk_sz;
-
-            #pragma omp parallel for schedule(static)
-            for(idx_t i = 0; i < chunk_sz; ++i)
-            {
-                const auto j = bit_layout::suffix_of(suf[i]);   // Suffix.
-                const auto r_j = key[i];    // Local rank; so global rank is `off + r_j`.
-                SA[off + r_j] = j;
-            }
-        }
-    }
-}
-
-
-template <typename T_sym_>
 void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assembly& p_assembly, const idx_t buf_id)
 {
     PROFILE_SCOPE_FMT("scatter_to_rank_order_p%d", static_cast<int>(p_id));

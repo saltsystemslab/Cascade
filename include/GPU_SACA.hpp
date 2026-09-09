@@ -229,9 +229,6 @@ private:
     // `buf_id`'th device-buffer set is used for device operations.
     void scatter_to_rank_order(p_id_t p_id, Partition_Assembly& p_assembly, idx_t buf_id);
 
-    // Allocates enough space into `SA` and concatenates the partitions into it.
-    void concatenate_partitions(idx_t*& SA);
-
     // Concatenates the partitions into the file at path `op`, shuffling the in-
     // partition suffixes per their local-ranks.
     void concatenate_partitions(const std::string& op);
