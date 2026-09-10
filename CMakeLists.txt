@@ -183,7 +183,12 @@ set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 add_subdirectory(src)
 add_subdirectory(test)
 
-add_subdirectory(benchmark)
+# The harness vendors its baselines and creates its targets at configure-time,
+# and needs to be excluded from core build.
+option(BENCHMARK "Build the baseline-benchmark harness (libsais, libcubwt)" OFF)
+if(BENCHMARK)
+    add_subdirectory(benchmark)
+endif()
 
 
 # Set some CUDA-specific properties.
