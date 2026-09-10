@@ -43,8 +43,17 @@ if [ "$DATASET" = redpajama ]; then
     LABEL="$DATASET-$SUBSET"
 fi
 
+# Tokenizer tag: arrays from different tokenizers must not overwrite each other.
+# raw/ stays UNtagged on purpose -- one download feeds every tokenization of it.
+case "$TOKENIZER" in
+    *[Oo][Ll][Mm][Oo]*)    TAG="${TAG:-olmo}"   ;;
+    *[Ll]lama-2*|*llama*)  TAG="${TAG:-llama2}" ;;
+    *gpt2*)                TAG="${TAG:-gpt2}"   ;;
+    *) TAG="${TAG:-$(basename "$TOKENIZER" | tr '[:upper:]' '[:lower:]')}" ;;
+esac
+
 RAW_DIR="$ROOT/$LABEL/raw"
-OUT_BIN="$ROOT/$LABEL/${LABEL}.tokenized.bin"
+OUT_BIN="$ROOT/$LABEL/${LABEL}-${TAG}.tokenized.bin"
 mkdir -p "$RAW_DIR" "$(dirname "$OUT_BIN")"
 
 # ------------------------------- FETCH --------------------------------------
