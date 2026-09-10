@@ -6,8 +6,8 @@
 
 include(FetchContent)
 
-# Fetched sources land under `build/_deps/`.
-set(FETCHCONTENT_BASE_DIR ${CMAKE_SOURCE_DIR}/build/_deps)
+# Fetched sources land under `${CMAKE_BINARY_DIR}/_deps` (FetchContent's default).
+# Do not pin this to `${CMAKE_SOURCE_DIR}/build/_deps`.
 
 
 # ======== `libsais`: CPU baseline SACA ========
@@ -19,7 +19,7 @@ set(LIBSAIS_VERSION "2.10.4")
 
 FetchContent_Declare(libsais
     URL https://github.com/IlyaGrebnov/libsais/archive/refs/tags/v${LIBSAIS_VERSION}.tar.gz
-    # URL_HASH SHA256=<hash>    # TODO: pin before the artifact submission
+    URL_HASH SHA256=94aa88f9e29f8812214ecfa6b55f5dca14c7d8a427409c062f734a61ca4c6931
 )
 
 # Upstream's own options. `FORCE` because upstream declares them as cache
@@ -28,6 +28,28 @@ set(LIBSAIS_USE_OPENMP ON CACHE BOOL "" FORCE)
 set(LIBSAIS_BUILD_SHARED_LIB OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(libsais)
+
+
+# ======== `libcubwt`: GPU baseline SACA ========
+#
+# Offline: -DFETCHCONTENT_SOURCE_DIR_LIBCUBWT=/path/to/libcubwt
+set(LIBCUBWT_VERSION "1.0.0")   # v1.0.0 is the last release supporting SA construction.
+
+FetchContent_Declare(libcubwt
+    URL https://github.com/IlyaGrebnov/libcubwt/archive/refs/tags/v${LIBCUBWT_VERSION}.tar.gz
+    URL_HASH SHA256=346b8f6a25dac67295b741d5f4382fad537b2ca3b2a5f32a2e5bc66d89473323
+)
+
+FetchContent_MakeAvailable(libcubwt)
+
+# Upstream ships no CMakeLists.txt
+add_library(libcubwt STATIC ${libcubwt_SOURCE_DIR}/libcubwt.cu)
+set(LIBCUBWT_INC ${CMAKE_CURRENT_BINARY_DIR}/libcubwt_include)
+file(COPY ${libcubwt_SOURCE_DIR}/libcubwt.cuh DESTINATION ${LIBCUBWT_INC}/libcubwt)
+target_include_directories(libcubwt PUBLIC ${LIBCUBWT_INC})
+set_target_properties(libcubwt PROPERTIES
+    CUDA_SEPARABLE_COMPILATION OFF
+    CUDA_ARCHITECTURES         ${CUDA_ARCH})
 
 
 # ======== Record schema ========

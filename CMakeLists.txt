@@ -179,6 +179,12 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 
 
+# Target GPU architecture.
+if(NOT DEFINED CUDA_ARCH)
+    set(CUDA_ARCH "120-real")
+endif()
+
+
 # Add required subdirectories to the build.
 add_subdirectory(src)
 add_subdirectory(test)
@@ -194,17 +200,12 @@ endif()
 # Set some CUDA-specific properties.
 set_property(TARGET core            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET libcubwt        PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET libcubwt_driver PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-set(CUDA_ARCH "120-real")
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET libcubwt        PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET libcubwt_driver PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
@@ -218,10 +219,8 @@ add_dependencies(tests prj_concurrentqueue) # TODO: fix this hack.
 
 target_compile_options(core PRIVATE ${COMPILE_FLAGS})
 target_compile_options(tests PRIVATE ${COMPILE_FLAGS})
-target_compile_options(libcubwt PRIVATE ${COMPILE_FLAGS})
 
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_FLAGS})
-target_compile_options(libcubwt_driver PRIVATE ${COMPILE_FLAGS})
 target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
@@ -234,7 +233,6 @@ target_compile_options(tests PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fop
 
 # Link to `zlib`, required to support `gzip` files.
 target_link_libraries(core PRIVATE ZLIB::ZLIB)
-target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
 target_link_libraries(core PRIVATE CUDA::cudart)
@@ -249,7 +247,6 @@ target_link_libraries(core PRIVATE tests)
 
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
-target_link_libraries(libcubwt_driver PRIVATE libcubwt)
 
 # Link the tester.
 target_link_libraries(test PRIVATE core)
@@ -258,17 +255,15 @@ target_link_libraries(test PRIVATE core)
 # Set the link flags for the targets.
 
 target_link_libraries(core PRIVATE ${LINK_FLAGS})
-target_link_libraries(libcubwt PRIVATE ${LINK_FLAGS})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${LINK_FLAGS})
-target_link_libraries(libcubwt_driver PRIVATE ${LINK_FLAGS})
 target_link_libraries(test PRIVATE ${LINK_FLAGS})
 
 
 # Set the installation directory. The parent directory is `/usr/local/` by default, and the
 # user may set it to a different path by passing a value for `CMAKE_INSTALL_PREFIX`. The target
 # executable is installed inside a sub-directory named `bin` within the parent directory.
-install(TARGETS ${PROJECT_NAME} libcubwt_driver
+install(TARGETS ${PROJECT_NAME}
         DESTINATION bin
         )
 

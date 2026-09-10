@@ -18,14 +18,12 @@ set(PROJECT_SRC
         utility.cpp
 )
 
-# Define the core library and the `libcubwt` library for benchmarking.
+# Define the core library.
 add_library(core STATIC ${PROJECT_SRC})
-add_library(libcubwt STATIC ${INCLUDE_DIR}/libcubwt/libcubwt.cu)        # Separate it out to a separate benchmarking cmake file.
 
 
 # Define an executable from the driver programs.
 add_executable(${PROJECT_NAME} main.cu)
-add_executable(libcubwt_driver libcubwt_driver.cu)
 add_executable(test test.cu)
 
 
@@ -34,5 +32,4 @@ add_executable(test test.cu)
 target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
-target_include_directories(libcubwt_driver PRIVATE ${INCLUDE_DIR})
 target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})
