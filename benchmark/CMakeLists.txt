@@ -6,6 +6,14 @@
 
 include(FetchContent)
 
+# Core's feature macros must not reach a baseline binary. Clearing the property
+# is the only way to un-inherit it.
+set_property(DIRECTORY PROPERTY COMPILE_DEFINITIONS "")
+
+if(NOT COMPILE_FLAGS)
+    message(FATAL_ERROR "COMPILE_FLAGS is empty: benchmark/ was configured before the root set it.")
+endif()
+
 # Fetched sources land under `${CMAKE_BINARY_DIR}/_deps` (FetchContent's default).
 # Do not pin this to `${CMAKE_SOURCE_DIR}/build/_deps`.
 
@@ -52,38 +60,41 @@ set_target_properties(libcubwt PROPERTIES
     CUDA_ARCHITECTURES         ${CUDA_ARCH})
 
 
-# ======== Record schema ========
-#
-# Header-only interface target.
-
-add_library(bench_record INTERFACE)
-target_include_directories(bench_record INTERFACE ${CMAKE_CURRENT_SOURCE_DIR})
-
-
 # ======== Provenance ========
 #
 # Tolerant of a missing .git.
-execute_process(
-        COMMAND git rev-parse --short HEAD
+execute_process(COMMAND git rev-parse --short HEAD
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE REPO_COMMIT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-        ERROR_QUIET
-)
-if(NOT REPO_COMMIT)
-    set(REPO_COMMIT "unknown")
+        OUTPUT_VARIABLE BENCH_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE BENCH_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+
+if(NOT BENCH_COMMIT)
+    set(BENCH_COMMIT "unknown")
+elseif(BENCH_DIRTY)
+    set(BENCH_COMMIT "${BENCH_COMMIT}-dirty")
 endif()
 
 
-# ======== Driver ========
+# ======== Shared driver settings ========
 #
+add_library(bench_settings INTERFACE)
+target_compile_options(bench_settings INTERFACE ${COMPILE_FLAGS})
+target_compile_definitions(bench_settings INTERFACE
+        BENCH_COMMIT="${BENCH_COMMIT}"
+        BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+
+
+# ======== Drivers ========
+
 add_executable(bench_libsais bench_libsais.cpp)
+# OpenMP::OpenMP_CXX explicitly: libsais exports OpenMP::OpenMP_C, whose
+# -fopenmp is guarded by $<COMPILE_LANGUAGE:C> and so never reaches this .cpp,
+# which calls omp_get_dynamic().
+target_link_libraries(bench_libsais PRIVATE bench_settings libsais OpenMP::OpenMP_CXX)
 
-target_compile_definitions(bench_libsais PRIVATE
-    BENCH_REPO_COMMIT="${REPO_COMMIT}"
-    BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+add_executable(bench_libcubwt bench_libcubwt.cpp)
+target_link_libraries(bench_libcubwt PRIVATE bench_settings libcubwt CUDA::cudart)
 
-target_link_libraries(bench_libsais PRIVATE bench_record libsais)
-target_compile_options(bench_libsais PRIVATE ${COMPILE_FLAGS})
-
-install(TARGETS bench_libsais DESTINATION bin)
+install(TARGETS bench_libsais bench_libcubwt DESTINATION bin)
