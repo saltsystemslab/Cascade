@@ -173,7 +173,7 @@ struct Record
     int64_t     symbol_bytes = 0, n_symbols = 0, n_tokens = 0, threads = 0;
     std::string status;
     int64_t     code = 0;
-    std::string detail, verify = "skip";            // verify: pass | fail | skip
+    std::string detail, verify = "off";     // off (not requested) | pass | fail | skip (wanted, infeasible)
     double      t_load = -1, t_core = -1, t_write = -1;
     int64_t     peak_rss = 0, peak_device = -1;     // peak_device: -1 where inapplicable
     std::string notes;

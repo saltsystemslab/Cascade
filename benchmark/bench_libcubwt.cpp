@@ -48,12 +48,11 @@ Outcome core(Ctx<uint8_t>& c)
     if(cudaMemGetInfo(&free_before, &total) != cudaSuccess)
         return {st::LIB_ERROR, 0, "cudaMemGetInfo failed"};
 
-    Buffer<uint32_t> SA;
-    if(!SA.allocate(c.n))
-        return {st::OOM_HOST, 0, "host SA allocation failed: " + std::to_string(c.n) + " x 4 B"};
-
+    // Device storage BEFORE the host SA, because the device is the first
+    // binding constraint
+    //
     // All of libcubwt's device allocation happens here; libcubwt_sa allocates
-    // nothing. So this free-memory delta is the exact device peak (baselines.md).
+    // nothing. So this free-memory delta is the exact device peak.
     void* storage = nullptr;
     const int64_t alloc_r = libcubwt_allocate_device_storage(&storage, c.n);
     if(alloc_r != LIBCUBWT_NO_ERROR)
@@ -74,6 +73,13 @@ Outcome core(Ctx<uint8_t>& c)
     std::size_t free_after = 0;
     if(cudaMemGetInfo(&free_after, &total) == cudaSuccess && free_before >= free_after)
         c.rec.peak_device = static_cast<int64_t>(free_before - free_after);
+
+    Buffer<uint32_t> SA;
+    if(!SA.allocate(c.n))
+    {
+        libcubwt_free_device_storage(storage);
+        return {st::OOM_HOST, 0, "host SA allocation failed: " + std::to_string(c.n) + " x 4 B"};
+    }
 
     const auto t0 = Clock::now();
     const int64_t r = libcubwt_sa(storage, c.T, SA.p, c.n);
