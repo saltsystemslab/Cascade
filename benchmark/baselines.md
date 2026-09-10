@@ -162,6 +162,24 @@ mid-token. Such a check fails correctly and wastes a day.
   B/token with it on, matching the predicted ~18n. It fits dolma (146 GB) and
   arxiv (509 GB) but not github (1068 GB > 1032 GB), so `bench.sbatch` drops it
   there and the record says `verify: skip`.
+- **Why the CPU driver runs under a `RLIMIT_AS` at all.** Slurm is the obvious
+  place to enforce a memory bound, but it is not enforcing one here: there is no
+  `cgroup.conf`, so `--mem` is advisory, and `--mem=0` asks for the whole node
+  anyway. That leaves the kernel. Whether an over-budget allocation then fails
+  *cleanly* depends on `vm.overcommit_memory`: in heuristic mode (0) a single
+  allocation larger than RAM+swap is refused, so the driver returns a proper
+  `oom_host` record; in always-overcommit mode (1) it succeeds, the process
+  faults pages until the OOM killer fires, and SIGKILL means the emission path
+  never runs -- no record, no `VmHWM`, and the largest corpus's row becomes a gap
+  instead of the result.
+  The `RLIMIT_AS` removes that dependency: the allocation fails at the limit
+  check regardless of the sysctl. It is also what makes the reconciliation layer
+  unnecessary -- the alternative is querying `sacct` for jobs that left no record,
+  where a kernel OOM appears as `FAILED / 0:9` and is indistinguishable from any
+  other SIGKILL. One line here replaces that, and avoids reporting an
+  infrastructure failure as a memory wall.
+  (If `vm.overcommit_memory` is 2 on a given node, strict accounting already
+  gives the clean failure and the limit is redundant.)
 - **`--n` counts symbols, not tokens.** For `byte_from_token16` that means bytes,
   i.e. twice the token count.
 - **`--alphabet` is recorded, and `n_tokens` is the throughput denominator.**
