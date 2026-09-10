@@ -46,6 +46,8 @@ external/
 # local content
 scripts/local/
 docs/
+benchmark/local.env
+benchmark/local-node.md
 
 # docker-build
 build/
