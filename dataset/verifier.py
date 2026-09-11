@@ -211,11 +211,20 @@ def main():
             label, tag, n - seps, seps, size, digest,
             __import__("datetime").datetime.now(
                 __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
-        new = not os.path.exists(args.tsv)
+        # Several verify jobs can finish at once (the chained pipeline runs one
+        # per corpus), and this lives on NFS, so serialise the append: a torn
+        # line in the authoritative record is worse than a failed write.
+        import fcntl
         with open(args.tsv, "a") as f:
-            if new:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            except OSError as e:          # some filesystems refuse locks
+                warn("tsv lock", f"{e}; appending unlocked")
+            if f.tell() == 0:
                 f.write("# label\ttokenizer\ttokens\tdocs\tbytes\tsha256\tverified_at\n")
             f.write(row + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         print(f"  recorded -> {args.tsv}")
 
     return status
