@@ -152,10 +152,6 @@ RLIMIT_KIB=$(( MEM_TOTAL_KIB - MEM_RESERVE_GIB * 1024 * 1024 ))
 # measured 5-20 M tokens/s this costs 4.4-16.9 h, inside the 24 h wall even
 # pessimistically, and it lets the CV be reported as evidence rather than assumed.
 REPS=3
-# Verification adds n/8 + 8n atop the run's own peak (~18n total), so it fits the
-# smaller corpora but not the largest that still completes. `off` in the record
-# means "not requested", which is a policy choice, not a gap.
-declare -A VERIFY=( [dolmasample]=1 [arxiv]=1 [github]=0 [c4]=0 )
 
 mkdir -p "${RESULTS}"
 printf 'results  %s\nhost     %s   job %s\nmemtotal %s KiB   rlimit %s KiB (reserve %s GiB)\n' \
@@ -164,16 +160,6 @@ printf 'results  %s\nhost     %s   job %s\nmemtotal %s KiB   rlimit %s KiB (rese
 
 for b in "${SAIS}" "${CUBWT}"; do
     [ -x "${b}" ] || { echo "FATAL: ${b} not built; configure -DBENCHMARK=ON first."; exit 1; }
-done
-
-# The loops below run under `set -u` without `-e`, so a missing map entry errors
-# on that iteration and the loop quietly moves on -- i.e. a typo here would skip
-# part of the headline table and only show up in the record count. Check first.
-for c in "${CORPORA[@]}"; do
-    for m in VERIFY; do
-        eval "v=\${${m}[${c}]+set}"
-        [ "${v:-}" = set ] || { echo "FATAL: ${m}[${c}] is undefined."; exit 1; }
-    done
 done
 
 # Pre-flight: a bad path should not be discovered three hours in.
@@ -185,10 +171,16 @@ for c in "${CORPORA[@]}"; do
     fi
 done
 
-# run <bin> <tag> <corpus> <alphabet> <n-symbols> <threads> <rep> <verify> [rlimit]
+# run <bin> <tag> <corpus> <alphabet> <n-symbols> <threads> <rep> [rlimit]
+#
+# Timing only -- nothing here passes --verify. Correctness is verify.sbatch's
+# job, for two reasons: verification allocates n/8 + 8n on top of the run's own
+# peak, so a verified run's `peak_rss` would be the verification peak rather than
+# the construction peak, and peak RSS is half of the E2.1 table; and correctness
+# is a property of a *configuration*, so it needs one run, not one per replicate.
 run()
 {
-    local bin=$1 n=$5 threads=$6 verify=$8 rlimit=${9:-0}
+    local bin=$1 n=$5 threads=$6 rlimit=${8:-0}
     local id="$2_$3_$4_n$5_t$6_r$7"
 
     [ -s "${RESULTS}/${id}.json" ] && { echo "skip (already done) ${id}"; return; }
@@ -196,7 +188,6 @@ run()
     local -a cmd=("${bin}" --input "${CORPUS_ROOT}/$3.bin" --corpus "$3" --run-id "${id}"
                   --alphabet "$4" --n "${n}" --threads "${threads}"
                   --results-dir "${RESULTS}" --cold)
-    [ "${verify}" -eq 1 ] && cmd+=(--verify)
 
     echo "=== ${id}"
     local t0=${SECONDS}
@@ -211,7 +202,7 @@ run()
 #    corpus's answer arrives in minutes rather than after the largest.
 for c in "${CORPORA[@]}"; do
     for r in $(seq 1 "${REPS}"); do
-        run "${SAIS}" libsais16x64 "${c}" token16 0 "$(nproc)" "${r}" "${VERIFY[$c]}" 1
+        run "${SAIS}" libsais16x64 "${c}" token16 0 "$(nproc)" "${r}" 1
     done
 done
 
@@ -219,7 +210,7 @@ done
 #    rather than an assumption, and guards against a NUMA-hostile access pattern
 #    making half the cores faster than all of them.
 for r in $(seq 1 "${REPS}"); do
-    run "${SAIS}" libsais16x64 "${CORPORA[0]}" token16 0 "$(( $(nproc) / 2 ))" "${r}" 0 1
+    run "${SAIS}" libsais16x64 "${CORPORA[0]}" token16 0 "$(( $(nproc) / 2 ))" "${r}" 1
 done
 
 # 3. libcubwt on every corpus -- the GPU memory-wall row. Expected to fail at
@@ -227,7 +218,7 @@ done
 #    uint16 corpus as bytes doubles the symbol count.
 for c in "${CORPORA[@]}"; do
     for r in $(seq 1 "${REPS}"); do
-        run "${CUBWT}" libcubwt "${c}" byte_from_token16 0 0 "${r}" 0
+        run "${CUBWT}" libcubwt "${c}" byte_from_token16 0 0 "${r}"
     done
 done
 
@@ -236,7 +227,7 @@ done
 #    predicted device wall, which is why it is included.
 for n in 250000000 500000000 1000000000 2000000000 3000000000; do
     for r in $(seq 1 "${REPS}"); do
-        run "${CUBWT}" libcubwt "${CORPORA[0]}" byte_from_token16 "${n}" 0 "${r}" 1
+        run "${CUBWT}" libcubwt "${CORPORA[0]}" byte_from_token16 "${n}" 0 "${r}"
     done
 done
 

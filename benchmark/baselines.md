@@ -42,8 +42,26 @@ the repo root.
 
 `bench.sbatch` is idempotent per run: a run whose record already exists is
 skipped, so a job that dies partway can simply be resubmitted with the same
-results directory. Cross-check two methods on the same byte input with
-`--sa-out` on both and then `cmp` the two files.
+results directory.
+
+**Timing and correctness are separate jobs.**
+
+```
+sbatch benchmark/verify.sbatch                 # correctness; own results dir
+```
+
+`bench.sbatch` never passes `--verify`, for two reasons. Verification allocates a
+bitset (n/8) and an inverse SA (8n) on top of the run's own peak, so a verified
+run's `peak_rss` would be the *verification* peak rather than the construction
+peak — and peak RSS is half of the E2.1 table. And correctness is a property of a
+*configuration*, not of a replicate: verifying it once is enough, so a method's
+timings can be re-run as often as the method evolves without re-paying for it.
+
+`verify.sbatch` does one verified run per (method, alphabet) path, plus the
+cross-check below, and exits non-zero if anything fails. Its scales are modest on
+purpose: libsais and libcubwt are fixed third-party code, so verifying them at
+full corpus scale costs hours and proves nothing a small run does not. Knobs:
+`VERIFY_N` (symbols, default 1e8), `VERIFY_CORPUS`, `SA_DIR`.
 
 ## libsais 2.10.4
 
@@ -173,6 +191,8 @@ mid-token. Such a check fails correctly and wastes a day.
   because `VmHWM` is a lifetime high-water mark and not an instantaneous sample.
   Do not "fix" this by reading it earlier. `/proc` is Linux-only; the macOS
   fallback is `getrusage`, whose `ru_maxrss` is bytes there but KiB on Linux.
+- Verification never runs in a timing job — see "Running it". `verify.sbatch`
+  owns it.
 - **`verify` has four states**, and the distinction matters: `off` (never
   requested — a recorded policy choice), `pass`, `fail`, and `skip` (requested
   but infeasible, e.g. the ISA would not allocate). `summarize.py` shouts only
