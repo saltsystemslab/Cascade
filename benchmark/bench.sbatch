@@ -38,15 +38,35 @@
 
 set -uo pipefail        # Not -e: a failed run is data, and the loop must continue.
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="${REPO:-$(dirname "${HERE}")}"
+# Slurm runs a COPY of this script from a spool directory, so the script's own
+# path says nothing about where the repo is -- ${BASH_SOURCE[0]} is
+# /var/spool/slurmd/.../slurm_script. Use the submit directory, and fall back to
+# $PWD when the script is run directly (dry tests).
+REPO="${REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}"
+
+# Check it, rather than letting a wrong path surface later as a confusing cmake
+# or "not built" error.
+if [ ! -r "${REPO}/CMakeLists.txt" ] || [ ! -d "${REPO}/benchmark" ]; then
+    echo "FATAL: '${REPO}' does not look like the repository root"
+    echo "       (no CMakeLists.txt, or no benchmark/ directory)."
+    echo "       Submit from the repo root, or: export REPO=/path/to/repo"
+    exit 1
+fi
+
 BUILD="${BUILD:-${REPO}/build}"
 RESULTS="${1:-${REPO}/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 
 # Untracked site config, if present. Sourced here too so the in-job variables
-# work even when it was not sourced in the submitting shell.
-# shellcheck source=/dev/null
-[ -r "${HERE}/local.env" ] && . "${HERE}/local.env"
+# work even when it was not sourced in the submitting shell. Bracketed with
+# `set +u` for the same reason the lmod bootstrap below is: a config file should
+# not have to be `set -u`-clean, and an unbound variable in one would otherwise
+# kill the job outright.
+if [ -r "${REPO}/benchmark/local.env" ]; then
+    set +u
+    # shellcheck source=/dev/null
+    . "${REPO}/benchmark/local.env"
+    set -u
+fi
 
 CORPUS_ROOT="${CORPUS_ROOT:-/scratch/${USER}/corpora}"
 MODULES="${MODULES:-}"
@@ -102,7 +122,7 @@ export OMP_DYNAMIC=false OMP_PROC_BIND=close OMP_PLACES=cores OMP_WAIT_POLICY=pa
 
 # First-touch placement of libsais's 8n SA matters on a multi-socket node.
 # Without this the CPU baseline is undertuned, so a missing numactl has to be
-// loud rather than silent.
+# loud rather than silent.
 if command -v numactl >/dev/null; then
     NUMA=(numactl --interleave=all)
 else
@@ -127,7 +147,11 @@ RLIMIT_KIB=$(( MEM_TOTAL_KIB - MEM_RESERVE_GIB * 1024 * 1024 ))
 
 # libsais peaks at 10n-12.4n bytes, so it completes the corpora that fit and
 # fails cleanly on the one that does not; that failure is the result for its row.
-declare -A REPS=(   [dolmasample]=3 [arxiv]=2 [github]=1 [c4]=2 )
+# Uniform across corpora and methods: a runtime-tiered count needs a
+# justification table, and any cell at 1 cannot state its own dispersion. At the
+# measured 5-20 M tokens/s this costs 4.4-16.9 h, inside the 24 h wall even
+# pessimistically, and it lets the CV be reported as evidence rather than assumed.
+REPS=3
 # Verification adds n/8 + 8n atop the run's own peak (~18n total), so it fits the
 # smaller corpora but not the largest that still completes. `off` in the record
 # means "not requested", which is a policy choice, not a gap.
@@ -146,7 +170,7 @@ done
 # on that iteration and the loop quietly moves on -- i.e. a typo here would skip
 # part of the headline table and only show up in the record count. Check first.
 for c in "${CORPORA[@]}"; do
-    for m in REPS VERIFY; do
+    for m in VERIFY; do
         eval "v=\${${m}[${c}]+set}"
         [ "${v:-}" = set ] || { echo "FATAL: ${m}[${c}] is undefined."; exit 1; }
     done
@@ -186,7 +210,7 @@ run()
 # 1. libsais on every corpus -- the headline table. Ascending, so the smallest
 #    corpus's answer arrives in minutes rather than after the largest.
 for c in "${CORPORA[@]}"; do
-    for r in $(seq 1 "${REPS[$c]}"); do
+    for r in $(seq 1 "${REPS}"); do
         run "${SAIS}" libsais16x64 "${c}" token16 0 "$(nproc)" "${r}" "${VERIFY[$c]}" 1
     done
 done
@@ -194,22 +218,24 @@ done
 # 2. Thread choice. Not a figure: it makes "libsais, all cores" a measured choice
 #    rather than an assumption, and guards against a NUMA-hostile access pattern
 #    making half the cores faster than all of them.
-for t in "$(( $(nproc) / 2 ))" "$(nproc)"; do
-    run "${SAIS}" libsais16x64 "${CORPORA[0]}" token16 0 "${t}" thr 0 1
+for r in $(seq 1 "${REPS}"); do
+    run "${SAIS}" libsais16x64 "${CORPORA[0]}" token16 0 "$(( $(nproc) / 2 ))" "${r}" 0 1
 done
 
 # 3. libcubwt on every corpus -- the GPU memory-wall row. Expected to fail at
 #    device allocation in seconds: it needs ~30 B per input symbol, and reading a
 #    uint16 corpus as bytes doubles the symbol count.
 for c in "${CORPORA[@]}"; do
-    run "${CUBWT}" libcubwt "${c}" byte_from_token16 0 0 1 0
+    for r in $(seq 1 "${REPS}"); do
+        run "${CUBWT}" libcubwt "${c}" byte_from_token16 0 0 "${r}" 0
+    done
 done
 
 # 4. libcubwt prefix ladder on the smallest corpus, for the supplement. n is in
 #    SYMBOLS, i.e. bytes, i.e. twice the token count. The last rung sits on the
 #    predicted device wall, which is why it is included.
 for n in 250000000 500000000 1000000000 2000000000 3000000000; do
-    for r in 1 2 3; do
+    for r in $(seq 1 "${REPS}"); do
         run "${CUBWT}" libcubwt "${CORPORA[0]}" byte_from_token16 "${n}" 0 "${r}" 1
     done
 done

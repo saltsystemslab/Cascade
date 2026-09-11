@@ -31,6 +31,14 @@ too: the job configures first and says so.
 Sourcing `local.env` before `sbatch` matters: the `SBATCH_*` entries are read by
 `sbatch` at submit time and cannot be set from inside the job. Everything else is
 picked up either way, since `bench.sbatch` sources the file too if it exists.
+Its entries are `${VAR:-default}`, so the submitting environment wins and the file
+only fills gaps.
+
+**Submit from the repo root**, or `export REPO=/path/to/repo` first. Slurm runs a
+*copy* of the batch script from a spool directory, so the script cannot locate the
+repo from its own path — `${BASH_SOURCE[0]}` is `/var/spool/slurmd/.../slurm_script`.
+It uses `SLURM_SUBMIT_DIR` instead and refuses up front if that does not look like
+the repo root.
 
 `bench.sbatch` is idempotent per run: a run whose record already exists is
 skipped, so a job that dies partway can simply be resubmitted with the same
