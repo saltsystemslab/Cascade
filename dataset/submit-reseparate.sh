@@ -33,6 +33,15 @@ PYTHON="${PYTHON:-$(command -v python3 || true)}"
 [ -n "$PYTHON" ] || { echo "no python3 on PATH -- 'module load python/3.13.5' first" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Chain on another job so the whole sequence runs unattended. This is what makes
+# the pipeline independent of any local machine staying awake: once submitted,
+# Slurm advances it. afterok specifically means a FAILED predecessor leaves this
+# pending on DependencyNeverSatisfied rather than running on a bad artifact.
+#   DEPEND=afterok:12345 ./<this script>
+DEPEND="${DEPEND:-}"
+DEPFLAG=""
+[ -n "$DEPEND" ] && DEPFLAG="--dependency=$DEPEND"
+
 NAME="resep-$(basename "$ARRAY" .tokenized.bin)"
 
 # reseparate.py is pure stdlib, so --wrap is enough; there is no sbatch body to
@@ -41,7 +50,7 @@ FLAGS=""
 [ -n "${DRYRUN:-}" ] || FLAGS="$FLAGS --in-place"
 [ -n "${KEEP:-}" ]   && FLAGS="$FLAGS --keep"
 
-job=$(sbatch --parsable \
+job=$(sbatch --parsable $DEPFLAG \
     --partition="$PART" --job-name="$NAME" \
     --exclude="$EXCLUDE" \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
@@ -55,3 +64,4 @@ echo "gate:       sacct -j $job -X -o JobID,State,ExitCode,Elapsed"
 echo
 echo "after it completes, re-verify (the default is now the LEADING convention)"
 echo "and refresh the corpora.tsv row -- the file's sha256 has changed."
+[ -n "$DEPEND" ] && echo "depends:    $DEPEND (runs only if the predecessor succeeds)"

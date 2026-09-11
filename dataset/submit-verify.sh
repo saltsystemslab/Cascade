@@ -55,8 +55,17 @@ for v in TOKENIZER VOCAB EXPECT_DOCS EXPECT_TOKENS SEP_FIRST QUICK SHA256 TSV LA
     [ -n "$val" ] && EXPORTS="$EXPORTS,$v=$val"
 done
 
+# Chain on another job so the whole sequence runs unattended. This is what makes
+# the pipeline independent of any local machine staying awake: once submitted,
+# Slurm advances it. afterok specifically means a FAILED predecessor leaves this
+# pending on DependencyNeverSatisfied rather than running on a bad artifact.
+#   DEPEND=afterok:12345 ./<this script>
+DEPEND="${DEPEND:-}"
+DEPFLAG=""
+[ -n "$DEPEND" ] && DEPFLAG="--dependency=$DEPEND"
+
 NAME="verify-$(basename "$ARRAY" .tokenized.bin)"
-job=$(sbatch --parsable \
+job=$(sbatch --parsable $DEPFLAG \
     --partition="$PART" --job-name="$NAME" \
     --exclude="$EXCLUDE" \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
@@ -66,3 +75,4 @@ echo "verify: job $job  ($(basename "$ARRAY"))"
 echo "python: $PYTHON"
 echo "log:    slurm-$NAME-$job.out"
 echo "gate:   sacct -j $job -X -o JobID,State,ExitCode,Elapsed  (exit 0 = every check passed)"
+[ -n "$DEPEND" ] && echo "depends:    $DEPEND (runs only if the predecessor succeeds)"
