@@ -11,10 +11,22 @@ machine or a user.
 
 ```
 cp benchmark/local.env.example benchmark/local.env   # once: partition, node, CORPUS_ROOT
-cmake -S . -B build -DBENCHMARK=ON && cmake --build build -j
-. benchmark/local.env && sbatch benchmark/bench.sbatch
+. benchmark/local.env
+cmake -S . -B build -DBENCHMARK=ON -DCMAKE_BUILD_TYPE=Release   # configure only
+sbatch benchmark/bench.sbatch
 python3 benchmark/summarize.py results/<timestamp>   # [--tsv out.tsv]
 ```
+
+**Configure on a host with network; compile inside the job.** Both baselines are
+fetched, so `cmake -S -B` needs internet — which compute nodes often lack — but
+it only downloads two small tarballs and generates makefiles, so a login node
+handles it in seconds. Compiling the CUDA sources is the CPU-heavy half and is
+what would blow a login node's CPU-time limit, so `bench.sbatch` does it in-job
+with every core of the allocation. That also guarantees the commit stamped into
+the binary is the one that built it. Set `BUILD_IN_JOB=0` to skip it.
+
+If the compute node *does* have network, submitting without configuring works
+too: the job configures first and says so.
 
 Sourcing `local.env` before `sbatch` matters: the `SBATCH_*` entries are read by
 `sbatch` at submit time and cannot be set from inside the job. Everything else is

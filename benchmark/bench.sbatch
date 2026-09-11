@@ -20,6 +20,7 @@
 #   CORPUS_ROOT        directory holding <corpus>.bin (default /scratch/$USER/corpora)
 #   MODULES            module names to load in-job   (default none)
 #   MEM_RESERVE_GIB    held back from the RLIMIT_AS  (default 8)
+#   BUILD_IN_JOB       compile the baselines in-job  (default 1; see below)
 #
 # `sbatch` exports the submitting environment by default, so sourcing local.env
 # in your shell covers both the SBATCH_* directives and the in-job variables.
@@ -66,6 +67,33 @@ if [ -n "${MODULES}" ]; then
     # shellcheck disable=SC2086
     module load ${MODULES} || echo "WARN: module load failed; using the ambient environment"
     set -u
+fi
+
+# Compile inside the job, not on the login node: the CUDA sources are CPU-heavy
+# and login nodes are usually CPU-time limited, while here we have every core of
+# an exclusive allocation. Configure is the opposite -- it fetches both baselines,
+# so it needs network, which compute nodes often lack, but it costs seconds. So
+# the split is: configure wherever there is network, compile here.
+#
+# Building in-job also guarantees the commit stamped into the binary is the one
+# that actually built it.
+if [ "${BUILD_IN_JOB:-1}" = 1 ]; then
+    if [ ! -f "${BUILD}/CMakeCache.txt" ]; then
+        echo "No ${BUILD}/CMakeCache.txt -- configuring here. This needs network;"
+        echo "if this node has none, run it on a login node first and resubmit:"
+        echo "    cmake -S '${REPO}' -B '${BUILD}' -DBENCHMARK=ON -DCMAKE_BUILD_TYPE=Release"
+        cmake -S "${REPO}" -B "${BUILD}" -DBENCHMARK=ON -DCMAKE_BUILD_TYPE=Release \
+            || { echo "FATAL: configure failed."; exit 1; }
+    elif ! grep -q '^BENCHMARK:BOOL=ON' "${BUILD}/CMakeCache.txt"; then
+        echo "FATAL: ${BUILD} was configured without -DBENCHMARK=ON, so the baseline"
+        echo "       targets do not exist. Reconfigure:"
+        echo "    cmake -S '${REPO}' -B '${BUILD}' -DBENCHMARK=ON"
+        exit 1
+    fi
+
+    echo "compiling baselines with -j$(nproc)"
+    cmake --build "${BUILD}" --target bench_libsais bench_libcubwt -j"$(nproc)" \
+        || { echo "FATAL: build failed."; exit 1; }
 fi
 
 # OMP_DYNAMIC=false is a correctness precondition, not tuning: with it on libsais
