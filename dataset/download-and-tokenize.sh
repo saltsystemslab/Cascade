@@ -42,6 +42,13 @@ if [ "$DATASET" = redpajama ]; then
     SUBSET="${SUBSET:-arxiv}"                  # RedPajama-V1 subset (see redpajama branch)
     LABEL="$DATASET-$SUBSET"
 fi
+# LABEL is overridable because the four already-built corpora live in FLAT dirs
+# on scratch -- arxiv/, github/, c4/, dolmasample/ -- not the redpajama-<subset>
+# this computes. Without the override, a Llama-2 arxiv run would create a second
+# directory (redpajama-arxiv/) beside the OLMo one, splitting an alphabet-ablation
+# pair across two paths where nothing checks that they describe the same corpus.
+#   LABEL=arxiv SUBSET=arxiv ./submit-download.sh redpajama
+LABEL="${LABEL_OVERRIDE:-$LABEL}"
 
 # Tokenizer tag: arrays from different tokenizers must not overwrite each other.
 # raw/ stays UNtagged on purpose -- one download feeds every tokenization of it.
@@ -84,12 +91,39 @@ case "$DATASET" in
     # monolithic .jsonl -> one worker, single-core tokenize. Pre-split first
     # (e.g. `split -d -n l/64 file.jsonl part_`) if you need them. book: defunct.
     SUBSET="${SUBSET:-arxiv}"; NFILES="${NFILES:-all}"   # SUBSET resolved in CONFIG; kept for clarity
-    curl -s https://data.together.xyz/redpajama-data-1T/v1.0.0/urls.txt \
-        | grep "/$SUBSET/" > "$RAW_DIR/urls.txt"
-    if [ "$NFILES" != "all" ]; then
-        head -n "$NFILES" "$RAW_DIR/urls.txt" > "$RAW_DIR/urls.head"
-        mv "$RAW_DIR/urls.head" "$RAW_DIR/urls.txt"
+    # Re-fetching by REPLAYING the saved url list, not by re-deriving it. The
+    # previous version always re-curled the live master list and re-grepped the
+    # subset, so a re-fetch pulled whatever upstream serves today -- which is
+    # exactly the confounding the runbook warns about for the ablation pairs,
+    # with the urls.txt it carefully preserved sitting unused. When a saved list
+    # exists we replay it; when it exists AND differs from upstream we say so
+    # and stop, because a changed list means the corpus changed.
+    SAVED="$ROOT/$LABEL/urls.txt"
+    if [ -f "$SAVED" ] && [ -z "${REFRESH_URLS:-}" ]; then
+        echo ">> replaying saved url list: $SAVED ($(wc -l < "$SAVED") files)"
+        cp -f "$SAVED" "$RAW_DIR/urls.txt"
+        if [ -n "${CHECK_URLS:-}" ]; then
+            curl -s https://data.together.xyz/redpajama-data-1T/v1.0.0/urls.txt \
+                | grep "/$SUBSET/" > "$RAW_DIR/urls.upstream" || true
+            if ! diff -q "$SAVED" "$RAW_DIR/urls.upstream" >/dev/null; then
+                echo "upstream url list for '$SUBSET' differs from the saved one:" >&2
+                diff "$SAVED" "$RAW_DIR/urls.upstream" | head -20 >&2
+                echo "Refusing to proceed -- re-fetching different files would confound" >&2
+                echo "any comparison against the existing array. Set REFRESH_URLS=1 to" >&2
+                echo "deliberately adopt the new list (and expect different counts)." >&2
+                exit 1
+            fi
+            echo ">> url list matches upstream"
+        fi
+    else
+        curl -s https://data.together.xyz/redpajama-data-1T/v1.0.0/urls.txt \
+            | grep "/$SUBSET/" > "$RAW_DIR/urls.txt"
+        if [ "$NFILES" != "all" ]; then
+            head -n "$NFILES" "$RAW_DIR/urls.txt" > "$RAW_DIR/urls.head"
+            mv "$RAW_DIR/urls.head" "$RAW_DIR/urls.txt"
+        fi
     fi
+    [ -s "$RAW_DIR/urls.txt" ] || { echo "no urls for subset '$SUBSET' -- check the name" >&2; exit 1; }
     TOTAL=$(wc -l < "$RAW_DIR/urls.txt")
     echo ">> fetching $TOTAL files ($SUBSET) into $RAW_DIR, $DL_PROC parallel streams"
     xargs -P"$DL_PROC" -I{} sh -c \
@@ -121,6 +155,16 @@ esac
 # provenance survives deleting the raw text once the token array is verified.
 # Raw text is free to re-fetch; the token array is the expensive artifact.
 MANIFEST="$ROOT/$LABEL/raw-manifest.tsv"
+# Archive any existing manifest before truncating it. Once a corpus's raw/ has
+# been deleted, its manifest is the ONLY surviving evidence of what the verified
+# array was built from -- and comparing old vs new byte sizes per shard is the
+# cheapest way to catch a re-download that pulled different data, which is the
+# one failure that would quietly invalidate an alphabet-ablation pair. Losing it
+# to a re-fetch is unrecoverable, so this runs before the truncation, not after.
+if [ -f "$MANIFEST" ] && [ ! -f "$ROOT/$LABEL/raw-manifest.orig.tsv" ]; then
+    cp -n "$MANIFEST" "$ROOT/$LABEL/raw-manifest.orig.tsv"
+    echo ">> archived the previous manifest -> $ROOT/$LABEL/raw-manifest.orig.tsv"
+fi
 {
     echo "# dataset:   $DATASET"
     [ "$DATASET" = redpajama ] && echo "# subset:    $SUBSET"
@@ -137,6 +181,15 @@ find "$RAW_DIR" -name .cache -prune -o -type f -printf '%s\t%P\n' \
 NFOUND=$(grep -cv '^#' "$MANIFEST" || true)
 echo ">> manifest: $NFOUND files -> $MANIFEST"
 
+# `hf download --include <glob>` exits 0 when the glob matches nothing, so a
+# typo'd INCLUDE looks like a successful fetch and the failure only surfaces
+# hours later as "No files matching" in every array task. Fail here instead.
+if [ "$NFOUND" -eq 0 ]; then
+    echo "nothing landed in $RAW_DIR -- INCLUDE='${INCLUDE:-<unset>}' matched no files." >&2
+    echo "Confirm the real layout first:  hf datasets ls <repo> --tree -h" >&2
+    exit 1
+fi
+
 # Keep the exact URL list too (RedPajama/Dolma): upstream subsets do disappear,
 # and it's the record of precisely which files went in.
 if [ -f "$RAW_DIR/urls.txt" ]; then
@@ -144,12 +197,30 @@ if [ -f "$RAW_DIR/urls.txt" ]; then
     echo ">> urls:     $ROOT/$LABEL/urls.txt"
 fi
 
+# ---------------------------- PRE-SPLIT (auto) ------------------------------
+# Single-file subsets (wikipedia, stackexchange) would otherwise tokenize on one
+# core. presplit.sh rewrites TOK_INPUT/TOK_GLOB to point at the parts dir, so it
+# is SOURCED, not executed. It lives in its own file because none of the GNU
+# tools it needs (split -n l/N, --additional-suffix, find -printf, stat -c)
+# exist on BSD/macOS, which makes it untestable on a dev Mac unless it can be
+# driven directly -- see test-presplit.sh.
+#
+# Position matters twice over: after the manifest, so provenance records the
+# file that was actually downloaded rather than 64 derived parts; and before the
+# `next:` line below, which must carry the rewritten input dir and a glob that
+# matches it.
+. "$SCRIPT_DIR/presplit.sh"
+
 # Download-only mode: stop here so the tokenize step can run separately as a
 # scheduler-friendly job array (see submit-tokenize.sh). Fetch is network-bound,
 # so this runs fine on a login node or a 1-CPU allocation.
 if [ -n "${SKIP_TOKENIZE:-}" ]; then
     echo "SKIP_TOKENIZE set -> fetched into $TOK_INPUT (glob: $TOK_GLOB); skipping tokenize."
-    echo "next: INPUT_DIR=$TOK_INPUT OUT=$OUT_BIN GLOB='$TOK_GLOB' ./submit-tokenize.sh"
+    # TOKENIZER is echoed because the tag in OUT is derived from it: pasting an
+    # OUT that says -olmo while overriding TOKENIZER=...Llama-2... writes a
+    # Llama-2 array to an olmo-tagged path, and the whole OLMo-vs-Llama-2
+    # comparison is keyed on that tag.
+    echo "next: TOKENIZER=$TOKENIZER INPUT_DIR=$TOK_INPUT OUT=$OUT_BIN GLOB='$TOK_GLOB' ./submit-tokenize.sh"
     exit 0
 fi
 

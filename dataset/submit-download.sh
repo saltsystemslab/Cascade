@@ -37,6 +37,7 @@ PART="${PART:-short}"
 # Display/job label: redpajama is split by subset, others are not.
 LABEL="$DATASET"
 if [ "$DATASET" = redpajama ]; then LABEL="$DATASET-$SUBSET"; fi
+LABEL="${LABEL_OVERRIDE:-$LABEL}"   # keep the job name in step with the output dir
 
 # This launcher is not spooled, so it knows the real dataset/ dir; pass it to the
 # batch job as DL_DIR (sbatch runs a spooled copy that can't self-locate).
@@ -47,9 +48,25 @@ EXPORTS="DL_DIR=$SCRIPT_DIR,DATASET=$DATASET,ROOT=$ROOT,SUBSET=$SUBSET,DL_PROC=$
 if [ -n "${INCLUDE:-}" ]; then EXPORTS="$EXPORTS,INCLUDE=$INCLUDE"; fi
 if [ -n "${NFILES:-}"  ]; then EXPORTS="$EXPORTS,NFILES=$NFILES";  fi
 if [ -n "${VER:-}"     ]; then EXPORTS="$EXPORTS,VER=$VER";        fi
+# TOKENIZER must travel: the fetch job prints the exact `next:` tokenize command,
+# and the tokenizer tag in that command's OUT path comes from it. Without this,
+# the job always computed TAG=olmo and printed an -olmo path -- wrong for every
+# corpus under the Llama-2 policy, and pasting it mislabels the array.
+if [ -n "${TOKENIZER:-}" ]; then EXPORTS="$EXPORTS,TOKENIZER=$TOKENIZER"; fi
+if [ -n "${LABEL_OVERRIDE:-}" ]; then EXPORTS="$EXPORTS,LABEL_OVERRIDE=$LABEL_OVERRIDE"; fi
+for v in PRESPLIT SPLITS DROP_MONOLITH REFRESH_URLS CHECK_URLS; do
+    eval "val=\${$v:-}"
+    if [ -n "$val" ]; then EXPORTS="$EXPORTS,$v=$val"; fi
+done
+
+# d4067 is the pinned benchmark node: its page cache is a recorded measurement
+# constant, so streaming hundreds of GB of raw text through it would silently
+# corrupt a timing. Dataset jobs never land there.
+EXCLUDE="${EXCLUDE:-d4067}"
 
 job=$(sbatch --parsable \
     --partition="$PART" --job-name="dl-$LABEL" \
+    --exclude="$EXCLUDE" \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
 

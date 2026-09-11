@@ -75,7 +75,7 @@ def _init_worker(tokenizer_name, text_field):
 def tokenize_file(task):
     """Tokenize one input file -> its part file, via a .tmp + atomic rename."""
     import numpy as np
-    idx, in_path, out_path, batch_size = task
+    idx, in_path, out_path, batch_size, allow_empty = task
     tmp_path = out_path + ".tmp"
     n_ids = 0   # uint16 values written (tokens + separators)
     n_docs = 0
@@ -111,6 +111,18 @@ def tokenize_file(task):
                 flush(batch)
                 batch = []
         flush(batch)
+    # A zero-document part is the one failure this design cannot otherwise see:
+    # skip-if-exists counts it as done, do_concat accepts it, and the array comes
+    # out short by exactly one file's documents while every other check still
+    # passes. A wrong --text-field would do this to EVERY file. So refuse to
+    # promote it, and leave no part behind for a resume to trust.
+    if n_docs == 0 and not allow_empty:
+        os.unlink(tmp_path)
+        raise RuntimeError(
+            f"{in_path}: produced 0 documents. Refusing to write an empty part -- "
+            f"it would look 'done' to the resume logic and silently drop this file "
+            f"from the array. Check --text-field (currently {_TEXT_FIELD!r}) and the "
+            f"input file; pass --allow-empty-parts if an empty input is expected.")
     os.replace(tmp_path, out_path)   # atomic within the same directory/filesystem
     return idx, os.path.basename(in_path), n_ids, n_docs
 
@@ -190,6 +202,10 @@ def main():
                     help="Phase 2: stitch existing parts into the final array")
     ap.add_argument("--keep-temp", action="store_true",
                     help="keep the parts dir after a successful concat")
+    ap.add_argument("--allow-empty-parts", action="store_true",
+                    help="permit a 0-document input file to produce an empty part "
+                         "(default: hard error, since an empty part looks 'done' to "
+                         "the resume logic and silently shortens the array)")
     args = ap.parse_args()
 
     if args.shard and args.concat:
@@ -216,7 +232,8 @@ def main():
         role = "all files"
 
     doneset = {i for i in my_idx if os.path.exists(part_path(parts_dir, i))}
-    todo = [(i, str(files[i]), part_path(parts_dir, i), args.batch_size)
+    todo = [(i, str(files[i]), part_path(parts_dir, i), args.batch_size,
+             args.allow_empty_parts)
             for i in my_idx if i not in doneset]
 
     print(f"{len(files)} files total; this run: {role} -> {len(my_idx)} assigned, "
