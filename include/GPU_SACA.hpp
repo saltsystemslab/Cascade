@@ -40,6 +40,8 @@ private:
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
                                                         // TODO: what happens if we bump it down? How far can we go?
 
+    static constexpr idx_t PREFIX_KEY_GATHER_PREFETCH_D = 16;   // Software-prefetch lookahead for prefix-key gathering in initial ranking.
+
     // Bytes per suffix required in each of the two device key-buffers, per
     // partition. The initial-ranking phase sorts the suffixes by their `\ell`-
     // length prefixes, whereas the re-ranking phase reuses one buffer as two
@@ -182,6 +184,10 @@ private:
 
     // Partitions the suffixes based on the selected pivots.
     void partition();
+
+    // Measures the cost of prefix-key gathers in initial ranking, against the
+    // layouts: (1) that `partition()` produces, and (2) the suffix-order.
+    void probe_prefix_key_gather();
 
     // Sets the context-size that the current generation is resolving to `ctx`
     // and the generation's index to `gen`.

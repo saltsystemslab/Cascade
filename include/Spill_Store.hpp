@@ -15,14 +15,13 @@ namespace gpu_saca
 
 // Types / roles of per-partition spill files. A partition has the following
 // spill files: `suf`- / `key`-file holds the partition's suffix- / key-content,
-// `prefix`-file holds the initial prefix-keys, and two pairs (for alternating
-// generations) of message-inbox files (`tgt_tag` holds the targets with the
-// senders' forward tags packed in, and `rank` holds the senders' ranks).
+// and two pairs (for alternating generations) of message-inbox files (`tgt_tag`
+// holds the targets with the senders' forward tags packed in, and `rank` holds
+// the senders' ranks).
 enum class Spill_Role
 {
     // Following are partition-content.
-    prefix, // Initial packed-prefixes.
-    suf,    // Suffixes, parallel to `prefix` and `key`.
+    suf,    // Suffixes, parallel to `key`.
     key,    // Keys (local ranks), parallel to `suf`.
 
     // Following are message-inboxes.

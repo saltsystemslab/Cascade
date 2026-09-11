@@ -15,7 +15,7 @@ namespace gpu_saca
 
 Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t budget, const std::size_t fixed_bytes, const p_id_t p):
       p_(p)
-    , plan_(P_cap, budget, fixed_bytes, sizeof(Prefix_Key))
+    , plan_(P_cap, budget, fixed_bytes)
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
     , msg_off_(nullptr)
@@ -59,9 +59,9 @@ void Partition_Backend::open_deferred_inboxes()
 }
 
 
-void Partition_Backend::retire_prefix_and_open_key(const p_id_t p_id)
+void Partition_Backend::open_key(const p_id_t p_id)
 {
-    disk_.retire_prefix_and_open_key(p_id);
+    disk_.open_key(p_id);
 }
 
 
@@ -72,12 +72,12 @@ void Partition_Backend::retire_partition(const p_id_t p_id)
 }
 
 
-void Partition_Backend::read_prefixes(Staging_Slab& s) const
+void Partition_Backend::read_suffixes(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
-    INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(Prefix_Key)));
+    INSTRUMENT(probe::P().me().bytes += s.size() * sizeof(idx_t));
 
-    read_prefix_chunk(s.p_id(), s.off(), s.size(), s.suf(), s.key());
+    read_suf_chunk(s.p_id(), s.off(), s.size(), s.suf());
 }
 
 
@@ -94,20 +94,17 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 }
 
 
+void Partition_Backend::read_suf_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf) const
+{
+    plan_.data(p_id) ?  ram_.read_suf(p_id, off, sz, suf) :
+                        disk_.read_suf(p_id, off, sz, suf);
+}
+
+
 void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, p_sz_t* const key) const
 {
     plan_.data(p_id) ?  (ram_.read_suf(p_id, off, sz, suf), ram_.read_key(p_id, off, sz, key)) :
                         (disk_.read_suf(p_id, off, sz, suf), disk_.read_key(p_id, off, sz, key));
-}
-
-
-void Partition_Backend::read_prefix_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, Prefix_Key* const key) const
-{
-    plan_.data(p_id) ?  ram_.read_suf(p_id, off, sz, suf) :
-                        disk_.read_suf(p_id, off, sz, suf);
-
-    plan_.prefix(p_id) ?    ram_.read_prefix(p_id, off, sz, key) :
-                            disk_.read_prefix(p_id, off, sz, key);
 }
 
 
@@ -263,12 +260,6 @@ idx_t Partition_Backend::inbox_mass_last_gen() const
         sz += msg_count_[parity][p_id];
 
     return sz;
-}
-
-
-void Partition_Backend::drop_prefixes()
-{
-    ram_.drop_prefixes(), disk_.drop_prefixes();
 }
 
 }

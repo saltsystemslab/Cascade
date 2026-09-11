@@ -15,7 +15,6 @@ const char* Spill_Store::role_name(const Spill_Role role)
 {
     switch(role)
     {
-    case Spill_Role::prefix:    return "prefix";
     case Spill_Role::suf:       return "suf";
     case Spill_Role::key:       return "key";
 

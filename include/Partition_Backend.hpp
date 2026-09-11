@@ -9,7 +9,6 @@
 #include "Disk_Backend.hpp"
 #include "Staging_Slab.hpp"
 #include "Spill_Store.hpp"
-#include "Direct_File.hpp"
 #include "Residency_Plan.hpp"
 #include "Spin_Lock.hpp"
 #include "message.hpp"
@@ -89,8 +88,8 @@ public:
     /// Opens the inbox-files of the parity first written at generation 1.
     void open_deferred_inboxes();
 
-    // Retires the `p_id`'th partition's prefix-file and opens its key-file.
-    void retire_prefix_and_open_key(p_id_t p_id);
+    // Opens the `p_id`'th partition's key-file.
+    void open_key(p_id_t p_id);
 
     // Retires the `p_id`'th partition's suffixes and keys.
     void retire_partition(p_id_t p_id);
@@ -113,31 +112,23 @@ public:
     // Returns the `p_id`'th partition's resident keys, if any.
     auto* resident_key(const p_id_t p_id) { return plan_.data(p_id) ? ram_.key(p_id) : nullptr; }
 
-    // Returns the `p_id`'th partition's resident prefix-keys, if any.
-    auto* resident_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? ram_.prefix(p_id) : nullptr; }
-
     // Returns the `p_id`'th partition's spilled suffixes' file, if any.
     auto* spilled_suf(const p_id_t p_id) { return plan_.data(p_id) ? nullptr : &disk_.suf(p_id); }
 
-    // Returns the `p_id`'th partition's spilled prefix-keys' file, if any.
-    auto* spilled_prefix(const p_id_t p_id) { return plan_.prefix(p_id) ? nullptr : &disk_.prefix(p_id); }
-
-    // Reads the staging slab `s`'s chunk of suffixes and their corresponding
-    // prefix-keys from the backend into it.
-    void read_prefixes(Staging_Slab& s) const;
+    // Reads the staging slab `s`'s chunk of suffixes from the backend into it.
+    void read_suffixes(Staging_Slab& s) const;
 
     // Reads the staging slab `s`'s chunk of suffixes and their corresponding
     // ranks from the backend into it.
     void read_keys(Staging_Slab& s) const;
 
+    // Reads `sz` suffixes of the `p_id`'th partition, from its offset `off`,
+    // into `suf`.
+    void read_suf_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf) const;
+
     // Reads `sz` suffixes and their corresponding ranks of the `p_id`'th
     // partition, from its offset `off`, into `suf` and `key` respectively.
     void read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, p_sz_t* key) const;
-
-    // Reads `sz` suffixes and their corresponding initial prefix-keys of the
-    // `p_id`'th partition, from its offset `off`, into `suf` and `key`
-    // respectively.
-    void read_prefix_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, Prefix_Key* key) const;
 
     // Reads into the staging slab `s` its chunk of its partition's inbox
     // messages for the current generation.
@@ -162,9 +153,6 @@ public:
 
     // Returns the total size of the inboxes written to at the last generation.
     idx_t inbox_mass_last_gen() const;
-
-    // Drops the prefix-key files from the backend.
-    void drop_prefixes();
 };
 
 }
