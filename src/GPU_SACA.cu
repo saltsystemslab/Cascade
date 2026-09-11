@@ -2,6 +2,7 @@
 #include "GPU_SACA.hpp"
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.hpp"
+#include "Packed_Prefix.hpp"
 #include "Packed_Prefix_Decomposer.cuh"
 #include "bit-layout.hpp"
 #include "message.hpp"
@@ -24,6 +25,7 @@
 #include <cstddef>
 #include <limits>
 #include <atomic>
+#include <utility>
 #include <vector>
 #include <cstring>
 #include <sstream>
@@ -146,8 +148,6 @@ void GPU_SACA<T_sym_>::build_SA()
     const auto t_2 = now();
     std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
 
-    {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
-
     {
         PROFILE_SCOPE("allocate_device_space");
         if(!allocate_device_space())
@@ -169,7 +169,7 @@ void GPU_SACA<T_sym_>::build_SA()
     const auto t_4 = now();
     std::cerr << "Initial ranking completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
 
-    {   PROFILE_SCOPE("drop_prefixes");             backend_->drop_prefixes();   }
+    {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_5 = now();
@@ -618,12 +618,12 @@ void GPU_SACA<T_sym_>::partition()
         compute_partition_IDs();
     }
 
-    // Move the suffixes (with some associated prefixes) to their corresponding partitions.
+    // Move the suffixes to their corresponding partitions.
     {
         PROFILE_SCOPE("scatter_to_partition");
         std::vector<util::Padded<Suffix_Buffer>> P_buf;
 
-        // Initialize the partitions' spill-stores and their prefix-key buffers.
+        // Initialize the partitions' spill-stores and their scatter buffers.
         {
             PROFILE_SCOPE("allocate_partition_buffers");
 
@@ -648,18 +648,18 @@ void GPU_SACA<T_sym_>::partition()
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->resident_prefix(p_id), backend_->spilled_suf(p_id), backend_->spilled_prefix(p_id)});
+                P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->spilled_suf(p_id)});
         }
 
 
-        // Add suffix indices along with their `ELL_WORDS x 8`-byte prefixes to their corresponding partitions (through the buffers).
+        // Add suffix indices to their corresponding partitions (through the buffers).
         {
             PROFILE_SCOPE("omp_scatter");
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
             {
                 const p_id_t phi = (i + ell < n_ ? P_id[i + ell] : 0);  // Forward tag for generation 0.
-                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi), Prefix_Key::pack_prefix(T_h_ + i));   // Suffix packed with its forward tag, seeded at generation 0.
+                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi));  // Suffix packed with its forward tag, seeded at generation 0.
             }
 
             #pragma omp parallel for schedule(static)
@@ -674,10 +674,92 @@ void GPU_SACA<T_sym_>::partition()
                 part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_cap[p_id]);
 
             std::cerr << "Partition-sizes match verification: " << (part_sz_match ? "Passes" : "Fails") << "\n";
-            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(T_h_, n_, P_id, P_cap, *backend_) ? "Passes" : "Fails") << "\n";
+            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(n_, ell, P_id, P_cap, *backend_) ? "Passes" : "Fails") << "\n";
         }
 #endif
     }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::probe_prefix_key_gather()
+{
+    p_id_t q = p_;  // ID of the largest host-resident partition.
+    idx_t q_sz = 0; // Size of the largest host-resident partition.
+    for(p_id_t i = 0; i < p_; ++i)
+        if(backend_->resident_suf(i) != nullptr && q_sz < P_cap[i])
+            q = i, q_sz = P_cap[i];
+
+    if(q == p_)
+    {
+        std::cerr << "Prefix-gather probe: no resident partition.\n";
+        return;
+    }
+
+    idx_t sample = std::min<idx_t>(q_sz, env::get_u64("GPU_SACA_PREFIX_GATHER_PROBE_N").value_or(idx_t(64) << 20));
+    auto* const flush_ord = util::checked_allocate<idx_t>(sample);  // Partition-layout produced by the scatter in partitioning.
+    auto* const text_ord = util::checked_allocate<idx_t>(sample);   // Partition-layout a counting-scatter would produce.
+
+    // Produce the layout orderings.
+    {
+        const auto* const suf = backend_->resident_suf(q);
+        #pragma omp parallel for schedule(static)
+        for(idx_t i = 0; i < sample; ++i)
+            flush_ord[i] = bit_layout::suffix_of(suf[i]);
+
+        idx_t c = 0;
+        for(idx_t i = 0; i < n_ && c < sample; ++i)
+            if(P_id[i] == q)
+                text_ord[c++] = i;
+
+        sample = c;
+    }
+
+
+    // Times `sample`-many prefix gathers from suffixes in `suf`, prefetching
+    // `D` iterations ahead. Returns (timing, sink-value).
+    const auto run = [&](const idx_t* const suf, const idx_t D)
+    {
+        const auto t_0 = timer::now();
+
+        uint64_t sink = 0;  // Redundant sink to accumulate data so that the next loop isn't optimized away.
+        #pragma omp parallel for schedule(static) num_threads(stager_c_) reduction(^ : sink)
+        for(idx_t i = 0; i < sample; ++i)
+        {
+            if(D > 0 && i + D < sample)
+                __builtin_prefetch(T_h_ + suf[i + D], 0, 0);
+
+            const auto pre_key = Prefix_Key::pack_prefix(T_h_ + suf[i]);
+            for(idx_t w = 0; w < ELL_WORDS; ++w)
+                sink ^= pre_key.word[w];
+        }
+
+        return std::pair<double, uint64_t>{timer::duration(timer::now() - t_0), sink};
+    };
+
+    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+    const auto [rss, thp] = util::thp_coverage(T_h_);
+
+    std::cerr   << "Prefix-gather probe (p_id " << q << ", " << sample << " of " << q_sz << " suffixes,"
+                " ell = " << ell << " symbols, p = " << p_ << ", " << stager_c_ << " threads):\n"
+                << "\tT: " << GB(n_ * sizeof(T_sym_)) << "GBs mapped, " << GB(rss) << "GBs resident, "
+                << GB(thp) << "GBs in huge pages (" << (rss ? 100.0 * thp / rss : 0.0) << "%)\n"
+                << "\tD\torder\tns/gather\tM gathers/s\tprojected over n\n";
+
+    run(flush_ord, 32), run(text_ord, 32);  // Warmup runs.
+    for(const idx_t D : {idx_t(0), idx_t(8), idx_t(16), idx_t(32), idx_t(64), idx_t(128)})
+        for(const auto& [name, idx] : {std::pair<const char*, const idx_t*>{"flush", flush_ord},
+                                       std::pair<const char*, const idx_t*>{"text ", text_ord}})
+        {
+            const auto [s, sink] = run(idx, D);
+            std::cerr << "\t" << D << "\t" << name
+                      << "\t" << (s * 1e9 / sample)
+                      << "\t\t" << (sample / s / 1e6)
+                      << "\t\t" << (s * static_cast<double>(n_) / sample) << "s"
+                      << "\t(sink " << sink << ")\n";
+        }
+
+    util::deallocate(flush_ord), util::deallocate(text_ord);
 }
 
 
@@ -1172,7 +1254,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         INSTRUMENT(probe::P().me().items++);
 
                         s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
-                        if constexpr(init_rank_)    backend_->read_prefixes(*s);
+                        if constexpr(init_rank_)    backend_->read_suffixes(*s);
                         else                        backend_->read_keys(*s);
 
                         if(s->inbox_sz() > 0)
@@ -1298,7 +1380,7 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         }
 #endif
                         if constexpr(init_rank_)    // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
-                            backend_->retire_prefix_and_open_key(p_id);
+                            backend_->open_key(p_id);
 
                         {
                             INSTRUMENT_TIMER(probe::P().me().device_ns);
@@ -1369,9 +1451,19 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
 #endif
 
     auto* const beta = s.beta();
+    auto* const key = s.key();
     for(idx_t i = 0; i < sz; ++i)
     {
         const auto j = bit_layout::suffix_of(suf[i]);
+
+        if constexpr(init_rank_)
+        {
+            if(i + PREFIX_KEY_GATHER_PREFETCH_D < sz)
+                __builtin_prefetch(T_h_ + bit_layout::suffix_of(suf[i + PREFIX_KEY_GATHER_PREFETCH_D]), 0, 0);
+
+            key[i] = Prefix_Key::pack_prefix(T_h_ + j);
+        }
+
         beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
                                         init_rank_ || j < stride ? 0 : P_id[j - stride]);
     }

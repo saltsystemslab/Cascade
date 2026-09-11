@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <limits>
+#include <utility>
 #include <random>
 #include <vector>
 #include <filesystem>
@@ -198,6 +199,10 @@ void prepage(T_* const ptr, const std::size_t size)
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
 
+// Returns from `/proc/self/smaps` (pseudo-file with memory consumption metrics
+// for each memory mapping), for the memory mapping containing the address `p`,
+// `(RSS-bytes, THP-bytes)`. Both are `0` if not found.
+std::pair<std::size_t, std::size_t> thp_coverage(const void* p);
 
 // Returns the size of the file of elements of type `T_` at path `file_path`.
 template <typename T_>

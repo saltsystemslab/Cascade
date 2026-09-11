@@ -7,8 +7,10 @@
 #
 # Usage:   ROOT=/scratch/$USER/corpora ./download-and-tokenize.sh {c4|pile|redpajama|dolma}
 # Tune via env vars, e.g.:
-#   ROOT=/scratch/$USER/corpora INCLUDE="en/c4-train.00*-of-01024.json.gz" \
+#   ROOT=/scratch/$USER/corpora INCLUDE="en/c4-train.000*-of-01024.json.gz" \
 #       TOKENIZER=allenai/OLMo-7B-hf WORKERS=64 ./download-and-tokenize.sh c4
+#   # NB: C4 shard numbers are 5 digits -> 000* = 100 shards (~35 GB),
+#   #     00* = 1000 shards (~340 GB, ~all of C4), * = all 1024.
 #
 # Prereqs:  pip install -U "huggingface_hub[hf_xet]" transformers tokenizers \
 #                          numpy zstandard sentencepiece
@@ -41,15 +43,24 @@ if [ "$DATASET" = redpajama ]; then
     LABEL="$DATASET-$SUBSET"
 fi
 
+# Tokenizer tag: arrays from different tokenizers must not overwrite each other.
+# raw/ stays UNtagged on purpose -- one download feeds every tokenization of it.
+case "$TOKENIZER" in
+    *[Oo][Ll][Mm][Oo]*)    TAG="${TAG:-olmo}"   ;;
+    *[Ll]lama-2*|*llama*)  TAG="${TAG:-llama2}" ;;
+    *gpt2*)                TAG="${TAG:-gpt2}"   ;;
+    *) TAG="${TAG:-$(basename "$TOKENIZER" | tr '[:upper:]' '[:lower:]')}" ;;
+esac
+
 RAW_DIR="$ROOT/$LABEL/raw"
-OUT_BIN="$ROOT/$LABEL/${LABEL}.tokenized.bin"
+OUT_BIN="$ROOT/$LABEL/${LABEL}-${TAG}.tokenized.bin"
 mkdir -p "$RAW_DIR" "$(dirname "$OUT_BIN")"
 
 # ------------------------------- FETCH --------------------------------------
 case "$DATASET" in
   c4)
     # 1024 en train shards, ~319 MB each (~195M tokens/shard).
-    #   000* -> 10 shards (~2B tok) | 00* -> 100 (~20B) | * -> all (~198B)
+    #   5-digit shards: 000* -> 100 (~35 GB) | 00* -> 1000 (~340 GB, ~all) | * -> all 1024
     INCLUDE="${INCLUDE:-en/c4-train.000*-of-01024.json.gz}"
     hf download allenai/c4 --repo-type dataset \
         --include "$INCLUDE" --local-dir "$RAW_DIR"
@@ -104,6 +115,34 @@ case "$DATASET" in
 
   *) echo "unknown dataset: $DATASET" >&2; exit 1 ;;
 esac
+
+# ---------------------------- RAW MANIFEST ----------------------------------
+# Record what actually landed (byte sizes + filenames) as a SIBLING of raw/, so
+# provenance survives deleting the raw text once the token array is verified.
+# Raw text is free to re-fetch; the token array is the expensive artifact.
+MANIFEST="$ROOT/$LABEL/raw-manifest.tsv"
+{
+    echo "# dataset:   $DATASET"
+    [ "$DATASET" = redpajama ] && echo "# subset:    $SUBSET"
+    [ -n "${INCLUDE:-}" ]      && echo "# include:   $INCLUDE"
+    [ -n "${NFILES:-}"  ]      && echo "# nfiles:    $NFILES"
+    [ -n "${VER:-}"     ]      && echo "# version:   $VER"
+    echo "# fetched:   $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# raw_dir:   $RAW_DIR"
+    echo "# tok_input: $TOK_INPUT (glob: $TOK_GLOB)"
+    echo "# bytes	path   -- relative to raw_dir; .cache/ bookkeeping excluded"
+} > "$MANIFEST"
+find "$RAW_DIR" -name .cache -prune -o -type f -printf '%s\t%P\n' \
+    | sort -k2 >> "$MANIFEST"
+NFOUND=$(grep -cv '^#' "$MANIFEST" || true)
+echo ">> manifest: $NFOUND files -> $MANIFEST"
+
+# Keep the exact URL list too (RedPajama/Dolma): upstream subsets do disappear,
+# and it's the record of precisely which files went in.
+if [ -f "$RAW_DIR/urls.txt" ]; then
+    cp -f "$RAW_DIR/urls.txt" "$ROOT/$LABEL/urls.txt"
+    echo ">> urls:     $ROOT/$LABEL/urls.txt"
+fi
 
 # Download-only mode: stop here so the tokenize step can run separately as a
 # scheduler-friendly job array (see submit-tokenize.sh). Fetch is network-bound,
