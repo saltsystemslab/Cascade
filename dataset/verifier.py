@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Verify a GPU_SACA token array: little-endian uint16, 0xFFFF (65535) written
-AFTER every document. Full chunked scan; numpy only.
+BEFORE every document, so the array ends in a real token id (infini-gram's
+convention). Use --sep-last for arrays built here before 2026-09-11, which
+appended the separator instead. Full chunked scan; numpy only.
 
 Exit status is the point of this script: 0 = every check passed, 1 = a check
 FAILED, 2 = usage/config error. That is what lets "verify before deleting raw"
@@ -8,7 +10,7 @@ FAILED, 2 = usage/config error. That is what lets "verify before deleting raw"
 
     python3 verifier.py --tokenizer llama2 --expect-docs 1,558,306 arxiv-llama2.tokenized.bin
     python3 verifier.py --vocab 50280 c4.tokenized.bin       # pre-tag arrays are untagged
-    python3 verifier.py --sep-first dolmasample.tokenized.bin
+    python3 verifier.py --sep-last legacy-trailing.tokenized.bin
 
 Document counts are tokenizer-invariant: an OLMo and a Llama-2 array over the
 same raw text MUST report the same --expect-docs, or the re-download pulled
@@ -71,10 +73,14 @@ def main():
     ap.add_argument("--avg-range", metavar="LO:HI",
                     help="FAIL outside this avg tokens/doc band "
                          "(default: WARN outside 10:50000)")
+    ap.add_argument("--sep-last", action="store_true",
+                    help="array APPENDS the separator (every array built here before "
+                         "2026-09-11): the last element is 65535. The default is the "
+                         "LEADING convention -- separator before each document, array "
+                         "ends in a real token id -- which is what this pipeline now "
+                         "emits and what reseparate.py converts to.")
     ap.add_argument("--sep-first", action="store_true",
-                    help="array PREPENDS the separator (infini-gram's pre-built "
-                         "dolmasample): element 0 is 65535 and the last element is a "
-                         "real token id")
+                    help="explicitly assert the leading convention (the default)")
     ap.add_argument("--quick", action="store_true",
                     help="structural checks only: first + last chunk, no full scan")
     ap.add_argument("--sha256", action="store_true",
@@ -133,16 +139,22 @@ def main():
     print(f"  first element: {first}   last element: {last}")
 
     # --- separator convention ---------------------------------------------------
-    if args.sep_first:
-        rec(first == SEP, "leading separator", f"a[0] = {first} (expect 65535)")
-        rec(last != SEP, "unterminated last doc",
-            f"a[-1] = {last} (prepend convention: expect a real token id)")
-    else:
+    if args.sep_last:
         rec(last == SEP, "trailing separator", f"a[-1] = {last} (expect 65535)")
         if first == SEP:
-            warn("leading element", "a[0] = 65535, but this pipeline never writes a "
-                                    "leading separator -- wrong convention, or a "
-                                    "zero-length first document?")
+            warn("leading element", "a[0] = 65535 as well; a trailing-convention "
+                                    "array whose first document is empty is "
+                                    "indistinguishable from a leading-convention one")
+    else:
+        rec(first == SEP, "leading separator", f"a[0] = {first} (expect 65535)")
+        # Deliberately a FAIL, not a warn: this is the check that catches an
+        # unconverted legacy array being treated as current, and the message
+        # names its own fix.
+        rec(last != SEP, "array ends in a real token",
+            f"a[-1] = {last}"
+            + ("" if last != SEP else "  -- this looks like a TRAILING-separator "
+                                      "array. Pass --sep-last to check it as one, "
+                                      "or convert it with reseparate.py"))
 
     # --- chunked scan -----------------------------------------------------------
     if args.quick:
@@ -208,7 +220,8 @@ def main():
                                      os.path.basename(args.path))
         tag = args.tokenizer or _tag_from_name(args.path) or "-"
         row = "\t".join(str(x) for x in (
-            label, tag, n - seps, seps, size, digest,
+            label, tag, "last" if args.sep_last else "first",
+            n - seps, seps, size, digest,
             __import__("datetime").datetime.now(
                 __import__("datetime").timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")))
         # Several verify jobs can finish at once (the chained pipeline runs one
@@ -221,7 +234,8 @@ def main():
             except OSError as e:          # some filesystems refuse locks
                 warn("tsv lock", f"{e}; appending unlocked")
             if f.tell() == 0:
-                f.write("# label\ttokenizer\ttokens\tdocs\tbytes\tsha256\tverified_at\n")
+                f.write("# label\ttokenizer\tsep\ttokens\tdocs\tbytes"
+                        "\tsha256\tverified_at\n")
             f.write(row + "\n")
             f.flush()
             os.fsync(f.fileno())

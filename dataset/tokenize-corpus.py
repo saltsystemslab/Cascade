@@ -3,6 +3,16 @@
 Tokenize a JSONL corpus into ONE little-endian uint16 token array, matching the
 infini-gram on-disk layout (2 bytes/token, 0xFFFF as the document separator).
 
+The separator is written BEFORE each document, so an array looks like
+    SEP doc1 SEP doc2 ... SEP docN
+and ends in a real token id. This matches infini-gram's convention. Arrays built
+before 2026-09-11 used a TRAILING separator and ended in 0xFFFF; reseparate.py
+converts them, and verifier.py --sep-last still checks one.
+
+Note the tradeoff: a trailing-separator array could be checked for truncation by
+asserting its last element is 0xFFFF. Here the last element is legitimately a
+real token, so truncation is caught by the document count and size instead.
+
 Many independent 1-CPU tasks, then a concat.
     # Phase 1 (run as a job array, task i of N):
     python tokenize-corpus.py --input-dir DIR --output OUT --shard i/N --workers 1
@@ -89,8 +99,13 @@ def tokenize_file(task):
             encoded = _TOK(texts, add_special_tokens=False)["input_ids"]
             buf = []
             for ids in encoded:
-                buf.extend(ids)
+                # LEADING separator: 0xFFFF goes BEFORE each document, matching
+                # infini-gram. This composes across parts exactly as the trailing
+                # convention did -- every part begins with a separator and ends
+                # with a real token, so concatenating them in index order yields
+                # one well-formed array with no seam fixups.
                 buf.append(SEP)
+                buf.extend(ids)
                 n_ids += len(ids) + 1
                 n_docs += 1
             np.asarray(buf, dtype="<u2").tofile(out)
