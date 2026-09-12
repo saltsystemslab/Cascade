@@ -11,10 +11,15 @@
 # Optional env:
 #   SUBSET    RedPajama subset            (default arxiv; ignored by other datasets)
 #   DL_PROC   parallel download streams   (default 8; 16 for a fat uplink)
-#   INCLUDE   hf download glob            (c4/pile)
+#   INCLUDE   hf download glob            (c4/pile/fineweb)
+#   TOKENIZER HF tokenizer                (sets the tag in the OUT path
+#                                          the job prints as 'next:')
+#   LABEL_OVERRIDE  output dir name       (on-disk corpora are flat:
+#                                          arxiv, github, c4, ...)
 #   NFILES    cap on URL-list files       (redpajama/dolma)
 #   VER       dolma version               (default v1_7)
-#   MEM       job memory                  (default 16G; lower for wget subsets, raise for Xet/c4)
+#   MEM       job memory                  (default 16G; lower for wget subsets,
+#                                          raise to ~32G for Xet c4/pile/fineweb)
 #   TIME      walltime                    (default 08:00:00)
 #   PART      Slurm partition             (default short)
 #
@@ -23,7 +28,7 @@
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-    echo "usage: ROOT=<dir> [SUBSET=..] ./submit-download.sh {c4|pile|redpajama|dolma}" >&2
+    echo "usage: ROOT=<dir> [SUBSET=..] ./submit-download.sh {c4|pile|fineweb|redpajama|dolma}" >&2
     exit 1
 fi
 DATASET="$1"

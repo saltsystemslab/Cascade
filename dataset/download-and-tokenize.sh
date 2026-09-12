@@ -5,7 +5,7 @@
 #               (2) tokenize to ONE uint16-LE array via tokenize-corpus.py,
 #               (3) verify token / separator counts.
 #
-# Usage:   ROOT=/scratch/$USER/corpora ./download-and-tokenize.sh {c4|pile|redpajama|dolma}
+# Usage:   ROOT=/scratch/$USER/corpora ./download-and-tokenize.sh {c4|pile|fineweb|redpajama|dolma}
 # Tune via env vars, e.g.:
 #   ROOT=/scratch/$USER/corpora INCLUDE="en/c4-train.000*-of-01024.json.gz" \
 #       TOKENIZER=allenai/OLMo-7B-hf WORKERS=64 ./download-and-tokenize.sh c4
@@ -13,8 +13,11 @@
 #   #     00* = 1000 shards (~340 GB, ~all of C4), * = all 1024.
 #
 # Prereqs:  pip install -U "huggingface_hub[hf_xet]" transformers tokenizers \
-#                          numpy zstandard sentencepiece
-#           (sentencepiece only needed for the Llama-2 tokenizer)
+#                          numpy pyarrow zstandard sentencepiece
+#           sentencepiece: Llama-2 only | pyarrow: parquet corpora (pile,
+#           fineweb) | zstandard: .jsonl.zst only. On this cluster the login
+#           nodes kill pip, so use submit-setup-env.sh instead of installing by
+#           hand, and pass PYTHON=<venv>/bin/python to every job.
 set -euo pipefail
 
 # Absolute dir of this script, so its sibling tokenizer is found regardless of
@@ -23,7 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ------------------------------- CONFIG -------------------------------------
 if [ $# -lt 1 ]; then
-    echo "usage: ROOT=<dir> ./download-and-tokenize.sh {c4|pile|redpajama|dolma}" >&2
+    echo "usage: ROOT=<dir> ./download-and-tokenize.sh {c4|pile|fineweb|redpajama|dolma}" >&2
     exit 1
 fi
 DATASET="$1"
@@ -75,12 +78,38 @@ case "$DATASET" in
     ;;
 
   pile)
-    # monology/pile-uncopyrighted. Confirm exact file names first with:
-    #   hf datasets ls monology/pile-uncopyrighted --tree -h
-    INCLUDE="${INCLUDE:-train/0[0-3].jsonl.zst}"   # ~4 shards by default
-    hf download monology/pile-uncopyrighted --repo-type dataset \
+    # EleutherAI/the_pile_deduplicated -- the artifact Pythia was trained on, so
+    # it is citable, unlike one maintainer's pick of "copyright-safe" subsets.
+    # PARQUET: 1650 files, 451.1 GB, a single `text` column (verified 2026-09-11).
+    # The names carry a content hash -- data/train-NNNNN-of-01650-<hash>.parquet
+    # -- so the tokenize glob must be a wildcard; the hash is not derivable.
+    #
+    # Deduplication removes the near-duplicate spans that drive deep LCPs, so
+    # expect Sigma h_i/n below raw Pile. State that as a property of the corpus
+    # rather than discovering it in the numbers.
+    INCLUDE="${INCLUDE:-data/*.parquet}"
+    hf download EleutherAI/the_pile_deduplicated --repo-type dataset \
         --include "$INCLUDE" --local-dir "$RAW_DIR"
-    TOK_INPUT="$RAW_DIR/train"; TOK_GLOB="*.jsonl.zst"
+    case "$INCLUDE" in */*) TOK_INPUT="$RAW_DIR/${INCLUDE%/*}";; *) TOK_INPUT="$RAW_DIR";; esac
+    TOK_GLOB="train-*.parquet"
+    ;;
+
+  fineweb)
+    # HuggingFaceFW/fineweb. sample/350BT is 510 parquet files, 1061.4 GB
+    # (verified 2026-09-11) -> ~360B Llama-2 tokens, ~720 GB of array. The full
+    # corpus is 15T+ under data/CC-MAIN-*/ and is out of scope.
+    #
+    # Names are NNN_NNNNN.parquet -- no `train-` prefix and no hash, unlike the
+    # Pile -- so the glob here is plain *.parquet. Getting this wrong fetches or
+    # tokenizes nothing, silently.
+    #
+    # 9 columns ship; tokenize-corpus.py projects to `text` alone, so the rest
+    # are never decompressed. That is a real saving on a terabyte, not tidiness.
+    INCLUDE="${INCLUDE:-sample/350BT/*}"
+    hf download HuggingFaceFW/fineweb --repo-type dataset \
+        --include "$INCLUDE" --local-dir "$RAW_DIR"
+    case "$INCLUDE" in */*) TOK_INPUT="$RAW_DIR/${INCLUDE%/*}";; *) TOK_INPUT="$RAW_DIR";; esac
+    TOK_GLOB="*.parquet"
     ;;
 
   redpajama)
