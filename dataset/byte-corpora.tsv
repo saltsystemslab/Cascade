@@ -1,0 +1,93 @@
+# Classic SACA-benchmark corpora: uint8 byte streams, no tokenizer.
+#
+# The URL list is DATA, not code, because these hosts rot. Pizza&Chili has moved
+# and been down for long stretches, and mattmahoney.net has shifted between
+# http/https/www with an expired cert at times. `url` holds |-separated
+# alternates tried left to right, first HTTP 200 wins, so a dead mirror is a
+# one-token edit rather than a code change.
+#
+# Columns
+#   label         output name; $ROOT/<label>/<label>[-<post>].u8
+#   url           |-separated alternates
+#   archive       gz | zip | 7z | tar.gz | none
+#   member        member inside a zip/7z/tar archive; - otherwise
+#   post          - | fasta2seq | fasta2acgt   (see below)
+#   expect_bytes  uncompressed artifact size; - if not yet known
+#   sha256_dl     hash of the downloaded archive; - until recorded
+#   sha256_out    hash of the final .u8; - until recorded  <- the citable one
+#
+# Two hash columns on purpose: sha256_dl proves the mirror served the same
+# bytes, sha256_out proves the decompression AND post-processing match. Only
+# sha256_out describes what the SACA actually consumes.
+#
+# post= is the byte-stream analogue of the tokenizer tag. A FASTA is not a byte
+# stream -- it carries headers, hard newlines every 60 chars, N runs, and (for
+# UCSC) soft-masked lowercase repeats -- so the transform is part of the
+# artifact's identity and goes in the filename:
+#   fasta2seq   strip headers + newlines, uppercase, keep N   (sigma ~5-12)
+#   fasta2acgt  additionally drop N                           (sigma 4)
+#
+# PROBED 2026-09-12: all 13 URLs answer 200 on their FIRST alternate. The
+# Pizza&Chili category names guessed here (nlang, dna, protein, code, xml) are
+# all correct, and dcc.uchile.cl is up -- the di.unipi.it alternates are kept as
+# fallbacks but were not needed. One correction was required: the per-chromosome
+# genome lives at goldenPath/hg38/chromosomes/, not under bigZips/.
+#
+# Compressed download sizes observed (Content-Range), total ~2.4 GB:
+#   enwik8            36,445,475     pc-english       834,550,281
+#   enwik9           322,592,222     pc-english-1024  405,714,638
+#   pc-dna           108,589,396     pc-proteins      528,700,394
+#   pc-sources        47,190,621     pc-dblp           50,481,103
+#   rep-einstein-en      320,696     rep-cere           5,241,219
+#   rep-kernel         2,085,983     hg38             983,659,424
+#   hg38-chr1         74,778,116
+#
+# The repetitive entries are tiny compressed and large expanded -- einstein.en
+# is 320 KB of 7z for ~446 MB of text. That ratio IS the corpus's point, and it
+# is why these matter to a prefix-doubling study more than another 100B tokens.
+#
+# UCSC also publishes goldenPath/hg38/bigZips/md5sum.txt (confirmed present): a
+# first-party checksum for hg38.fa.gz, so sha256_dl is not the only integrity
+# check available there.
+#
+# expect_bytes below is still UNCOMPRESSED and mostly unfilled -- it can only be
+# recorded after a real fetch. enwik8/9 are the exception: their sizes are
+# definitional, so those two are hard assertions from the start.
+#
+#label	url	archive	member	post	expect_bytes	sha256_dl	sha256_out
+
+# --- enwik8/9: sizes are DEFINITIONAL (first 1e8 / 1e9 bytes of a Wikipedia
+# --- dump), so expect_bytes is a hard assertion, not a guess. Host is the
+# --- uncertain part, hence three alternates.
+enwik8	https://mattmahoney.net/dc/enwik8.zip|http://mattmahoney.net/dc/enwik8.zip|http://www.mattmahoney.net/dc/enwik8.zip	zip	enwik8	-	100000000	-	-
+enwik9	https://mattmahoney.net/dc/enwik9.zip|http://mattmahoney.net/dc/enwik9.zip|http://www.mattmahoney.net/dc/enwik9.zip	zip	enwik9	-	1000000000	-	-
+
+# --- Pizza&Chili standard collection. Category directories and .gz serving
+# --- both CONFIRMED by the probe. english is the full 2.1 GB text;
+# --- english.1024MB is the truncated variant most published numbers use, so
+# --- carry both -- comparability to the literature depends on which one.
+pc-english	http://pizzachili.dcc.uchile.cl/texts/nlang/english.gz|http://pizzachili.di.unipi.it/texts/nlang/english.gz	gz	-	-	-	-	-
+pc-english-1024	http://pizzachili.dcc.uchile.cl/texts/nlang/english.1024MB.gz|http://pizzachili.di.unipi.it/texts/nlang/english.1024MB.gz	gz	-	-	1073741824	-	-
+pc-dna	http://pizzachili.dcc.uchile.cl/texts/dna/dna.gz|http://pizzachili.di.unipi.it/texts/dna/dna.gz	gz	-	-	-	-	-
+pc-proteins	http://pizzachili.dcc.uchile.cl/texts/protein/proteins.gz|http://pizzachili.di.unipi.it/texts/protein/proteins.gz	gz	-	-	-	-	-
+pc-sources	http://pizzachili.dcc.uchile.cl/texts/code/sources.gz|http://pizzachili.di.unipi.it/texts/code/sources.gz	gz	-	-	-	-	-
+pc-dblp	http://pizzachili.dcc.uchile.cl/texts/xml/dblp.xml.gz|http://pizzachili.di.unipi.it/texts/xml/dblp.xml.gz	gz	-	-	-	-	-
+
+# --- Pizza&Chili REPETITIVE corpus. Worth more to the prefix-doubling study
+# --- than another 100B tokens: decay rate is governed by repeat depth, and
+# --- this is the only source of graded, real repetitiveness (the deduplicated
+# --- Pile has had exactly that removed). einstein.en is a real-text worst
+# --- case; cere is a small-alphabet one.
+# --- BLOCKED unless 7z can be read: the cluster has no 7z/7za/bsdtar. Either
+# --- pip install py7zr into the venv, or use the repcorpus.tar.gz bundle.
+rep-einstein-en	http://pizzachili.dcc.uchile.cl/repcorpus/real/einstein.en.txt.7z	7z	einstein.en.txt	-	-	-	-
+rep-cere	http://pizzachili.dcc.uchile.cl/repcorpus/real/cere.7z	7z	cere	-	-	-	-
+rep-kernel	http://pizzachili.dcc.uchile.cl/repcorpus/real/kernel.7z	7z	kernel	-	-	-	-
+
+# --- Genome. UCSC ships md5sum.txt in the same directory: a first-party
+# --- checksum, use it. If Ensembl is substituted, PIN the release number --
+# --- current_fasta is a moving alias and destroys citability.
+# --- hg38 is soft-masked (lowercase repeats), so fasta2seq uppercases; expect
+# --- sigma ~5 rather than the ~12 an unconverted soft-masked stream gives.
+hg38	https://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz	gz	-	fasta2seq	-	-	-
+hg38-chr1	https://hgdownload.soe.ucsc.edu/goldenPath/hg38/chromosomes/chr1.fa.gz	gz	-	fasta2seq	-	-	-
