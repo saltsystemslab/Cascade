@@ -56,4 +56,6 @@ echo "base:      $BASE_PYTHON"
 echo "venv:      $VENV"
 echo "log:       slurm-setup-env-$job.out"
 echo
-echo "when it succeeds, every later job takes:  PYTHON=$VENV/bin/python"
+echo "when it succeeds, every later job takes:  PYTHON=$VENV/bin/pyrun"
+echo "  (pyrun, NOT bin/python: it pins the module's libpython so the"
+echo "   interpreter works on a batch node with a reset environment)"
