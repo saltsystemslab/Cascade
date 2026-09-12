@@ -157,6 +157,9 @@ case "$DATASET" in
                 exit 1
             fi
             echo ">> url list matches upstream"
+            # Not corpus data: leaving it in raw/ puts it in the manifest, where
+            # it shows up as a spurious extra entry in an old-vs-new join.
+            rm -f "$RAW_DIR/urls.upstream"
         fi
     else
         curl -s https://data.together.xyz/redpajama-data-1T/v1.0.0/urls.txt \
