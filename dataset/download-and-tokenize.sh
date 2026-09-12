@@ -36,6 +36,20 @@ WORKERS="${WORKERS:-$(nproc)}"                # tokenizer worker procs (CPU-boun
 DL_PROC="${DL_PROC:-8}"                        # parallel download streams (network-bound)
 TOK_SCRIPT="${TOK_SCRIPT:-$SCRIPT_DIR/tokenize-corpus.py}"   # sibling tokenizer script
 
+# The HF CLI lives in the venv, and its shebang points at the venv python, which
+# needs the module's libpython on LD_LIBRARY_PATH. So a bare `hf` is neither on a
+# batch node's PATH nor runnable directly -- setup-env.sbatch emits an `hfrun`
+# wrapper that pins the library path, and HF_CLI should point at that.
+HF_CLI="${HF_CLI:-hf}"
+need_hf() {
+    command -v "$HF_CLI" >/dev/null 2>&1 && return 0
+    echo "HF CLI not found: '$HF_CLI' -- the c4/pile/fineweb branches need it." >&2
+    echo "Run submit-setup-env.sh, then pass HF_CLI=<venv>/bin/hfrun. Not a bare" >&2
+    echo "'hf' (absent from a batch node's PATH), and not <venv>/bin/hf (whose" >&2
+    echo "shebang cannot find libpython without the wrapper)." >&2
+    exit 1
+}
+
 export HF_XET_HIGH_PERFORMANCE=1              # faster Xet downloads (replaces hf_transfer)
 
 # Per-corpus label; redpajama is further split by subset so arxiv/github/etc.
@@ -72,7 +86,7 @@ case "$DATASET" in
     # 1024 en train shards, ~319 MB each (~195M tokens/shard).
     #   5-digit shards: 000* -> 100 (~35 GB) | 00* -> 1000 (~340 GB, ~all) | * -> all 1024
     INCLUDE="${INCLUDE:-en/c4-train.000*-of-01024.json.gz}"
-    hf download allenai/c4 --repo-type dataset \
+    need_hf; "$HF_CLI" download allenai/c4 --repo-type dataset \
         --include "$INCLUDE" --local-dir "$RAW_DIR"
     TOK_INPUT="$RAW_DIR/en"; TOK_GLOB="c4-train.*.json.gz"
     ;;
@@ -88,7 +102,7 @@ case "$DATASET" in
     # expect Sigma h_i/n below raw Pile. State that as a property of the corpus
     # rather than discovering it in the numbers.
     INCLUDE="${INCLUDE:-data/*.parquet}"
-    hf download EleutherAI/the_pile_deduplicated --repo-type dataset \
+    need_hf; "$HF_CLI" download EleutherAI/the_pile_deduplicated --repo-type dataset \
         --include "$INCLUDE" --local-dir "$RAW_DIR"
     case "$INCLUDE" in */*) TOK_INPUT="$RAW_DIR/${INCLUDE%/*}";; *) TOK_INPUT="$RAW_DIR";; esac
     TOK_GLOB="train-*.parquet"
@@ -106,7 +120,7 @@ case "$DATASET" in
     # 9 columns ship; tokenize-corpus.py projects to `text` alone, so the rest
     # are never decompressed. That is a real saving on a terabyte, not tidiness.
     INCLUDE="${INCLUDE:-sample/350BT/*}"
-    hf download HuggingFaceFW/fineweb --repo-type dataset \
+    need_hf; "$HF_CLI" download HuggingFaceFW/fineweb --repo-type dataset \
         --include "$INCLUDE" --local-dir "$RAW_DIR"
     case "$INCLUDE" in */*) TOK_INPUT="$RAW_DIR/${INCLUDE%/*}";; *) TOK_INPUT="$RAW_DIR";; esac
     TOK_GLOB="*.parquet"
@@ -164,7 +178,7 @@ case "$DATASET" in
   dolma)
     # allenai/dolma ships per-file URL lists at urls/<version>.txt
     VER="${VER:-v1_7}"; NFILES="${NFILES:-20}"
-    hf download allenai/dolma "urls/${VER}.txt" --repo-type dataset --local-dir "$RAW_DIR"
+    need_hf; "$HF_CLI" download allenai/dolma "urls/${VER}.txt" --repo-type dataset --local-dir "$RAW_DIR"
     mkdir -p "$RAW_DIR/data"
     SEL="$RAW_DIR/dl_urls.txt"
     head -n "$NFILES" "$RAW_DIR/urls/${VER}.txt" > "$SEL"

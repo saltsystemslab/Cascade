@@ -58,6 +58,11 @@ if [ -n "${VER:-}"     ]; then EXPORTS="$EXPORTS,VER=$VER";        fi
 # the job always computed TAG=olmo and printed an -olmo path -- wrong for every
 # corpus under the Llama-2 policy, and pasting it mislabels the array.
 if [ -n "${TOKENIZER:-}" ]; then EXPORTS="$EXPORTS,TOKENIZER=$TOKENIZER"; fi
+# Pin the HF CLI exactly as the interpreter is pinned, and for the same reason:
+# a batch node's PATH does not carry it, and the venv's own `hf` cannot find
+# libpython without the hfrun wrapper. Point HF_CLI at <venv>/bin/hfrun.
+HF_CLI="${HF_CLI:-$(command -v hf || true)}"
+if [ -n "$HF_CLI" ]; then EXPORTS="$EXPORTS,HF_CLI=$HF_CLI"; fi
 if [ -n "${LABEL_OVERRIDE:-}" ]; then EXPORTS="$EXPORTS,LABEL_OVERRIDE=$LABEL_OVERRIDE"; fi
 for v in PRESPLIT SPLITS DROP_MONOLITH REFRESH_URLS CHECK_URLS; do
     eval "val=\${$v:-}"
