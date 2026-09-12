@@ -38,9 +38,17 @@ else
     : "${N:?N not set (submit via submit-tokenize.sh)}"
     : "${SLURM_ARRAY_TASK_ID:?run this as a job array (submit via submit-tokenize.sh)}"
     echo "[shard ${SLURM_ARRAY_TASK_ID}/${N}] $INPUT_DIR -> $OUT.parts  (python: $PYTHON)"
+    # BATCH bounds the Python-object peak inside flush(): a batch holds every
+    # document's ids AND attention_mask as individual Python ints. At the default
+    # 1000 that is fine for short documents, but arxiv averages ~18,000 tokens per
+    # document, so 1000 of them is ~40M int objects -- enough to SIGKILL a task at
+    # --mem=8G, which is exactly how two arxiv shards died. Lower it for
+    # long-document corpora; throughput barely moves, because the batch exists to
+    # amortise per-call overhead and that is already negligible at 18k tokens.
     "$PYTHON" "$TOK" \
         --shard "${SLURM_ARRAY_TASK_ID}/${N}" \
         --input-dir "$INPUT_DIR" --output "$OUT" \
         --tokenizer "$TOKENIZER" --glob "$GLOB" \
+        --batch-size "${BATCH:-1000}" \
         --workers "${SLURM_CPUS_PER_TASK:-1}"
 fi

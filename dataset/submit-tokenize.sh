@@ -17,6 +17,9 @@
 #   TIME      walltime per task               (default 04:00:00)
 #   PART      Slurm partition                 (default short)
 #   PYTHON    interpreter for the tasks       (default: the python3 active at submit)
+#   BATCH     documents per tokenizer call    (default 1000; use ~100 for corpora
+#                                              with very long documents, e.g. arxiv)
+#   DEPEND    afterok:<jobid> to chain on     (unset)
 #
 # N need not match the file count: with striding, each task just handles
 # ceil(files/N) files. Pick N for how much parallelism you want, not per file.
@@ -39,8 +42,17 @@ PYTHON="${PYTHON:-$(command -v python3 || true)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/tokenize.sbatch"
 EXPORTS="INPUT_DIR=$INPUT_DIR,OUT=$OUT,TOKENIZER=$TOKENIZER,GLOB=$GLOB,N=$N,TOK_DIR=$SCRIPT_DIR,PYTHON=$PYTHON"
+# BATCH: documents per tokenizer call. Lower it for long-document corpora --
+# arxiv at ~18,000 tokens/doc SIGKILLed two shards at the default 1000 with
+# --mem=8G, because a batch holds every id AND attention_mask as a Python int.
+# BATCH=100 cuts that peak ~10x at negligible throughput cost.
+[ -n "${BATCH:-}" ] && EXPORTS="$EXPORTS,BATCH=$BATCH"
+# DEPEND lets a whole corpus chain unattended (see submit-verify.sh).
+DEPEND="${DEPEND:-}"
+DEPFLAG=""
+[ -n "$DEPEND" ] && DEPFLAG="--dependency=$DEPEND"
 
-phase1=$(sbatch --parsable \
+phase1=$(sbatch --parsable $DEPFLAG \
     --partition="$PART" --array="0-$((N - 1))" \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
