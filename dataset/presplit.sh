@@ -42,7 +42,17 @@ elif [ -d "$TOK_INPUT/parts" ]; then
     TOK_INPUT="$TOK_INPUT/parts"; TOK_GLOB="*.jsonl"
 else
     _n=$(find "$TOK_INPUT" -maxdepth 1 -type f -name "$TOK_GLOB" | wc -l)
-    _src=$(find "$TOK_INPUT" -maxdepth 1 -type f -name "$TOK_GLOB" | sort | head -1)
+
+    # _src is deliberately NOT computed here. It was, via `find | sort | head -1`,
+    # and that killed the c4 fetch after a successful 1024-shard download: `head`
+    # closes the pipe, `sort` dies of SIGPIPE, `set -o pipefail` propagates 141 and
+    # `set -e` takes the script down -- silently, right after the manifest line.
+    #
+    # It is buffer-dependent, which is why it hid for so long: 100 arxiv paths
+    # (~7 KB) fit the 64 KB pipe buffer, so sort finishes before head exits, but
+    # 1024 c4 paths (~77 KB) do not. Pile's 1650 files would have hit it as well.
+    # _src is only meaningful in the single-file branch, so compute it there, where
+    # the pipeline cannot overflow a pipe by construction.
 
     if [ "$_n" -ne 1 ]; then
         if [ "$PRESPLIT" = on ]; then
@@ -52,6 +62,7 @@ else
         fi
         echo ">> pre-split: not needed ($_n files match '$TOK_GLOB')"
     else
+        _src=$(find "$TOK_INPUT" -maxdepth 1 -type f -name "$TOK_GLOB")
         case "$_src" in
         *.jsonl)
             _base="${_src##*/}"

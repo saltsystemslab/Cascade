@@ -82,6 +82,33 @@ else
 fi
 want "no zero-byte part survived" "$(find "$D3/parts" -type f -size 0 | wc -l)" "0"
 
+# --- 4b. MANY files: the SIGPIPE regression --------------------------------
+# `find | sort | head -1` killed the c4 fetch after a successful 1024-shard
+# download: head closes the pipe, sort dies of SIGPIPE, pipefail propagates 141
+# and set -e takes the script down. It is buffer-dependent, so a handful of
+# files will NOT reproduce it -- 100 paths fit the 64 KB pipe buffer, 1024 do
+# not. Use long names and enough of them to overflow it, and run under the same
+# `set -euo pipefail` the real caller uses.
+DB="$WORK/big/raw"; mkdir -p "$DB"
+for i in $(seq -w 1 1200); do
+    : > "$DB/c4-train.0$i-of-01024-with-a-realistically-long-shard-name.json.gz"
+done
+# `set -euo pipefail` MUST be inside the inner shell. Putting it outside does
+# nothing, because `bash -c` starts a fresh shell with default options -- which
+# is how the first version of this test passed against the very code it was
+# written to catch.
+out=$( TOK_INPUT="$DB" TOK_GLOB='c4-train.*.json.gz' \
+       bash -c 'set -euo pipefail; . '"$PRESPLIT_SH" 2>&1 )
+rc=$?
+if [ "$rc" = 0 ]; then
+    ok "1200 files: no SIGPIPE, presplit declines cleanly"
+else
+    bad "1200-file case exited $rc (the c4 regression; 141 = SIGPIPE)" "$out"
+fi
+case "$out" in *"not needed"*) ok "...and says why it declined" ;;
+               *) bad "no 'not needed' message for the many-file case" "$out" ;; esac
+want "1200 files: no parts dir created" "$([ -d "$DB/parts" ] && echo yes || echo no)" "no"
+
 # --- 5. multi-file input is left alone -------------------------------------
 D4="$WORK/d/raw"; mkdir -p "$D4"
 for i in 1 2 3; do echo '{"text":"x"}' > "$D4/shard_$i.jsonl"; done
