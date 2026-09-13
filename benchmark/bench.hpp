@@ -164,12 +164,12 @@ namespace alpha
 // "measured as zero". No `t_e2e` field: the summarizer sums the buckets.
 struct Record
 {
-    static constexpr int schema_version = 2;
+    static constexpr int schema_version = 3;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     std::string host = host_name(), timestamp_utc = now_utc();
     std::string method, method_version;
-    std::string input, corpus, alphabet;
+    std::string input, corpus, tokenizer, alphabet;
     int64_t     symbol_bytes = 0, n_symbols = 0, n_tokens = 0, threads = 0;
     std::string status;
     int64_t     code = 0;
@@ -195,7 +195,7 @@ struct Record
         J_STR(run_id);       J_STR(commit);        J_STR(build_type);
         J_STR(host);         J_STR(timestamp_utc);
         J_STR(method);       J_STR(method_version);
-        J_STR(input);        J_STR(corpus);        J_STR(alphabet);
+        J_STR(input);        J_STR(corpus);        J_STR(tokenizer);   J_STR(alphabet);
         J_NUM(symbol_bytes); J_NUM(n_symbols);     J_NUM(n_tokens);   J_NUM(threads);
         J_STR(status);       J_NUM(code);          J_STR(detail);     J_STR(verify);
         J_NUM(t_load);       J_NUM(t_core);        J_NUM(t_write);
@@ -226,7 +226,7 @@ struct Record
 
 struct Args
 {
-    std::string input, corpus, run_id, alphabet;
+    std::string input, corpus, run_id, alphabet, tokenizer;
     std::string results_dir = ".";
     std::string sa_out;                 // Writing the SA is opt-in: github's would be 472 GiB.
 
@@ -243,6 +243,7 @@ inline const char* usage()
 {
     return
     "  --input P --corpus NAME --run-id ID --alphabet token16|byte|byte_from_token16\n"
+    "  [--tokenizer NAME]\n"
     "  [--n N] [--threads T] [--fs F] [--results-dir D] [--sa-out P] [--verify] [--cold]\n"
     "\n"
     "  --n counts SYMBOLS, not tokens. For byte_from_token16 that is bytes,\n"
@@ -264,6 +265,7 @@ inline bool parse(const int argc, char** const argv, Args& a, std::string& err)
         else if(k == "--cold")          a.cold        = true;
         else if(k == "--input")         a.input       = v;
         else if(k == "--corpus")        a.corpus      = v;
+        else if(k == "--tokenizer")     a.tokenizer   = v;
         else if(k == "--run-id")        a.run_id      = v;
         else if(k == "--alphabet")      a.alphabet    = v;
         else if(k == "--results-dir")   a.results_dir = v;
@@ -453,6 +455,7 @@ int bench_main(const Args& arg, const char* const method, const char* const meth
     rec.method_version = method_version;
     rec.input        = arg.input;
     rec.corpus       = arg.corpus;
+    rec.tokenizer    = arg.tokenizer;
     rec.alphabet     = arg.alphabet;
     rec.symbol_bytes = alpha::symbol_bytes(arg.alphabet);
     rec.threads      = arg.threads;

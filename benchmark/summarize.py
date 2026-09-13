@@ -67,13 +67,15 @@ def main(argv):
     # does not get folded into the headline rows.
     groups = {}
     for r in runs:
-        key = (r["method"], r["corpus"], r["alphabet"], r["n_tokens"], r["threads"])
+        key = (r["method"], r["corpus"], r.get("tokenizer", ""), r["alphabet"],
+               r["n_tokens"], r["threads"])
         groups.setdefault(key, []).append(r)
 
-    hdr = ("method", "corpus", "alphabet", "n_tokens", "thr", "reps", "status",
+    hdr = ("method", "corpus", "tok", "alphabet", "n_tokens", "thr", "reps", "status",
            "verify", "t_core_med", "min", "max", "Mtok/s", "peak_rss", "B/tok", "peak_dev")
     rows = []
-    for (method, corpus, alphabet, ntok, thr), rs in sorted(groups.items(), key=lambda kv: kv[0][3]):
+    for (method, corpus, tok, alphabet, ntok, thr), rs in sorted(groups.items(),
+                                                                key=lambda kv: kv[0][4]):
         ok = [r for r in rs if r["status"] == "ok"]
         # A group is only "ok" if every replicate was; otherwise show the failure.
         status = "ok" if len(ok) == len(rs) else next(r["status"] for r in rs if r["status"] != "ok")
@@ -82,7 +84,7 @@ def main(argv):
         dev = max(r["peak_device"] for r in rs)
         med = statistics.median(cores) if cores else None
         rows.append([
-            method, corpus, alphabet, f"{ntok:.3e}", thr, len(rs), status,
+            method, corpus, tok, alphabet, f"{ntok:.3e}", thr, len(rs), status,
             "/".join(sorted({r["verify"] for r in rs})),
             f"{med:.2f}" if med else "-",
             f"{min(cores):.2f}" if cores else "-",
