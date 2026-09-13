@@ -1,9 +1,14 @@
 #!/bin/bash
 #
-# Baseline SACA: one job walks the whole run set.
+# Benchmark executor: walks one campaign's run set.
 #
-#   . benchmark/local.env            # optional site config; see below
-#   sbatch benchmark/bench.sbatch [results-dir]
+# Submit through the API, which validates everything first and passes the run set
+# and the results directory in:
+#
+#   benchmark/bench.sh --corpora a,b --tokenizer llama2 --methods libsais --reps 3
+#
+# Invoking this directly works but requires CORPORA/TOKENIZER/METHODS/OURS_TAG/REPS
+# in the environment and a results directory as $1.
 #
 # One job rather than one per run: `ulimit -v` turns an over-budget allocation
 # into a failed malloc in seconds with a clean record, so a failure neither takes
@@ -17,7 +22,7 @@
 #
 #   SBATCH_PARTITION   partition to submit to        (or sbatch --partition=)
 #   SBATCH_NODELIST    pin to one node, so timings are comparable across runs
-#   CORPUS_ROOT        directory holding <corpus>.bin (default /scratch/$USER/corpora)
+#   CORPUS_ROOT        holds <corpus>/<corpus>-<tokenizer>.tokenized.bin
 #   MODULES            module names to load in-job   (default none)
 #   MEM_RESERVE_GIB    held back from the RLIMIT_AS  (default 8)
 #   BUILD_IN_JOB       compile the baselines in-job  (default 1; see below)
@@ -54,7 +59,10 @@ if [ ! -r "${REPO}/CMakeLists.txt" ] || [ ! -d "${REPO}/benchmark" ]; then
 fi
 
 BUILD="${BUILD:-${REPO}/build}"
-RESULTS="${1:-${REPO}/results/$(date -u +%Y%m%dT%H%M%SZ)}"
+# Required, not defaulted: the old `${REPO}/results/...` fallback made the results
+# location a function of which directory sbatch was run from, and could write into
+# the repo. bench.sh computes it under RESULTS_ROOT and passes it explicitly.
+RESULTS="${1:?results directory is required -- submit through benchmark/bench.sh}"
 
 # Untracked site config, if present. Sourced here too so the in-job variables
 # work even when it was not sourced in the submitting shell. Bracketed with
@@ -74,7 +82,14 @@ MEM_RESERVE_GIB="${MEM_RESERVE_GIB:-8}"
 SAIS="${BUILD}/benchmark/bench_libsais"
 CUBWT="${BUILD}/benchmark/bench_libcubwt"
 
-CORPORA=(dolmasample arxiv github c4)
+# The run set, from bench.sh (which has already validated all of it).
+# Split on comma OR colon: bench.sh transports these colon-separated, because
+# Slurm's --export parser would treat a comma inside a value as a new entry.
+IFS=',:' read -r -a CORPORA     <<< "${CORPORA:?CORPORA is required}"
+IFS=',:' read -r -a METHOD_LIST <<< "${METHODS-}"
+TOKENIZER="${TOKENIZER:?TOKENIZER is required}"
+OURS_TAG="${OURS_TAG-}"
+REPS="${REPS:?REPS is required}"
 
 # `module` is a shell function login shells get from /etc/profile.d; an sbatch
 # script never sources it. Init scripts reference unset vars, hence `set +u`.
@@ -145,13 +160,6 @@ fi
 MEM_TOTAL_KIB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
 RLIMIT_KIB=$(( MEM_TOTAL_KIB - MEM_RESERVE_GIB * 1024 * 1024 ))
 
-# libsais peaks at 10n-12.4n bytes, so it completes the corpora that fit and
-# fails cleanly on the one that does not; that failure is the result for its row.
-# Uniform across corpora and methods: a runtime-tiered count needs a
-# justification table, and any cell at 1 cannot state its own dispersion. At the
-# measured 5-20 M tokens/s this costs 4.4-16.9 h, inside the 24 h wall even
-# pessimistically, and it lets the CV be reported as evidence rather than assumed.
-REPS=3
 
 mkdir -p "${RESULTS}"
 printf 'results  %s\nhost     %s   job %s\nmemtotal %s KiB   rlimit %s KiB (reserve %s GiB)\n' \
@@ -162,9 +170,12 @@ for b in "${SAIS}" "${CUBWT}"; do
     [ -x "${b}" ] || { echo "FATAL: ${b} not built; configure -DBENCHMARK=ON first."; exit 1; }
 done
 
-# Pre-flight: a bad path should not be discovered three hours in.
+corpus_path() { echo "${CORPUS_ROOT}/$1/$1-${TOKENIZER}.tokenized.bin"; }
+
+# Pre-flight: a bad path should not be discovered three hours in. bench.sh has
+# already checked these, so a failure here means the filesystem changed under us.
 for c in "${CORPORA[@]}"; do
-    p="${CORPUS_ROOT}/${c}.bin"
+    p="$(corpus_path "${c}")"
     if [ -r "${p}" ]
         then printf '  %-12s %14s bytes\n' "${c}" "$(stat -c %s "${p}")"
         else printf '  %-12s %14s  <- runs will record bad_input\n' "${c}" MISSING
@@ -181,11 +192,12 @@ done
 run()
 {
     local bin=$1 n=$5 threads=$6 rlimit=${8:-0}
-    local id="$2_$3_$4_n$5_t$6_r$7"
+    local id="$2_$3-${TOKENIZER}_$4_n$5_t$6_r$7"
 
     [ -s "${RESULTS}/${id}.json" ] && { echo "skip (already done) ${id}"; return; }
 
-    local -a cmd=("${bin}" --input "${CORPUS_ROOT}/$3.bin" --corpus "$3" --run-id "${id}"
+    local -a cmd=("${bin}" --input "$(corpus_path "$3")" --corpus "$3"
+                  --tokenizer "${TOKENIZER}" --run-id "${id}"
                   --alphabet "$4" --n "${n}" --threads "${threads}"
                   --results-dir "${RESULTS}" --cold)
 
@@ -198,38 +210,43 @@ run()
     echo "    wall $(( SECONDS - t0 ))s"
 }
 
-# 1. libsais on every corpus -- the headline table. Ascending, so the smallest
-#    corpus's answer arrives in minutes rather than after the largest.
+# Ordered smallest corpus first, so the cheapest answers arrive in minutes rather
+# than after the largest corpus has finished.
 for c in "${CORPORA[@]}"; do
-    for r in $(seq 1 "${REPS}"); do
-        run "${SAIS}" libsais16x64 "${c}" token16 0 "$(nproc)" "${r}" 1
+    for m in ${METHOD_LIST[@]+"${METHOD_LIST[@]}"}; do
+        for r in $(seq 1 "${REPS}"); do
+            case "${m}" in
+                libsais)
+                    # uint16 tokens natively; RLIMIT_AS on, so an over-budget
+                    # allocation fails cleanly instead of being OOM-killed.
+                    run "${SAIS}" libsais16x64 "${c}" token16 0 "$(nproc)" "${r}" 1
+                    ;;
+                libcubwt)
+                    # uint8-only, so a token corpus is read as raw bytes -- a
+                    # reach-only comparison, which the `alphabet` field records.
+                    # No RLIMIT_AS: a CUDA process reserves terabytes of VA.
+                    run "${CUBWT}" libcubwt "${c}" byte_from_token16 0 0 "${r}"
+                    ;;
+            esac
+        done
     done
 done
 
-# 2. Thread choice. Not a figure: it makes "libsais, all cores" a measured choice
-#    rather than an assumption, and guards against a NUMA-hostile access pattern
-#    making half the cores faster than all of them.
-for r in $(seq 1 "${REPS}"); do
-    run "${SAIS}" libsais16x64 "${CORPORA[0]}" token16 0 "$(( $(nproc) / 2 ))" "${r}" 1
-done
-
-# 3. libcubwt on every corpus -- the GPU memory-wall row. Expected to fail at
-#    device allocation in seconds: it needs ~30 B per input symbol, and reading a
-#    uint16 corpus as bytes doubles the symbol count.
-for c in "${CORPORA[@]}"; do
-    for r in $(seq 1 "${REPS}"); do
-        run "${CUBWT}" libcubwt "${c}" byte_from_token16 0 0 "${r}"
+# Our method, if a tag was given. Built from a worktree at that tag (Part 2), so
+# its records carry a reproducible method_version.
+if [ -n "${OURS_TAG}" ]; then
+    OURS="${BUILD}-ours-${OURS_TAG}/src/bench_gpu_saca"
+    if [ ! -x "${OURS}" ]; then
+        echo "FATAL: ${OURS} not built. The worktree build for tag ${OURS_TAG} has"
+        echo "       not landed yet (Part 2)."
+        exit 1
+    fi
+    for c in "${CORPORA[@]}"; do
+        for r in $(seq 1 "${REPS}"); do
+            run "${OURS}" gpu_saca "${c}" token16 0 "$(nproc)" "${r}"
+        done
     done
-done
-
-# 4. libcubwt prefix ladder on the smallest corpus, for the supplement. n is in
-#    SYMBOLS, i.e. bytes, i.e. twice the token count. The last rung sits on the
-#    predicted device wall, which is why it is included.
-for n in 250000000 500000000 1000000000 2000000000 3000000000; do
-    for r in $(seq 1 "${REPS}"); do
-        run "${CUBWT}" libcubwt "${CORPORA[0]}" byte_from_token16 "${n}" 0 "${r}"
-    done
-done
+fi
 
 echo
 echo "done -> ${RESULTS}"

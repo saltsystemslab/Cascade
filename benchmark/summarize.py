@@ -102,6 +102,21 @@ def main(argv):
     for r in rows:
         print(line(r))
 
+    # The matrix is no longer derivable from the script, so the manifest is the
+    # only thing that distinguishes "never requested" from "requested but died".
+    mpath = pathlib.Path(d) / "manifest.json"
+    if mpath.exists():
+        try:
+            inv = json.loads(mpath.read_text())
+            expected = sum(i.get("runs_expected", 0) for i in inv)
+            print(f"manifest: {len(inv)} invocation(s), {expected} runs expected, {len(runs)} present")
+            if expected > len(runs):
+                print(f"  {expected - len(runs)} run(s) missing -- the job may have died; check slurm-*.out")
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"manifest unreadable: {e}")
+    else:
+        print("no manifest.json -- expected-vs-present cannot be checked")
+
     ok_runs = [r for r in runs if r["status"] == "ok"]
     verified = [r for r in ok_runs if r["verify"] == "pass"]
     print(f"\n{len(runs)} records in {len(groups)} groups; "
