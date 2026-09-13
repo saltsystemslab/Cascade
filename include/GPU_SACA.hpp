@@ -249,13 +249,17 @@ private:
 public:
 
     // Constructs a GPU-SACA object for the input text at path `ip_path`, to
-    // output the suffix array to the file at path `op_path`.
+    // output the suffix array to the file at path `op_path`. An empty `op_path`
+    // constructs the suffix array without dumping it.
     GPU_SACA(const std::string& ip_path, const std::string& op_path);
 
     ~GPU_SACA();
 
     // Builds the suffix array into the file at the output path.
     void build_SA();
+
+    // Returns per-phase timings of the method's execution.
+    const Build_Timing& timings() const { return build_timing_; }
 };
 
 }
