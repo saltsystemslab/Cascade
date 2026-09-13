@@ -1920,13 +1920,18 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
     }));
     INSTRUMENT(probe::P().start_sampler());
 
-    // Open the output file and preallocate it.
-    const auto fd = ::open(op.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); // Only owner can read-write, others read-only.
-    if(fd < 0)
-        util::file::exit_on_io_failure("open", op);
+    // Open the output file and preallocate it. An empty `op` instructs
+    // construction without output dump.
+    const auto dump = !op.empty();
+    const auto fd = dump ? ::open(op.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1; // Only owner can read-write, others read-only.
+    if(dump)
+    {
+        if(fd < 0)
+            util::file::exit_on_io_failure("open", op);
 
-    if(::fallocate(fd, 0, 0, n_ * sizeof(idx_t)) != 0)
-        util::file::exit_on_io_failure("fallocate", op);
+        if(::fallocate(fd, 0, 0, n_ * sizeof(idx_t)) != 0)
+            util::file::exit_on_io_failure("fallocate", op);
+    }
 
 
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
@@ -2046,7 +2051,8 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
                             INSTRUMENT(probe::P().me().bytes += s->size() * sizeof(idx_t));
 
                             // Drain the slab's suffixes.
-                            util::file::write_and_flush(fd, op, s->suf(), s->size() * sizeof(idx_t), (P_off[s->p_id()] + s->off()) * sizeof(idx_t));
+                            if(dump)
+                                util::file::write_and_flush(fd, op, s->suf(), s->size() * sizeof(idx_t), (P_off[s->p_id()] + s->off()) * sizeof(idx_t));
                         }
 
                         F.enqueue(s);   // This slab is free now.
@@ -2106,6 +2112,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
 
     // Close the output file.
+    if(dump)
     {
         // The earlier per-chunk `sync_file_range`s only queued writebacks, with no guarantees on
         // actual completions. Therefore block until the writes physically complete.
