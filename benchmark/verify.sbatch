@@ -42,7 +42,8 @@ if [ ! -r "${REPO}/CMakeLists.txt" ] || [ ! -d "${REPO}/benchmark" ]; then
 fi
 
 BUILD="${BUILD:-${REPO}/build}"
-RESULTS="${1:-${REPO}/results/verify-$(date -u +%Y%m%dT%H%M%SZ)}"
+RESULTS_ROOT="${RESULTS_ROOT:-${HOME}/gpu-saca-results}"
+RESULTS="${1:-${RESULTS_ROOT}/verify-$(date -u +%Y%m%dT%H%M%SZ)}"
 
 if [ -r "${REPO}/benchmark/local.env" ]; then
     set +u
@@ -52,6 +53,7 @@ if [ -r "${REPO}/benchmark/local.env" ]; then
 fi
 
 CORPUS_ROOT="${CORPUS_ROOT:-/scratch/${USER:-$(id -un)}/corpora}"
+TOKENIZER="${TOKENIZER:-llama2}"
 MODULES="${MODULES-}"
 MEM_RESERVE_GIB="${MEM_RESERVE_GIB:-8}"
 SAIS="${BUILD}/benchmark/bench_libsais"
@@ -107,7 +109,7 @@ for b in "${SAIS}" "${CUBWT}"; do
 done
 
 CORPUS="${VERIFY_CORPUS:-dolmasample}"
-IN="${CORPUS_ROOT}/${CORPUS}.bin"
+IN="${CORPUS_ROOT}/${CORPUS}/${CORPUS}-${TOKENIZER}.tokenized.bin"
 [ -r "${IN}" ] || { echo "FATAL: ${IN} is unreadable."; exit 1; }
 
 fail=0
@@ -116,9 +118,10 @@ fail=0
 verify()
 {
     local bin=$1 tag=$2 alphabet=$3 threads=$4 sa_out=${5:-} rlimit=${6:-0}
-    local id="${tag}_${CORPUS}_${alphabet}_n${VERIFY_N}_t${threads}_verify"
+    local id="${tag}_${CORPUS}-${TOKENIZER}_${alphabet}_n${VERIFY_N}_t${threads}_verify"
 
-    local -a cmd=("${bin}" --input "${IN}" --corpus "${CORPUS}" --run-id "${id}"
+    local -a cmd=("${bin}" --input "${IN}" --corpus "${CORPUS}"
+                  --tokenizer "${TOKENIZER}" --run-id "${id}"
                   --alphabet "${alphabet}" --n "${VERIFY_N}" --threads "${threads}"
                   --results-dir "${RESULTS}" --verify)
     [ -n "${sa_out}" ] && cmd+=(--sa-out "${sa_out}")
