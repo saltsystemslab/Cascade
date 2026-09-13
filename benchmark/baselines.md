@@ -9,59 +9,59 @@ machine or a user.
 
 ## Running it
 
+Campaigns go through the API, which validates everything on the submit host
+before anything is queued:
+
 ```
-cp benchmark/local.env.example benchmark/local.env   # once: partition, node, CORPUS_ROOT
+cp benchmark/local.env.example benchmark/local.env   # once: partition, node, roots
 . benchmark/local.env
 cmake -S . -B build -DBENCHMARK=ON -DCMAKE_BUILD_TYPE=Release   # configure only
-sbatch benchmark/bench.sbatch
-python3 benchmark/summarize.py results/<timestamp>   # [--tsv out.tsv]
+
+benchmark/bench.sh --corpora dolmasample,arxiv --methods libsais --reps 3
+benchmark/bench.sh --corpora c4 --ours v0.5.0 --reps 1 --results-dir <same dir>
+
+python3 benchmark/summarize.py <results-dir>         # [--tsv out.tsv]
+sbatch benchmark/verify.sbatch                       # correctness, own directory
 ```
+
+`bench.sh --help` lists the flags. `--dry-run` prints the expanded run set and the
+per-corpus sizes without submitting. `--methods` defaults to **empty**, so
+`--corpora X --ours TAG` runs only our method; at least one of `--methods` /
+`--ours` must be given.
+
+**Two invocations can share a `--results-dir`.** Run-ids already carry the
+replicate index and every run is idempotent, so small corpora at 3 replicates and
+a large one at 1 merge into a single campaign, and the summary reports differing
+replicate counts per row with no special handling. A resubmission after a job
+dies skips what already completed.
+
+**Where things land.** `RESULTS_ROOT` (default `${HOME}/gpu-saca-results`) holds
+one directory per campaign, `<UTC>[-<name>]`, containing the per-run JSON records,
+`slurm-<jobid>.out/.err`, and `manifest.json`. Nothing is written inside the repo:
+the sbatches require the directory as an argument rather than defaulting to a
+repo-relative path, since that would have made the results location depend on
+which directory `sbatch` was run from.
+
+`manifest.json` records each invocation's corpora, tokenizer, methods, tag,
+replicate count and resolved sizes, so `summarize.py` can report expected-vs-present
+and tell "never requested" apart from "requested but the job died".
 
 **Configure on a host with network; compile inside the job.** Both baselines are
-fetched, so `cmake -S -B` needs internet — which compute nodes often lack — but
-it only downloads two small tarballs and generates makefiles, so a login node
-handles it in seconds. Compiling the CUDA sources is the CPU-heavy half and is
-what would blow a login node's CPU-time limit, so `bench.sbatch` does it in-job
-with every core of the allocation. That also guarantees the commit stamped into
-the binary is the one that built it. Set `BUILD_IN_JOB=0` to skip it.
-
-If the compute node *does* have network, submitting without configuring works
-too: the job configures first and says so.
-
-Sourcing `local.env` before `sbatch` matters: the `SBATCH_*` entries are read by
-`sbatch` at submit time and cannot be set from inside the job. Everything else is
-picked up either way, since `bench.sbatch` sources the file too if it exists.
-Its entries are `${VAR:-default}`, so the submitting environment wins and the file
-only fills gaps.
+fetched, so `cmake -S -B` needs internet — which compute nodes often lack — but it
+only downloads two small tarballs. Compiling the CUDA sources is the CPU-heavy half
+and would blow a login node's CPU-time limit, so the sbatch does it in-job with
+every core of the allocation, which also guarantees the commit stamped into the
+binary is the one that built it. `BUILD_IN_JOB=0` skips it.
 
 **Submit from the repo root**, or `export REPO=/path/to/repo` first. Slurm runs a
-*copy* of the batch script from a spool directory, so the script cannot locate the
-repo from its own path — `${BASH_SOURCE[0]}` is `/var/spool/slurmd/.../slurm_script`.
-It uses `SLURM_SUBMIT_DIR` instead and refuses up front if that does not look like
-the repo root.
+*copy* of the batch script from a spool directory, so it cannot locate the repo
+from its own path; it uses `SLURM_SUBMIT_DIR` and refuses up front if that does
+not look like the repo root.
 
-`bench.sbatch` is idempotent per run: a run whose record already exists is
-skipped, so a job that dies partway can simply be resubmitted with the same
-results directory.
-
-**Timing and correctness are separate jobs.**
-
-```
-sbatch benchmark/verify.sbatch                 # correctness; own results dir
-```
-
-`bench.sbatch` never passes `--verify`, for two reasons. Verification allocates a
-bitset (n/8) and an inverse SA (8n) on top of the run's own peak, so a verified
-run's `peak_rss` would be the *verification* peak rather than the construction
-peak — and peak RSS is half of the E2.1 table. And correctness is a property of a
-*configuration*, not of a replicate: verifying it once is enough, so a method's
-timings can be re-run as often as the method evolves without re-paying for it.
-
-`verify.sbatch` does one verified run per (method, alphabet) path, plus the
-cross-check below, and exits non-zero if anything fails. Its scales are modest on
-purpose: libsais and libcubwt are fixed third-party code, so verifying them at
-full corpus scale costs hours and proves nothing a small run does not. Knobs:
-`VERIFY_N` (symbols, default 1e8), `VERIFY_CORPUS`, `SA_DIR`.
+Corpora live at `${CORPUS_ROOT}/<corpus>/<corpus>-<tokenizer>.tokenized.bin`. The
+tokenizer is one per invocation and is recorded in every record and run-id: the
+same corpus under two tokenizers is two different inputs with two different n, so
+mixing them within one table would confound both n and throughput.
 
 ## libsais 2.10.4
 
