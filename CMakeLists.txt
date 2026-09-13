@@ -185,6 +185,23 @@ if(NOT DEFINED CUDA_ARCH)
 endif()
 
 
+# Benchmark provenance: every benchmark driver (the baselines in `benchmark/`
+# and our own in `src/`) needs to stamp the same commit into its records.
+# Tolerant of a missing .git.
+execute_process(COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE BENCH_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE BENCH_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+
+if(NOT BENCH_COMMIT)
+    set(BENCH_COMMIT "unknown")
+elseif(BENCH_DIRTY)
+    set(BENCH_COMMIT "${BENCH_COMMIT}-dirty")
+endif()
+
+
 # Add required subdirectories to the build.
 add_subdirectory(src)
 add_subdirectory(test)

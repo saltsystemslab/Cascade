@@ -60,21 +60,8 @@ set_target_properties(libcubwt PROPERTIES
     CUDA_ARCHITECTURES         ${CUDA_ARCH})
 
 
-# ======== Provenance ========
-#
-# Tolerant of a missing .git.
-execute_process(COMMAND git rev-parse --short HEAD
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE BENCH_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-execute_process(COMMAND git status --porcelain
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        OUTPUT_VARIABLE BENCH_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-
-if(NOT BENCH_COMMIT)
-    set(BENCH_COMMIT "unknown")
-elseif(BENCH_DIRTY)
-    set(BENCH_COMMIT "${BENCH_COMMIT}-dirty")
-endif()
+# Provenance (BENCH_COMMIT) is computed once at the root, so that our method's
+# driver (in `src/`) carries the same stamp as the baselines here.
 
 
 # ======== Shared driver settings ========
