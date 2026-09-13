@@ -29,6 +29,17 @@ per-corpus sizes without submitting. `--methods` defaults to **empty**, so
 `--corpora X --ours TAG` runs only our method; at least one of `--methods` /
 `--ours` must be given.
 
+**The thread-choice control is two invocations**, not a separate experiment — it
+exists so "libsais, all cores" is a measured choice rather than an assumption:
+
+```
+benchmark/bench.sh --corpora dolmasample --methods libsais --reps 3 --name thr
+benchmark/bench.sh --corpora dolmasample --methods libsais --reps 3 --threads 64 \
+                   --results-dir <the same dir>
+```
+
+The run-id carries `t<threads>`, so the two land as separate rows in one summary.
+
 **Two invocations can share a `--results-dir`.** Run-ids already carry the
 replicate index and every run is idempotent, so small corpora at 3 replicates and
 a large one at 1 merge into a single campaign, and the summary reports differing

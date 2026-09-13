@@ -90,6 +90,11 @@ IFS=',:' read -r -a METHOD_LIST <<< "${METHODS-}"
 TOKENIZER="${TOKENIZER:?TOKENIZER is required}"
 OURS_TAG="${OURS_TAG-}"
 REPS="${REPS:?REPS is required}"
+# Empty means "all cores on this node". Overriding it is how the thread-choice
+# control is run: same corpus, half the cores, into the same results directory --
+# the run-id carries t<threads>, so the two land as separate rows.
+THREADS="${THREADS:-}"
+[ -n "${THREADS}" ] || THREADS="$(nproc)"
 
 # `module` is a shell function login shells get from /etc/profile.d; an sbatch
 # script never sources it. Init scripts reference unset vars, hence `set +u`.
@@ -219,7 +224,7 @@ for c in "${CORPORA[@]}"; do
                 libsais)
                     # uint16 tokens natively; RLIMIT_AS on, so an over-budget
                     # allocation fails cleanly instead of being OOM-killed.
-                    run "${SAIS}" libsais16x64 "${c}" token16 0 "$(nproc)" "${r}" 1
+                    run "${SAIS}" libsais16x64 "${c}" token16 0 "${THREADS}" "${r}" 1
                     ;;
                 libcubwt)
                     # uint8-only, so a token corpus is read as raw bytes -- a
@@ -243,7 +248,7 @@ if [ -n "${OURS_TAG}" ]; then
     fi
     for c in "${CORPORA[@]}"; do
         for r in $(seq 1 "${REPS}"); do
-            run "${OURS}" gpu_saca "${c}" token16 0 "$(nproc)" "${r}"
+            run "${OURS}" gpu_saca "${c}" token16 0 "${THREADS}" "${r}"
         done
     done
 fi

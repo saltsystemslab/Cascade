@@ -20,6 +20,7 @@ Usage: benchmark/bench.sh --corpora LIST [options]
   --methods a,b        baselines from {libsais, libcubwt}; default: none
   --ours TAG           also run our method, built at git tag TAG
   --reps N             replicates per configuration (default 3, minimum 1)
+  --threads N          CPU threads for libsais/ours (default: all cores on the node)
   --name LABEL         human label for the campaign directory
   --results-dir DIR    override the computed directory; reuse one to accumulate
   --dry-run            print the plan and exit without submitting
@@ -37,7 +38,7 @@ EOF
 
 die() { echo "error: $*" >&2; exit 1; }
 
-CORPORA= TOKENIZER=llama2 METHODS= OURS_TAG= REPS=3 NAME= RESULTS= DRY=0 YES=0
+CORPORA= TOKENIZER=llama2 METHODS= OURS_TAG= REPS=3 NAME= RESULTS= DRY=0 YES=0 THREADS=
 while [ $# -gt 0 ]; do
     case "$1" in
         --corpora)     CORPORA="${2:?--corpora needs a value}"; shift 2;;
@@ -45,6 +46,7 @@ while [ $# -gt 0 ]; do
         --methods)     METHODS="${2-}"; shift 2;;
         --ours)        OURS_TAG="${2:?--ours needs a tag}"; shift 2;;
         --reps)        REPS="${2:?--reps needs a value}"; shift 2;;
+        --threads)     THREADS="${2:?--threads needs a value}"; shift 2;;
         --name)        NAME="${2:?--name needs a value}"; shift 2;;
         --results-dir) RESULTS="${2:?--results-dir needs a value}"; shift 2;;
         --dry-run)     DRY=1; shift;;
@@ -83,6 +85,11 @@ esac
 [ "${REPS}" -ge 1 ] || die "--reps must be at least 1 (got ${REPS})"
 [ "${REPS}" -gt 1 ] || echo "WARN: --reps 1 -- a single run cannot state its own dispersion."
 
+if [ -n "${THREADS}" ]; then
+    case "${THREADS}" in ''|*[!0-9]*) die "--threads must be a positive integer (got '${THREADS}')";; esac
+    [ "${THREADS}" -ge 1 ] || die "--threads must be at least 1 (got ${THREADS})"
+fi
+
 # The corpus paths are the real check, and they double as the tokenizer check,
 # so no hardcoded corpus or tokenizer list can go stale here.
 declare -a SIZES=()
@@ -114,6 +121,7 @@ echo "corpora    ${CORPUS_LIST[*]}"
 echo "tokenizer  ${TOKENIZER}"
 echo "methods    ${ALL_METHODS[*]}${OURS_TAG:+  (gpu_saca @ ${OURS_TAG})}"
 echo "reps       ${REPS}"
+echo "threads    ${THREADS:-all cores on the node}"
 echo "results    ${RESULTS}"
 echo
 printf '%-16s %10s %14s %14s\n' corpus bytes "n (tokens)" "libsais peak"
@@ -177,7 +185,7 @@ METHODS_X="${METHODS//,/:}"
 
 jid=$(sbatch --parsable \
         --output="${RESULTS}/slurm-%j.out" --error="${RESULTS}/slurm-%j.err" \
-        --export=ALL,CORPORA="${CORPORA_X}",TOKENIZER="${TOKENIZER}",METHODS="${METHODS_X}",OURS_TAG="${OURS_TAG}",REPS="${REPS}" \
+        --export=ALL,CORPORA="${CORPORA_X}",TOKENIZER="${TOKENIZER}",METHODS="${METHODS_X}",OURS_TAG="${OURS_TAG}",REPS="${REPS}",THREADS="${THREADS}" \
         "${HERE}/bench.sbatch" "${RESULTS}")
 rc=$?
 [ "${rc}" -eq 0 ] || die "sbatch failed (rc=${rc})"
