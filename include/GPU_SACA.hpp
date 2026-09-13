@@ -10,6 +10,7 @@
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
+#include "Build_Timing.hpp"
 #include "env.hpp"
 #include "tests.hpp"
 
@@ -59,7 +60,6 @@ private:
     T_sym_* T_h_;   // Text.
     const std::string ip_path_; // Filesystem path the input text.
     const std::string op_path_; // Filesystem path to output the suffix array to.
-
 
     p_id_t p_;  // Number of partitions for the SA.
 
@@ -113,6 +113,8 @@ private:
         blocking_q_t<Staging_Slab*> W;  // Slabs with chunks downloaded from device, ready to be written to partition-backend.
 
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
+
+        Build_Timing build_timing_; // Per-phase wall-clock timings.
 
 
         // Sets the staging configurations: slab capacity, slab pool size, and
