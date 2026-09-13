@@ -26,9 +26,8 @@
 namespace gpu_saca::timer
 {
     // Fields for profiling time.
-
-    typedef std::chrono::high_resolution_clock::time_point time_point_t;
-    const static auto now = std::chrono::high_resolution_clock::now;
+    typedef std::chrono::steady_clock::time_point time_point_t;
+    const static auto now = std::chrono::steady_clock::now;
     const static auto duration = [](const std::chrono::nanoseconds& d) { return std::chrono::duration_cast<std::chrono::duration<double>>(d).count(); };
 
     // Scope-timer, based on RAII mechanism.
