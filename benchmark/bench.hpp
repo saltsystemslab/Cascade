@@ -227,6 +227,7 @@ struct Record
 struct Args
 {
     std::string input, corpus, run_id, alphabet, tokenizer;
+    std::string method_version;         // Overrides the library's own version string.
     std::string results_dir = ".";
     std::string sa_out;                 // Writing the SA is opt-in: github's would be 472 GiB.
 
@@ -243,7 +244,7 @@ inline const char* usage()
 {
     return
     "  --input P --corpus NAME --run-id ID --alphabet token16|byte|byte_from_token16\n"
-    "  [--tokenizer NAME]\n"
+    "  [--tokenizer NAME] [--method-version V]\n"
     "  [--n N] [--threads T] [--fs F] [--results-dir D] [--sa-out P] [--verify] [--cold]\n"
     "\n"
     "  --n counts SYMBOLS, not tokens. For byte_from_token16 that is bytes,\n"
@@ -266,6 +267,7 @@ inline bool parse(const int argc, char** const argv, Args& a, std::string& err)
         else if(k == "--input")         a.input       = v;
         else if(k == "--corpus")        a.corpus      = v;
         else if(k == "--tokenizer")     a.tokenizer   = v;
+        else if(k == "--method-version") a.method_version = v;
         else if(k == "--run-id")        a.run_id      = v;
         else if(k == "--alphabet")      a.alphabet    = v;
         else if(k == "--results-dir")   a.results_dir = v;

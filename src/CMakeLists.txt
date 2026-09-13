@@ -26,6 +26,11 @@ add_library(core STATIC ${PROJECT_SRC})
 add_executable(${PROJECT_NAME} main.cu)
 add_executable(test test.cu)
 
+# Benchmark driver for our own method. Placement is with `core` rather than in
+# the independent `benchmark/` so that our definitions do not leak to the
+# baselines, and building this does not drag in the baselines' network fetches.
+add_executable(bench_gpu_saca bench_gpu_saca.cu)
+
 
 # Set the include directories for the targets.
 
@@ -33,3 +38,4 @@ target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_IN
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})
+target_include_directories(bench_gpu_saca PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})

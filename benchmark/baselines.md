@@ -29,6 +29,14 @@ per-corpus sizes without submitting. `--methods` defaults to **empty**, so
 `--corpora X --ours TAG` runs only our method; at least one of `--methods` /
 `--ours` must be given.
 
+**Our method is run by tag.** `--ours TAG` builds it from a git worktree checked
+out at that tag, under `WORKTREE_ROOT` (default `${HOME}/gpu-saca-worktrees}`),
+reused across campaigns. The binary therefore provably corresponds to the version
+its records name, and re-running an older tag later reproduces its numbers. A tag
+that predates `src/bench_gpu_saca.cu` cannot build, which is the intended signal
+that it is not benchmarkable under this policy -- the driver, the no-dump mode and
+the timings accessor all have to be present.
+
 **The thread-choice control is two invocations**, not a separate experiment — it
 exists so "libsais, all cores" is a measured choice rather than an assumption:
 
@@ -204,6 +212,13 @@ mid-token. Such a check fails correctly and wastes a day.
   fallback is `getrusage`, whose `ru_maxrss` is bytes there but KiB on Linux.
 - Verification never runs in a timing job — see "Running it". `verify.sbatch`
   owns it.
+- Our method aborts via `std::exit` from inside `core` on algorithmic failures
+  (unsuitable partition sizes, too little device memory), which leaves **no
+  record** -- read the job log for those. The driver pre-checks the cheap,
+  common environmental failures instead (input readable and an even byte count,
+  `GPU_SACA_SCRATCH` set and writable, a usable CUDA device), so those become
+  records the way the baselines' do. `core`'s own scratch check fires only after
+  the text load and the partition-ID pass, i.e. minutes of wasted work.
 - **`verify` has four states**, and the distinction matters: `off` (never
   requested — a recorded policy choice), `pass`, `fail`, and `skip` (requested
   but infeasible, e.g. the ISA would not allocate). `summarize.py` shouts only

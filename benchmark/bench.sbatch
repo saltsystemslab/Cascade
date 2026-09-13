@@ -206,6 +206,10 @@ run()
                   --alphabet "$4" --n "${n}" --threads "${threads}"
                   --results-dir "${RESULTS}" --cold)
 
+    # The baselines report their library's own version; ours reports the tag it
+    # was built from.
+    [ "$2" = gpu_saca ] && cmd+=(--method-version "${OURS_TAG}")
+
     echo "=== ${id}"
     local t0=${SECONDS}
     if [ "${rlimit}" -eq 1 ]
@@ -237,13 +241,39 @@ for c in "${CORPORA[@]}"; do
     done
 done
 
-# Our method, if a tag was given. Built from a worktree at that tag (Part 2), so
-# its records carry a reproducible method_version.
+# Our method, if a tag was given. Built from a git worktree checked out at that
+# tag, so the binary provably corresponds to the version its records name, and so
+# that re-running an older tag later gives the same numbers. The worktree lives
+# outside the repo, like the results, and is reused across campaigns.
 if [ -n "${OURS_TAG}" ]; then
-    OURS="${BUILD}-ours-${OURS_TAG}/src/bench_gpu_saca"
+    WORKTREE_ROOT="${WORKTREE_ROOT:-${HOME}/gpu-saca-worktrees}"
+    WT="${WORKTREE_ROOT}/${OURS_TAG}"
+    OURS_BUILD="${WT}/build"
+    OURS="${OURS_BUILD}/src/bench_gpu_saca"
+
+    if [ ! -d "${WT}" ]; then
+        echo "creating worktree for ${OURS_TAG} at ${WT}"
+        mkdir -p "${WORKTREE_ROOT}"
+        git -C "${REPO}" worktree add --detach "${WT}" "refs/tags/${OURS_TAG}" \
+            || { echo "FATAL: git worktree add failed for tag ${OURS_TAG}."; exit 1; }
+    fi
+
+    if [ "${BUILD_IN_JOB:-1}" = 1 ]; then
+        # Same split as the baselines: configure needs network (concurrentqueue is
+        # fetched), compiling needs cores. A tag predating the driver cannot build,
+        # which is the intended signal that it is not benchmarkable under this policy.
+        if [ ! -f "${OURS_BUILD}/CMakeCache.txt" ]; then
+            echo "configuring ${WT} (needs network; run it on a login node if this has none)"
+            cmake -S "${WT}" -B "${OURS_BUILD}" -DCMAKE_BUILD_TYPE=Release \
+                || { echo "FATAL: configure failed for tag ${OURS_TAG}."; exit 1; }
+        fi
+        echo "compiling bench_gpu_saca @ ${OURS_TAG} with -j$(nproc)"
+        cmake --build "${OURS_BUILD}" --target bench_gpu_saca -j"$(nproc)" \
+            || { echo "FATAL: build failed for tag ${OURS_TAG} -- does it contain src/bench_gpu_saca.cu?"; exit 1; }
+    fi
+
     if [ ! -x "${OURS}" ]; then
-        echo "FATAL: ${OURS} not built. The worktree build for tag ${OURS_TAG} has"
-        echo "       not landed yet (Part 2)."
+        echo "FATAL: ${OURS} not built."
         exit 1
     fi
     for c in "${CORPORA[@]}"; do

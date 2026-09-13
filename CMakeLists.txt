@@ -201,6 +201,10 @@ elseif(BENCH_DIRTY)
     set(BENCH_COMMIT "${BENCH_COMMIT}-dirty")
 endif()
 
+set(BENCH_PROVENANCE
+        BENCH_COMMIT="${BENCH_COMMIT}"
+        BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+
 
 # Add required subdirectories to the build.
 add_subdirectory(src)
@@ -219,15 +223,18 @@ set_property(TARGET core            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET bench_gpu_saca  PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET bench_gpu_saca  PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
 # Define dependencies between the targets.
 add_dependencies(${PROJECT_NAME} core)
+add_dependencies(bench_gpu_saca core)
 add_dependencies(core prj_concurrentqueue)
 add_dependencies(tests prj_concurrentqueue) # TODO: fix this hack.
 
@@ -239,6 +246,9 @@ target_compile_options(tests PRIVATE ${COMPILE_FLAGS})
 
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_FLAGS})
 target_compile_options(test PRIVATE ${COMPILE_FLAGS})
+target_compile_options(bench_gpu_saca PRIVATE ${COMPILE_FLAGS})
+target_compile_definitions(bench_gpu_saca PRIVATE ${BENCH_PROVENANCE})
+target_compile_options(bench_gpu_saca PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)   # `nvcc` does not recognize OpenMP directives.
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
 # `nvcc` does not recognize OpenMP directives.
@@ -264,6 +274,7 @@ target_link_libraries(core PRIVATE tests)
 
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
+target_link_libraries(bench_gpu_saca PRIVATE core OpenMP::OpenMP_CXX)
 
 # Link the tester.
 target_link_libraries(test PRIVATE core)
