@@ -55,7 +55,6 @@ fi
 CORPUS_ROOT="${CORPUS_ROOT:-/scratch/${USER:-$(id -un)}/corpora}"
 TOKENIZER="${TOKENIZER:-llama2}"
 MODULES="${MODULES-}"
-MEM_RESERVE_GIB="${MEM_RESERVE_GIB:-8}"
 SAIS="${BUILD}/benchmark/bench_libsais"
 CUBWT="${BUILD}/benchmark/bench_libcubwt"
 
@@ -90,15 +89,13 @@ if [ "${BUILD_IN_JOB:-1}" = 1 ]; then
         || { echo "FATAL: build failed."; exit 1; }
 fi
 
-export OMP_DYNAMIC=false OMP_PROC_BIND=close OMP_PLACES=cores OMP_WAIT_POLICY=passive
+# No OpenMP or memory-limit settings: libsais's OMP_DYNAMIC requirement is
+# enforced by the driver itself, which refuses and records bad_param.
 
 if command -v numactl >/dev/null
     then NUMA=(numactl --interleave=all)
     else NUMA=(); echo "WARN: numactl not found."
 fi
-
-MEM_TOTAL_KIB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
-RLIMIT_KIB=$(( MEM_TOTAL_KIB - MEM_RESERVE_GIB * 1024 * 1024 ))
 
 mkdir -p "${RESULTS}" "${SA_DIR}"
 printf 'results  %s\nhost     %s   job %s\nverify n %s symbols\n' \
@@ -114,10 +111,10 @@ IN="${CORPUS_ROOT}/${CORPUS}/${CORPUS}-${TOKENIZER}.tokenized.bin"
 
 fail=0
 
-# verify <bin> <tag> <alphabet> <threads> [sa-out] [rlimit]
+# verify <bin> <tag> <alphabet> <threads> [sa-out]
 verify()
 {
-    local bin=$1 tag=$2 alphabet=$3 threads=$4 sa_out=${5:-} rlimit=${6:-0}
+    local bin=$1 tag=$2 alphabet=$3 threads=$4 sa_out=${5:-}
     local id="${tag}_${CORPUS}-${TOKENIZER}_${alphabet}_n${VERIFY_N}_t${threads}_verify"
 
     local -a cmd=("${bin}" --input "${IN}" --corpus "${CORPUS}"
@@ -127,10 +124,7 @@ verify()
     [ -n "${sa_out}" ] && cmd+=(--sa-out "${sa_out}")
 
     echo "=== ${id}"
-    if [ "${rlimit}" -eq 1 ]
-        then ( ulimit -v "${RLIMIT_KIB}"; exec ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}" )
-        else ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}"
-    fi
+    ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}"
 
     # The record is authoritative; read the verdict back out of it. Report the
     # run's status alongside, so "the run failed" is distinguishable from
@@ -149,8 +143,8 @@ verify()
 }
 
 # 1. Self-verification, one run per (method, alphabet) path through the harness.
-verify "${SAIS}"  libsais16x64 token16           "$(nproc)" ""                     1
-verify "${SAIS}"  libsais64    byte_from_token16 "$(nproc)" "${SA_DIR}/sais.sa"    1
+verify "${SAIS}"  libsais16x64 token16           "$(nproc)"
+verify "${SAIS}"  libsais64    byte_from_token16 "$(nproc)" "${SA_DIR}/sais.sa"
 verify "${CUBWT}" libcubwt     byte_from_token16 0          "${SA_DIR}/cubwt.sa"
 
 # 2. Cross-verification. This is the load-bearing one: every cross-method

@@ -10,11 +10,10 @@
 # Invoking this directly works but requires CORPORA/TOKENIZER/METHODS/OURS_TAG/REPS
 # in the environment and a results directory as $1.
 #
-# One job rather than one per run: `ulimit -v` turns an over-budget allocation
-# into a failed malloc in seconds with a clean record, so a failure neither takes
-# the job down nor leaves anything to reconcile. Runs are idempotent -- one whose
-# record already exists is skipped -- so a job that dies partway can simply be
-# resubmitted with the same results directory.
+# One job rather than one per run: `set -uo pipefail` without `-e` keeps the loop
+# going, so a failed run is recorded and the campaign continues. Runs are
+# idempotent -- one whose record already exists is skipped -- so a job that dies
+# partway can simply be resubmitted with the same results directory.
 #
 # Site-specific settings are deliberately not baked in. Supply them either by
 # sourcing an (untracked) benchmark/local.env before submitting, or on the
@@ -25,7 +24,6 @@
 #   CORPUS_ROOT        holds <corpus>/<corpus>-<tokenizer>.tokenized.bin
 #   GPU_SACA_SCRATCH   colon-separated scratch roots, required by --ours
 #   MODULES            module names to load in-job   (default none)
-#   MEM_RESERVE_GIB    held back from the RLIMIT_AS  (default 8)
 #   BUILD_IN_JOB       compile the baselines in-job  (default 1; see below)
 #
 # `sbatch` exports the submitting environment by default, so sourcing local.env
@@ -79,7 +77,6 @@ fi
 
 CORPUS_ROOT="${CORPUS_ROOT:-/scratch/${USER}/corpora}"
 MODULES="${MODULES:-}"
-MEM_RESERVE_GIB="${MEM_RESERVE_GIB:-8}"
 SAIS="${BUILD}/benchmark/bench_libsais"
 CUBWT="${BUILD}/benchmark/bench_libcubwt"
 
@@ -94,6 +91,12 @@ REPS="${REPS:?REPS is required}"
 # Empty means "all cores on this node". Overriding it is how the thread-choice
 # control is run: same corpus, half the cores, into the same results directory --
 # the run-id carries t<threads>, so the two land as separate rows.
+#
+# Not the same kind of argument on both sides, which is worth knowing before
+# reading a thread sweep: libsais takes it as an API parameter, while our driver
+# calls omp_set_num_threads, and our stager pool is sized from
+# omp_get_max_threads() at construction. For us this is a tuning knob, and on an
+# exclusive node `nproc` is what the library would have picked anyway.
 THREADS="${THREADS:-}"
 [ -n "${THREADS}" ] || THREADS="$(nproc)"
 
@@ -137,40 +140,32 @@ if [ "${BUILD_IN_JOB:-1}" = 1 ]; then
         || { echo "FATAL: build failed."; exit 1; }
 fi
 
-# OMP_DYNAMIC=false is a correctness precondition, not tuning: with it on libsais
-# silently runs serial. The driver also refuses, so this is belt and braces.
-export OMP_DYNAMIC=false OMP_PROC_BIND=close OMP_PLACES=cores OMP_WAIT_POLICY=passive
+# Nothing else is set for the runs. libsais needs OMP_DYNAMIC off, but that is
+# enforced where it belongs: bench_libsais refuses when omp_get_dynamic() != 0
+# and writes a bad_param record, so a silently-serial run is impossible without
+# the harness asserting anything about the environment.
 
-# First-touch placement of libsais's 8n SA matters on a multi-socket node.
-# Without this the CPU baseline is undertuned, so a missing numactl has to be
-# loud rather than silent.
+# The one placement knob still applied, and only pending measurement. The
+# mechanism is plausible -- first-touch of libsais's 8n SA on a two-socket node
+# -- but unmeasured, so a missing numactl is worth reporting rather than
+# asserting about.
 if command -v numactl >/dev/null; then
     NUMA=(numactl --interleave=all)
 else
     NUMA=()
-    echo "WARN: numactl not found -- libsais will run UNPINNED across sockets."
-    echo "WARN: its numbers will understate the CPU baseline. Install numactl or load its module."
+    echo "WARN: numactl not found -- runs will use default first-touch placement."
 fi
-
-# Physical memory less a reserve, as a RLIMIT_AS. Derived at runtime rather than
-# hardcoded, and taken from MemTotal rather than Slurm's RealMemory: without a
-# memory cgroup nothing holds a process to RealMemory, and RealMemory is
-# conventionally set several percent below physical, so using it would hand the
-# baseline less memory than the machine actually has.
-#
-# This is what makes an over-budget allocation fail cleanly -- in seconds, with
-# an exact VmHWM -- instead of inviting the OOM killer (which loses the record)
-# or swap thrash (a garbage timing after hours). Note it bounds *virtual* address
-# space, so the reserve must also cover thread stacks and allocator mappings.
-# CPU only: never for a CUDA process, whose unified VA reserves terabytes.
-MEM_TOTAL_KIB="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)"
-RLIMIT_KIB=$(( MEM_TOTAL_KIB - MEM_RESERVE_GIB * 1024 * 1024 ))
 
 
 mkdir -p "${RESULTS}"
-printf 'results  %s\nhost     %s   job %s\nmemtotal %s KiB   rlimit %s KiB (reserve %s GiB)\n' \
-    "${RESULTS}" "$(hostname)" "${SLURM_JOB_ID:-none}" \
-    "${MEM_TOTAL_KIB}" "${RLIMIT_KIB}" "${MEM_RESERVE_GIB}"
+printf 'results  %s\nhost     %s   job %s\n' \
+    "${RESULTS}" "$(hostname)" "${SLURM_JOB_ID:-none}"
+
+# bench.sh submits with --export=ALL, so any OMP_* or GPU_SACA_* tuning variable
+# present in the submitting shell reaches every run and is recorded nowhere.
+# Log what actually arrived: that invisibility is how the knobs above went
+# unnoticed. Observability, not policy -- nothing here sets anything.
+env | grep -E '^(OMP_|GPU_SACA_)' | sort | sed 's/^/env      /' || true
 
 for b in "${SAIS}" "${CUBWT}"; do
     [ -x "${b}" ] || { echo "FATAL: ${b} not built; configure -DBENCHMARK=ON first."; exit 1; }
@@ -204,7 +199,12 @@ if [ -n "${OURS_TAG}" ]; then
     done
 fi
 
-# run <bin> <tag> <corpus> <alphabet> <n-symbols> <threads> <rep> [rlimit]
+# run <bin> <tag> <corpus> <alphabet> <n-symbols> <threads> <rep>
+#
+# Every argument below is an input of the method being run: what to read, how to
+# read it, how many threads, where to put the record. No tuning, no resource
+# policy -- if a run needs something else to produce a valid number, that is a
+# property of the method and belongs in its own defaults.
 #
 # Timing only -- nothing here passes --verify. Correctness is verify.sbatch's
 # job, for two reasons: verification allocates n/8 + 8n on top of the run's own
@@ -213,7 +213,7 @@ fi
 # is a property of a *configuration*, so it needs one run, not one per replicate.
 run()
 {
-    local bin=$1 n=$5 threads=$6 rlimit=${8:-0}
+    local bin=$1 n=$5 threads=$6
     local id="$2_$3-${TOKENIZER}_$4_n$5_t$6_r$7"
 
     [ -s "${RESULTS}/${id}.json" ] && { echo "skip (already done) ${id}"; return; }
@@ -221,7 +221,7 @@ run()
     local -a cmd=("${bin}" --input "$(corpus_path "$3")" --corpus "$3"
                   --tokenizer "${TOKENIZER}" --run-id "${id}"
                   --alphabet "$4" --n "${n}" --threads "${threads}"
-                  --results-dir "${RESULTS}" --cold)
+                  --results-dir "${RESULTS}")
 
     # The baselines report their library's own version; ours reports the tag it
     # was built from.
@@ -229,10 +229,7 @@ run()
 
     echo "=== ${id}"
     local t0=${SECONDS}
-    if [ "${rlimit}" -eq 1 ]
-        then ( ulimit -v "${RLIMIT_KIB}"; exec ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}" )
-        else ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}"
-    fi
+    ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}"
     echo "    wall $(( SECONDS - t0 ))s"
 }
 
@@ -243,14 +240,15 @@ for c in "${CORPORA[@]}"; do
         for r in $(seq 1 "${REPS}"); do
             case "${m}" in
                 libsais)
-                    # uint16 tokens natively; RLIMIT_AS on, so an over-budget
-                    # allocation fails cleanly instead of being OOM-killed.
-                    run "${SAIS}" libsais16x64 "${c}" token16 0 "${THREADS}" "${r}" 1
+                    # uint16 tokens natively. An over-budget run records
+                    # oom_host: vm.overcommit_memory=0 refuses an SA larger than
+                    # RAM outright, so libsais returns -2 rather than dying.
+                    run "${SAIS}" libsais16x64 "${c}" token16 0 "${THREADS}" "${r}"
                     ;;
                 libcubwt)
                     # uint8-only, so a token corpus is read as raw bytes -- a
                     # reach-only comparison, which the `alphabet` field records.
-                    # No RLIMIT_AS: a CUDA process reserves terabytes of VA.
+                    # --threads 0 defers to the library, which takes no thread count.
                     run "${CUBWT}" libcubwt "${c}" byte_from_token16 0 0 "${r}"
                     ;;
             esac

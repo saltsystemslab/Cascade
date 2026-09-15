@@ -84,17 +84,19 @@ mixing them within one table would confound both n and throughput.
 
 ## libsais 2.10.4
 
-- **`OMP_DYNAMIC=false` is a correctness precondition.** The main parallel region
-  is guarded by `threads > 1 && n >= 65536 && omp_get_dynamic() == 0`. With
-  dynamic threads on it silently runs serial: a thread sweep comes back flat with
-  no error anywhere. `bench_libsais` refuses to run rather than record it.
+- **Dynamic threads must be off, and the driver is what enforces it.** The main
+  parallel region is guarded by `threads > 1 && n >= 65536 && omp_get_dynamic() == 0`.
+  With dynamic threads on it silently runs serial: a thread sweep comes back flat
+  with no error anywhere. `bench_libsais` refuses and records `bad_param`, so the
+  wrong number cannot be produced. The harness deliberately does **not** export
+  `OMP_DYNAMIC=false` on top of that: libgomp already defaults it off, and the
+  export bought nothing while making the harness look like it tunes OpenMP.
 - **`--threads 0` is not serial** — it resolves to `omp_get_max_threads()`
   (`libsais16x64.c:7204`). Pass it explicitly anyway so the record is unambiguous.
 - **Peak is 10n–12.4n and corpus-dependent.** `libsais16x64.c:6860,6891` allocate
   `k * sizeof(sa_sint_t)` when `fs < k`, where `k` is the reduced-problem
   alphabet — up to ~2.4n extra. It happens *inside the recursion*, i.e. late, so
-  a near-wall run can burn a long time before dying. Hence `ulimit -v`, which
-  turns that into a failed `malloc` in seconds. Do not hardcode 11n; calibrate
+  a near-wall run can burn a long time before dying. Do not hardcode 11n; calibrate
   `peak_rss/n` per corpus from that corpus's own smaller runs. **The model is
   asymptotic**: measured on a 5e6-token corpus the peak is ~20n, not 11n, so do
   not extrapolate the wall from a small run.
@@ -150,8 +152,7 @@ mixing them within one table would confound both n and throughput.
 - **Its SA is allocated on the host at 4n bytes**, so on C4-read-as-bytes
   (n = 3.4e11) that is 1366 GB on top of a 341 GB corpus — over host memory. The
   driver therefore allocates *device* storage first: otherwise the C4 row would
-  report `oom_host` for what is really a GPU wall, and because a CUDA process
-  cannot carry a `RLIMIT_AS` it would invite the OOM killer and lose the record.
+  report `oom_host` for what is really a GPU wall.
 - **Its H2D copy of `T` is from unpinned memory** (`libcubwt.cu:675`), so it runs
   at pageable-copy bandwidth. Not currently addressed; if a reviewer raises it,
   `cudaHostRegister` is the experiment, and registering a multi-GB buffer may
@@ -228,24 +229,22 @@ mid-token. Such a check fails correctly and wastes a day.
   B/token with it on, matching the predicted ~18n. It fits dolma (146 GB) and
   arxiv (509 GB) but not github (1068 GB > 1032 GB), so `bench.sbatch` drops it
   there and the record says `verify: skip`.
-- **Why the CPU driver runs under a `RLIMIT_AS` at all.** Slurm is the obvious
-  place to enforce a memory bound, but it is not enforcing one here: there is no
-  `cgroup.conf`, so `--mem` is advisory, and `--mem=0` asks for the whole node
-  anyway. That leaves the kernel. Whether an over-budget allocation then fails
-  *cleanly* depends on `vm.overcommit_memory`: in heuristic mode (0) a single
-  allocation larger than RAM+swap is refused, so the driver returns a proper
-  `oom_host` record; in always-overcommit mode (1) it succeeds, the process
-  faults pages until the OOM killer fires, and SIGKILL means the emission path
-  never runs -- no record, no `VmHWM`, and the largest corpus's row becomes a gap
-  instead of the result.
-  The `RLIMIT_AS` removes that dependency: the allocation fails at the limit
-  check regardless of the sysctl. It is also what makes the reconciliation layer
-  unnecessary -- the alternative is querying `sacct` for jobs that left no record,
-  where a kernel OOM appears as `FAILED / 0:9` and is indistinguishable from any
-  other SIGKILL. One line here replaces that, and avoids reporting an
-  infrastructure failure as a memory wall.
-  (If `vm.overcommit_memory` is 2 on a given node, strict accounting already
-  gives the clean failure and the limit is redundant.)
+- **How an over-budget libsais run fails, now that no `RLIMIT_AS` is imposed.**
+  Slurm is not enforcing a memory bound here: there is no `cgroup.conf`, so
+  `--mem` is advisory and `--mem=0` asks for the whole node anyway. That leaves
+  the kernel, and the outcome depends on `vm.overcommit_memory`. In heuristic
+  mode (0), which is what this node runs, a single allocation larger than
+  RAM+swap is refused outright -- and libsais's SA *is* a single allocation, 1.37
+  TB for C4 -- so it returns -2 and the driver records `oom_host` with an exact
+  `VmHWM`. That is the clean failure, achieved without a limit.
+  The risk the limit used to cover is narrower than it looks: only in
+  always-overcommit mode (1) would the allocation succeed and the process fault
+  until the OOM killer fires, and SIGKILL would then skip the emission path, so
+  the row becomes a gap rather than a result. If a node ever runs mode 1, prefer
+  fixing the sysctl or reading `sacct` (a kernel OOM appears as `FAILED / 0:9`)
+  over reintroducing a knob that is inert on every node we actually use.
+  The limit was removed because it is one more unmeasured setting: it was never
+  observed to fire, and the harness now sets nothing that is not an input.
 - **`--n` counts symbols, not tokens.** For `byte_from_token16` that means bytes,
   i.e. twice the token count.
 - **`--alphabet` is recorded, and `n_tokens` is the throughput denominator.**
@@ -263,13 +262,15 @@ mid-token. Such a check fails correctly and wastes a day.
 
 - `pread`/`pwrite` transfer at most ~2 GB per call; both loops chunk. A `pread`
   returning 0 is a short file (stop), `< 0` is an error.
-- A `warm` cache policy is unachievable at these scales — page cache is a small
-  fraction of the working set and is evicted immediately — and it would steal
-  memory from the wall study. `cold` is the only uniformly achievable policy, and
-  it is a recorded constant rather than a swept axis.
-- `posix_fadvise(DONTNEED)` gives a cold cache without root, but is frequently a
-  **no-op on network filesystems** — so it only means anything once the corpus is
-  node-local.
+- **Cache state is not a controlled variable, and the harness no longer pretends
+  it is.** A `warm` policy is unachievable at these scales — page cache is a small
+  fraction of the working set and is evicted immediately. A `cold` policy was
+  attempted via `posix_fadvise(DONTNEED)`, which needs no root but is frequently a
+  **no-op on network filesystems** — and the corpora are on one. It was also
+  honoured only by the baselines, never by our driver, so it made the two sides of
+  a comparison read under different conditions. Removed. This costs nothing that
+  matters: it moved `t_load`, and `t_load` is already unusable on this node, where
+  back-to-back reads of the same file measured 0.70 and 1.64 GB/s.
 - **lmod's `module` is a shell function that non-interactive shells never
   source**, and `module load` must run *inside* the job: a module-provided
   libgomp/libstdc++ lives outside the default loader path, so its absence is a

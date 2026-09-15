@@ -236,7 +236,6 @@ struct Args
     int64_t fs = 0;                     // libsais free-space parameter.
 
     bool verify = false;
-    bool cold = false;                  // Evict the file from the page cache before reading.
 };
 
 
@@ -245,7 +244,7 @@ inline const char* usage()
     return
     "  --input P --corpus NAME --run-id ID --alphabet token16|byte|byte_from_token16\n"
     "  [--tokenizer NAME] [--method-version V]\n"
-    "  [--n N] [--threads T] [--fs F] [--results-dir D] [--sa-out P] [--verify] [--cold]\n"
+    "  [--n N] [--threads T] [--fs F] [--results-dir D] [--sa-out P] [--verify]\n"
     "\n"
     "  --n counts SYMBOLS, not tokens. For byte_from_token16 that is bytes,\n"
     "  i.e. twice the token count.\n";
@@ -257,13 +256,12 @@ inline bool parse(const int argc, char** const argv, Args& a, std::string& err)
     for(int i = 1; i < argc; ++i)
     {
         const std::string k(argv[i]);
-        const bool takes_val = (k != "--verify" && k != "--cold");
+        const bool takes_val = (k != "--verify");
 
         if(takes_val && i + 1 >= argc)   { err = "missing value for " + k; return false; }
         const char* const v = takes_val ? argv[++i] : nullptr;
 
         if     (k == "--verify")        a.verify      = true;
-        else if(k == "--cold")          a.cold        = true;
         else if(k == "--input")         a.input       = v;
         else if(k == "--corpus")        a.corpus      = v;
         else if(k == "--tokenizer")     a.tokenizer   = v;
@@ -292,11 +290,8 @@ inline bool parse(const int argc, char** const argv, Args& a, std::string& err)
 
 
 // Reads up to `n_req` elements of `T_sym_`; `buf.n` is what was actually read.
-// `drop_cache` uses posix_fadvise, which needs no root but is a no-op on many
-// network filesystems (baselines.md).
 template <typename T_sym_>
-inline bool load_prefix(const std::string& path, const int64_t n_req, Buffer<T_sym_>& buf,
-                        std::string& err, const bool drop_cache)
+inline bool load_prefix(const std::string& path, const int64_t n_req, Buffer<T_sym_>& buf, std::string& err)
 {
     const int fd = ::open(path.c_str(), O_RDONLY);
     if(fd < 0)  { err = "open failed: " + path; return false; }
@@ -305,9 +300,6 @@ inline bool load_prefix(const std::string& path, const int64_t n_req, Buffer<T_s
 
     struct stat sb;
     if(::fstat(fd, &sb) != 0)   return fail("fstat failed: " + path);
-
-    if(drop_cache)
-        ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
 
     const int64_t avail = static_cast<int64_t>(sb.st_size) / static_cast<int64_t>(sizeof(T_sym_));
     const int64_t n     = (n_req <= 0) ? avail : std::min(n_req, avail);
@@ -484,7 +476,7 @@ int bench_main(const Args& arg, const char* const method, const char* const meth
     std::string    err;
 
     const auto t0 = Clock::now();
-    if(!load_prefix(arg.input, arg.n, T, err, arg.cold))    return emit(st::BAD_INPUT, 0, err);
+    if(!load_prefix(arg.input, arg.n, T, err))              return emit(st::BAD_INPUT, 0, err);
     rec.t_load = since(t0);
 
     rec.n_symbols = T.n;

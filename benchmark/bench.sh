@@ -32,8 +32,7 @@ that `--corpora X --ours TAG` runs only our method; a default of "all" would add
 hours of baseline runs to every iteration on our side.
 
 Site configuration (benchmark/local.env): CORPUS_ROOT, RESULTS_ROOT, MODULES,
-SBATCH_PARTITION, SBATCH_NODELIST, MEM_TOTAL_GIB, GPU_SACA_SCRATCH (required
-by --ours).
+SBATCH_PARTITION, SBATCH_NODELIST, GPU_SACA_SCRATCH (required by --ours).
 EOF
 }
 
@@ -130,24 +129,14 @@ echo "reps       ${REPS}"
 echo "threads    ${THREADS:-all cores on the node}"
 echo "results    ${RESULTS}"
 echo
-printf '%-16s %10s %14s %14s\n' corpus bytes "n (tokens)" "libsais peak"
+printf '%-16s %10s %14s\n' corpus bytes "n (tokens)"
 for i in "${!CORPUS_LIST[@]}"; do
-    b="${SIZES[$i]}"
-    awk -v c="${CORPUS_LIST[$i]}" -v b="${b}" -v mem="${MEM_TOTAL_GIB:-0}" 'BEGIN{
-        n = b / 2; lo = 10 * n; hi = 12.4 * n;
-        note = "";
-        if (mem > 0) {
-            usable = mem * 1073741824;
-            if (lo > usable)      note = "  <- libsais OOM (fast)";
-            else if (hi > usable) note = "  <- libsais MARGINAL";
-        }
-        printf "%-16s %9.1fGB %13.3e %11.2fTB%s\n", c, b/1e9, n, hi/1e12, note;
+    awk -v c="${CORPUS_LIST[$i]}" -v b="${SIZES[$i]}" 'BEGIN{
+        printf "%-16s %9.1fGB %13.3e\n", c, b/1e9, b/2;
     }'
 done
 echo
-# Advisory only: the throughput constants are a measured band, not a model.
 awk -v runs="${RUNS}" 'BEGIN{ printf "%d runs queued\n", runs }'
-echo "(wall-clock estimates are advisory: libsais measures 5-20 M tokens/s on this node)"
 
 [ "${DRY}" -eq 1 ] && { echo; echo "--dry-run: not submitting."; exit 0; }
 
