@@ -32,7 +32,8 @@ that `--corpora X --ours TAG` runs only our method; a default of "all" would add
 hours of baseline runs to every iteration on our side.
 
 Site configuration (benchmark/local.env): CORPUS_ROOT, RESULTS_ROOT, MODULES,
-SBATCH_PARTITION, SBATCH_NODELIST, MEM_TOTAL_GIB.
+SBATCH_PARTITION, SBATCH_NODELIST, MEM_TOTAL_GIB, GPU_SACA_SCRATCH (required
+by --ours).
 EOF
 }
 
@@ -108,6 +109,11 @@ if [ -n "${OURS_TAG}" ]; then
     # Self-heals the moment Part 2 lands.
     [ -r "${REPO}/src/bench_gpu_saca.cu" ] \
         || die "--ours needs src/bench_gpu_saca.cu, which is not in this tree yet (Part 2)"
+    # Only that it is set: the roots are node-local NVMe, so the submit host
+    # cannot stat them. bench.sbatch checks writability once it is on the node.
+    [ -n "${GPU_SACA_SCRATCH:-}" ] \
+        || die "--ours needs GPU_SACA_SCRATCH set to colon-separated scratch roots
+       (node-local NVMe; see benchmark/local.env)"
 fi
 
 [ -n "${RESULTS}" ] || RESULTS="${RESULTS_ROOT}/$(date -u +%Y%m%dT%H%M%SZ)${NAME:+-${NAME}}"

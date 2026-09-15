@@ -23,6 +23,7 @@
 #   SBATCH_PARTITION   partition to submit to        (or sbatch --partition=)
 #   SBATCH_NODELIST    pin to one node, so timings are comparable across runs
 #   CORPUS_ROOT        holds <corpus>/<corpus>-<tokenizer>.tokenized.bin
+#   GPU_SACA_SCRATCH   colon-separated scratch roots, required by --ours
 #   MODULES            module names to load in-job   (default none)
 #   MEM_RESERVE_GIB    held back from the RLIMIT_AS  (default 8)
 #   BUILD_IN_JOB       compile the baselines in-job  (default 1; see below)
@@ -186,6 +187,22 @@ for c in "${CORPORA[@]}"; do
         else printf '  %-12s %14s  <- runs will record bad_input\n' "${c}" MISSING
     fi
 done
+
+# Our method's disk backend reads this, and the driver refuses to start without
+# it. Checked here rather than only in the driver because the roots are
+# node-local: bench.sh cannot see them from the submit host, so this is the first
+# place writability can be established. Checked before any run, not inside the
+# ours block below.
+if [ -n "${OURS_TAG}" ]; then
+    [ -n "${GPU_SACA_SCRATCH:-}" ] \
+        || { echo "FATAL: --ours needs GPU_SACA_SCRATCH set (see benchmark/local.env)."; exit 1; }
+    IFS=':' read -r -a SCRATCH_ROOTS <<< "${GPU_SACA_SCRATCH}"
+    for d in "${SCRATCH_ROOTS[@]}"; do
+        [ -d "${d}" ] && [ -w "${d}" ] \
+            || { echo "FATAL: GPU_SACA_SCRATCH root '${d}' is not a writable directory on $(hostname)."; exit 1; }
+        printf '  scratch      %-24s %s avail\n' "${d}" "$(df -h --output=avail "${d}" | tail -1 | tr -d ' ')"
+    done
+fi
 
 # run <bin> <tag> <corpus> <alphabet> <n-symbols> <threads> <rep> [rlimit]
 #
