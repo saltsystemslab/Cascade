@@ -143,8 +143,8 @@ verify()
 }
 
 # 1. Self-verification, one run per (method, alphabet) path through the harness.
-verify "${SAIS}"  libsais16x64 token16           "$(nproc)"
-verify "${SAIS}"  libsais64    byte_from_token16 "$(nproc)" "${SA_DIR}/sais.sa"
+verify "${SAIS}"  libsais16x64 token16           "${SLURM_CPUS_ON_NODE:-$(nproc)}"
+verify "${SAIS}"  libsais64    byte_from_token16 "${SLURM_CPUS_ON_NODE:-$(nproc)}" "${SA_DIR}/sais.sa"
 verify "${CUBWT}" libcubwt     byte_from_token16 0          "${SA_DIR}/cubwt.sa"
 
 # 2. Cross-verification. This is the load-bearing one: every cross-method

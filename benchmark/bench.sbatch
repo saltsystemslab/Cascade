@@ -95,10 +95,13 @@ REPS="${REPS:?REPS is required}"
 # Not the same kind of argument on both sides, which is worth knowing before
 # reading a thread sweep: libsais takes it as an API parameter, while our driver
 # calls omp_set_num_threads, and our stager pool is sized from
-# omp_get_max_threads() at construction. For us this is a tuning knob, and on an
-# exclusive node `nproc` is what the library would have picked anyway.
+# omp_get_max_threads() at construction. For us this is a tuning knob.
+#
+# From SLURM_CPUS_ON_NODE, not `nproc`: under `--exclusive --ntasks=1` this node
+# reports SLURM_CPUS_ON_NODE=128 while `nproc` returns 65, so deriving it from
+# `nproc` silently runs every benchmark on half the machine.
 THREADS="${THREADS:-}"
-[ -n "${THREADS}" ] || THREADS="$(nproc)"
+[ -n "${THREADS}" ] || THREADS="${SLURM_CPUS_ON_NODE:-$(nproc)}"
 
 # `module` is a shell function login shells get from /etc/profile.d; an sbatch
 # script never sources it. Init scripts reference unset vars, hence `set +u`.
