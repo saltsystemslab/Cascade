@@ -148,17 +148,6 @@ fi
 # and writes a bad_param record, so a silently-serial run is impossible without
 # the harness asserting anything about the environment.
 
-# The one placement knob still applied, and only pending measurement. The
-# mechanism is plausible -- first-touch of libsais's 8n SA on a two-socket node
-# -- but unmeasured, so a missing numactl is worth reporting rather than
-# asserting about.
-if command -v numactl >/dev/null; then
-    NUMA=(numactl --interleave=all)
-else
-    NUMA=()
-    echo "WARN: numactl not found -- runs will use default first-touch placement."
-fi
-
 
 mkdir -p "${RESULTS}"
 printf 'results  %s\nhost     %s   job %s\n' \
@@ -232,7 +221,7 @@ run()
 
     echo "=== ${id}"
     local t0=${SECONDS}
-    ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}"
+    "${cmd[@]}"
     echo "    wall $(( SECONDS - t0 ))s"
 }
 

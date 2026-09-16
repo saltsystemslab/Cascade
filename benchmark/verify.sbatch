@@ -92,11 +92,6 @@ fi
 # No OpenMP or memory-limit settings: libsais's OMP_DYNAMIC requirement is
 # enforced by the driver itself, which refuses and records bad_param.
 
-if command -v numactl >/dev/null
-    then NUMA=(numactl --interleave=all)
-    else NUMA=(); echo "WARN: numactl not found."
-fi
-
 mkdir -p "${RESULTS}" "${SA_DIR}"
 printf 'results  %s\nhost     %s   job %s\nverify n %s symbols\n' \
     "${RESULTS}" "$(hostname)" "${SLURM_JOB_ID:-none}" "${VERIFY_N}"
@@ -124,7 +119,7 @@ verify()
     [ -n "${sa_out}" ] && cmd+=(--sa-out "${sa_out}")
 
     echo "=== ${id}"
-    ${NUMA[@]+"${NUMA[@]}"} "${cmd[@]}"
+    "${cmd[@]}"
 
     # The record is authoritative; read the verdict back out of it. Report the
     # run's status alongside, so "the run failed" is distinguishable from
