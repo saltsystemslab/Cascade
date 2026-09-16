@@ -271,6 +271,36 @@ mid-token. Such a check fails correctly and wastes a day.
   a comparison read under different conditions. Removed. This costs nothing that
   matters: it moved `t_load`, and `t_load` is already unusable on this node, where
   back-to-back reads of the same file measured 0.70 and 1.64 GB/s.
+- **Every knob the harness used to set has now been measured, and all of them
+  were removed.** Four conditions on d4067, libsais over a 2e9-token prefix,
+  medians of 3 replicates; our method over full dolmasample, medians of 2:
+
+  | condition | libsais | ours |
+  |---|---:|---:|
+  | nothing set | 129.1 s | 92.9 s |
+  | `+ OMP_DYNAMIC=false` | 127.9 s (−0.9%) | — |
+  | `+ numactl --interleave=all` | 200.3 s (**+57%**) | 103.0 s (**+11%**) |
+  | `+ OMP_PROC_BIND=close, OMP_PLACES=cores` | 204.9 s (+2.3%) | 391 s (**+235%**) |
+
+  Three conclusions. `OMP_DYNAMIC=false` restated libgomp's default — the ICV
+  dump with nothing exported reads `OMP_DYNAMIC = 'FALSE'` — so it never did
+  anything; the driver's `omp_get_dynamic()` refusal is the real protection.
+  The placement knobs cost libsais 2% but cost our method 3.35x, which is why a
+  harness-wide `export` was the wrong shape for any of this. And `numactl
+  --interleave=all` is harmful to *both*, contradicting the comment that had
+  justified it — the harness was penalising the CPU baseline by more than half
+  and inflating our own speedup by ~1.57x.
+
+  **The open question is scale.** Those peaks (20 GB for the libsais arm,
+  193 GB for ours) fit inside one socket's ~500 GiB, where first-touch is
+  already local and interleaving only adds remote traffic. `github` is the first
+  corpus whose libsais peak (639–793 GB) cannot fit one socket, so interleaving
+  could plausibly win there. Until that is measured, no numactl anywhere.
+- **`nproc` is not the core count under `--exclusive --ntasks=1`.** This node
+  reports `SLURM_CPUS_ON_NODE=128` while `nproc` returns **65**, so a thread
+  count derived from `nproc` runs the campaign on half the machine. Every
+  measurement in the table above was taken at 65 threads for that reason. Derive
+  it from `SLURM_CPUS_ON_NODE`.
 - **lmod's `module` is a shell function that non-interactive shells never
   source**, and `module load` must run *inside* the job: a module-provided
   libgomp/libstdc++ lives outside the default loader path, so its absence is a
