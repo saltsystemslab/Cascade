@@ -193,7 +193,7 @@ inline uint64_t executable_hash()
     std::ifstream f("/proc/self/exe", std::ios::binary);
     if(!f)  return 0;
 
-    uint64_t h = 1469598103934665603ULL;    // Offset basis.
+    uint64_t h = 14695981039346656037ULL;   // Offset basis (20 digits) for FNV-1a.
     char buf[1 << 16];
     while(f.read(buf, sizeof(buf)) || f.gcount())
         for(std::streamsize i = 0; i < f.gcount(); ++i)
