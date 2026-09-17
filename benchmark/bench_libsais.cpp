@@ -39,6 +39,9 @@ Outcome core(Ctx<T_sym_>& c)
         return {st::BAD_PARAM, 0,
                 "OMP_DYNAMIC is enabled; libsais would silently run serial. Set OMP_DYNAMIC=false."};
 
+    // What the runtime resolved, may not necessarily be what we requested.
+    c.rec.threads_avail = omp_get_max_threads();
+
     Buffer<int64_t> SA;
     if(!SA.allocate(c.n + c.arg.fs))
         return {st::OOM_HOST, 0,

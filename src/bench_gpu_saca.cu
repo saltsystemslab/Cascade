@@ -81,23 +81,9 @@ int main(int argc, char** argv)
     rec.symbol_bytes    = bench::alpha::symbol_bytes(a.alphabet);
     rec.threads         = a.threads;
 
+    // The shared path to record-emission.
     const auto emit = [&](const char* const status, const int64_t code, const std::string& detail)
-    {
-        rec.status   = status;
-        rec.code     = code;
-        rec.detail   = detail;
-        rec.peak_rss = bench::peak_rss_bytes();
-
-        if(!rec.write(a.results_dir))
-        {
-            std::fprintf(stderr, "FATAL: could not write record to %s/%s.json\n",
-                         a.results_dir.c_str(), a.run_id.c_str());
-            return 1;
-        }
-
-        std::fprintf(stderr, "%s\n", rec.to_json().c_str());
-        return 0;
-    };
+    { return bench::finalize(rec, a.results_dir, status, code, detail); };
 
     // The symbol type is fixed at compile time currently.
     if(a.alphabet != bench::alpha::TOKEN16)
@@ -127,6 +113,9 @@ int main(int argc, char** argv)
     if(a.threads > 0)
         omp_set_num_threads(static_cast<int>(a.threads));
 
+    // What the runtime resolved, may not necessarily be what we requested.
+    rec.threads_avail = omp_get_max_threads();
+
     // An empty --sa-out means no dump, which is the benchmarking default.
     gpu_saca::GPU_SACA<uint16_t> saca(a.input, a.sa_out);
 
@@ -139,8 +128,21 @@ int main(int argc, char** argv)
     rec.t_core = bt.core();
     rec.t_write = a.sa_out.empty() ? 0.0 : -1.0;    // The dump is interleaved with the shuffle across a pool of writer threads,
                                                     // as such its cost cannot be separated out.
-    rec.notes = "p=" + std::to_string(bt.p) + " gen=" + std::to_string(bt.gen_c)
-                + " build=" + std::to_string(t_build) + "s";
+
+    // The phases as fields.
+    rec.t_prepage_pid  = bt.prepage_pid;
+    rec.t_pivots       = bt.pivots;
+    rec.t_partition    = bt.partition;
+    rec.t_device_setup = bt.device_setup;
+    rec.t_initial_rank = bt.initial_rank;
+    rec.t_exponentiate = bt.exponentiate;
+    rec.t_concatenate  = bt.concatenate;
+    rec.n_partitions   = bt.p;
+    rec.n_generations  = bt.gen_c;
+
+    // `t_build` is the driver's own wall time around build_SA(); t_load + t_core
+    // should account for it, and a gap is worth digging.
+    rec.notes = "build=" + std::to_string(t_build) + "s";
 
     return emit(bench::st::OK, 0, "");
 }
