@@ -219,10 +219,17 @@ run()
     # was built from.
     [ "$2" = gpu_saca ] && cmd+=(--method-version "${OURS_TAG}")
 
+    # One log per run, beside the record and named identically, rather than one
+    # per job: the job log interleaves every corpus x method x replicate, so our
+    # method's per-generation stats could not be attributed to a run. <id>.json
+    # is paired with <id>.log, and that helps tracking datasets' structural
+    # characteristics.
+    local log="${RESULTS}/${id}.log"
+
     echo "=== ${id}"
     local t0=${SECONDS}
-    "${cmd[@]}"
-    echo "    wall $(( SECONDS - t0 ))s"
+    "${cmd[@]}" > "${log}" 2>&1
+    echo "    wall $(( SECONDS - t0 ))s   log $(basename "${log}")"
 }
 
 # Ordered smallest corpus first, so the cheapest answers arrive in minutes rather
@@ -269,10 +276,22 @@ if [ -n "${OURS_TAG}" ]; then
         # Same split as the baselines: configure needs network (concurrentqueue is
         # fetched), compiling needs cores. A tag predating the driver cannot build,
         # which is the intended signal that it is not benchmarkable under this policy.
+        # -DSTATS=ON adds statistics measurable cheaply: partition-size distribution,
+        # residency plan, and per-generation active set sizes (corpus's LCP distribution
+        # on a dyadic ladder. Cost is a handful of `O(p)` loops and some stderr-logging.
+        #
+        # The second branch matters. Configure only runs when the cache is
+        # absent, so a worktree built before this flag existed would silently
+        # keep producing statless runs. Note the cache entry is
+        # STATS:UNINITIALIZED, not STATS:BOOL -- nothing declares it via option().
         if [ ! -f "${OURS_BUILD}/CMakeCache.txt" ]; then
             echo "configuring ${WT} (needs network; run it on a login node if this has none)"
-            cmake -S "${WT}" -B "${OURS_BUILD}" -DCMAKE_BUILD_TYPE=Release \
+            cmake -S "${WT}" -B "${OURS_BUILD}" -DCMAKE_BUILD_TYPE=Release -DSTATS=ON \
                 || { echo "FATAL: configure failed for tag ${OURS_TAG}."; exit 1; }
+        elif ! grep -qE '^STATS:[A-Z]*=(ON|TRUE|1|YES)' "${OURS_BUILD}/CMakeCache.txt"; then
+            echo "reconfiguring ${OURS_BUILD}: built without -DSTATS=ON"
+            cmake -S "${WT}" -B "${OURS_BUILD}" -DCMAKE_BUILD_TYPE=Release -DSTATS=ON \
+                || { echo "FATAL: reconfigure failed for tag ${OURS_TAG}."; exit 1; }
         fi
         echo "compiling bench_gpu_saca @ ${OURS_TAG} with -j$(nproc)"
         cmake --build "${OURS_BUILD}" --target bench_gpu_saca -j"$(nproc)" \

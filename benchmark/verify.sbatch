@@ -119,7 +119,9 @@ verify()
     [ -n "${sa_out}" ] && cmd+=(--sa-out "${sa_out}")
 
     echo "=== ${id}"
-    "${cmd[@]}"
+    # Same pairing as bench.sbatch: a verification failure's diagnostics belong
+    # with the record they refer to, not interleaved in the job log.
+    "${cmd[@]}" > "${RESULTS}/${id}.log" 2>&1
 
     # The record is authoritative; read the verdict back out of it. Report the
     # run's status alongside, so "the run failed" is distinguishable from
