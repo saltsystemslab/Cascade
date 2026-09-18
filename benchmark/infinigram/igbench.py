@@ -14,7 +14,7 @@ PIN_SHA = "9567c3d7cad09a9750bc288bcce6f63adb768390"
 
 SEP = 0xFFFF
 HACK = 100000   # indexing.py:15; do not raise
-ULIMIT = 262144 # their 1048576 default exceeds this cluster's 524288 hard limit
+ULIMIT = 262144 # their 1048576 default exceeds the hard limit; clamped at run time
 THREADS = 64    # Override with --cpus.
 RESERVED = ("tokenized", "table", "offset", "metadata", "metaoff", "unigram")
 ALIAS = {"c4-1000shards": "c4", "c4-1024shards": "c4", "fineweb-350BT": "fineweb"}
@@ -318,6 +318,13 @@ def cmd_run(a):
         die("cannot read MemAvailable; pass --mem")
 
     nb, jobs, batch = sizing(r["bytes"], mem, cpus)
+    # indexing.py:292 raises both soft and hard nofile, so asking above the hard
+    # limit aborts at startup. Login nodes allow 524288 here, compute nodes 131072.
+    fds = jobs + cpus * (jobs + 1)
+    ulimit = min(ULIMIT, resource.getrlimit(resource.RLIMIT_NOFILE)[1])
+    if fds > ulimit:
+        die(f"merge needs ~{fds:,} fds but the hard limit is {ulimit:,}; "
+            f"lower --cpus (fds go as cpus^2 * nb)")
     temp = os.path.join(a.temp_root, f"ig-{os.environ.get('SLURM_JOB_ID', os.getpid())}")
     rid = a.run_id or f"infinigram_{r['label']}-{r['tokenizer']}_token16_n{n}_t{cpus}_r{a.rep}"
 
@@ -344,7 +351,7 @@ def cmd_run(a):
 
     print(f"== {rid}\n   {r['bytes'] / 2**30:.1f} GiB, {n:,} tokens, ratio {ratio}\n"
           f"   cpus {cpus}  mem {mem} GiB  nb {nb}  jobs {jobs}  "
-          f"fds ~{jobs + cpus * (jobs + 1):,}\n"
+          f"fds ~{fds:,}/{ulimit:,}\n"
           f"   make-part peak {batch * 8 / 2**30:.0f} GiB @8x, "
           f"{batch * 12.5 / 2**30:.0f} GiB @12.5x"
           + (f", node {total / 1048576:.0f} GiB" if total else ""))
@@ -352,7 +359,7 @@ def cmd_run(a):
            "--data_dir", os.path.join(base, "empty-data-dir"), "--save_dir", save,
            "--temp_dir", temp, "--version", "4", "--token_dtype", "u16",
            "--shards", "1", "--workers", "1", "--cpus", str(cpus),
-           "--mem", str(mem), "--ulimit", str(ULIMIT)]
+           "--mem", str(mem), "--ulimit", str(ulimit)]
     if a.dry_run:
         return print("   " + " ".join(cmd) + "\nDRY RUN")
 
@@ -437,7 +444,7 @@ def cmd_run(a):
     }
     peak = (total - s.lo) * 1024 if (s.lo and total) else None
     side = {"run_id": rid, "phases_s": ph, "mem_gib": mem, "nb": nb, "jobs": jobs,
-            "cpus": cpus, "ulimit": ULIMIT, "hacksize": HACK, "ratio": ratio,
+            "cpus": cpus, "ulimit": ulimit, "hacksize": HACK, "ratio": ratio,
             "per_batch_bytes": int(batch), "node_peak_bytes": peak,
             "observed_multiplier": round(peak / batch, 2) if peak else None,
             "prewarm": bool(a.prewarm), "status": status, "detail": detail,
