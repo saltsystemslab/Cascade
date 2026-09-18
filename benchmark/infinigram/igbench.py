@@ -334,11 +334,13 @@ def cmd_run(a):
     if os.path.exists(sa):
         # No record but a table means an earlier attempt died after concat
         # created it -- and concat pre-sizes it, so it may be zero-tailed.
-        if not a.force:
+        if a.dry_run:
+            print(f"   note        {sa} exists; a real run needs --force")
+        elif not a.force:
             die(f"{sa} exists without a record; build_sa() would skip the shard "
                 f"and report success. Check it, or rerun with --force.")
-
-        os.unlink(sa)
+        else:
+            os.unlink(sa)
 
     print(f"== {rid}\n   {r['bytes'] / 2**30:.1f} GiB, {n:,} tokens, ratio {ratio}\n"
           f"   cpus {cpus}  mem {mem} GiB  nb {nb}  jobs {jobs}  "
@@ -499,7 +501,7 @@ def main():
     q.add_argument("--tokenizer")
     q.add_argument("--results-dir", required=True)
     q.add_argument("--mem", type=int)
-    q.add_argument("--cpus", type=int)
+    q.add_argument("--cpus", type=int, help=f"default {THREADS}")
     q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"))
     q.add_argument("--run-id")
     q.add_argument("--rep", type=int, default=1)
