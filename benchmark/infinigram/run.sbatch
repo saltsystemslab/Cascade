@@ -44,12 +44,11 @@ else
     echo "WARN: no ${HERE}/pin; records will say commit=unknown"
 fi
 
-# SLURM_CPUS_ON_NODE, not nproc: under --exclusive this node reports 128 while
-# nproc returns 65.
-CPUS="${CPUS:-${SLURM_CPUS_ON_NODE:-$(nproc)}}"
+# igbench defaults to 64; set CPUS to override.
+CPUS="${CPUS:-}"
 mkdir -p "${RESULTS}"
 [ -r "${HERE}/pin" ] && cp "${HERE}/pin" "${RESULTS}/pin"
-echo "host $(hostname)  cpus ${CPUS}  temp ${IG_TEMP_ROOT}  results ${RESULTS}"
+echo "host $(hostname)  cpus ${CPUS:-<igbench default>}  temp ${IG_TEMP_ROOT}  results ${RESULTS}"
 [ -r /proc/meminfo ] && awk '/^Mem(Total|Available):/ {print "  " $1 " " $2 " " $3}' /proc/meminfo
 
 for pair in ${CORPORA:?CORPORA required}; do
@@ -58,7 +57,7 @@ for pair in ${CORPORA:?CORPORA required}; do
         # --force: a table.0 from a killed earlier attempt must not make
         # build_sa() skip the shard and report success.
         python3 "${HERE}/igbench.py" run "${pair%%:*}" --tokenizer "${pair##*:}" \
-                --results-dir "${RESULTS}" --cpus "${CPUS}" --rep "${r}" --force \
+                --results-dir "${RESULTS}" --rep "${r}" --force ${CPUS:+--cpus "${CPUS}"} \
                 ${MEM:+--mem "${MEM}"}
         echo "    exit $?"
     done

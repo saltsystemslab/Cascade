@@ -15,6 +15,7 @@ PIN_SHA = "9567c3d7cad09a9750bc288bcce6f63adb768390"
 SEP = 0xFFFF
 HACK = 100000   # indexing.py:15; do not raise
 ULIMIT = 262144 # their 1048576 default exceeds this cluster's 524288 hard limit
+THREADS = 64    # Override with --cpus.
 RESERVED = ("tokenized", "table", "offset", "metadata", "metaoff", "unigram")
 ALIAS = {"c4-1000shards": "c4", "c4-1024shards": "c4", "fineweb-350BT": "fineweb"}
 TSV = ("label", "tokenizer", "sep", "tokens", "docs", "bytes", "sha256", "verified_at")
@@ -310,7 +311,7 @@ def cmd_run(a):
             "runs open(ds_path,'wb') and truncates the corpus.")
 
     n, ratio = r["bytes"] // 2, ratio_of(r["bytes"])
-    cpus = a.cpus or int(os.environ.get("SLURM_CPUS_ON_NODE", 0)) or os.cpu_count()
+    cpus = a.cpus or THREADS
     avail, total = meminfo("MemAvailable:"), meminfo("MemTotal:")
     mem = a.mem or (avail and int(0.9 * avail / 1048576))
     if not mem:
