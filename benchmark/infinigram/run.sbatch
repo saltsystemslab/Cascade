@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 # infini-gram baseline runs. Submit from the repo root:
 #   sbatch --export=ALL,CORPORA="dolmasample:olmo arxiv:olmo",REPS=1 \

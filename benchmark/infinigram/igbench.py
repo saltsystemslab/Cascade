@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """infini-gram baseline harness: prep, kappa, check, run. Never edits their source."""
 
