@@ -144,34 +144,80 @@ inline int64_t peak_rss_bytes()
 
 // Some kernel information: CPU time separates a thread-count change from a real
 // slowdown; the fault counts separate a page placement change; the context-
-// switch counts separate spinning from sleeping.
-struct Usage
+// switch counts separate spinning from sleeping; and the rest say are concerned
+// about differentiating twin runs that did identical work but has significant
+// swings in wall-clock: huge pages refused, allocations stalling in reclaim, or
+// memory served far. The two halves have different scopes, the difference being
+// at the point of use. `getrusage` is per-process and cumulative from exec, so
+// its values are the run's own. The `/proc/vmstat` and numastat half is node-
+// wide and cumulative since boot; hence only a difference across the run is
+// informative (and even then only when the harness runs `--exclusive`, ie one
+// job to a node).
+struct Kernel_Counter
 {
+    // Per-process, absolute.
     double cpu_user = -1;
     double cpu_sys = -1;
     int64_t minflt = -1;    // Minor page faults: page table miss.
     int64_t majflt = -1;    // Major page faults: RAM miss.
     int64_t nvcsw = -1;     // Voluntary context switches.
     int64_t nivcsw = -1;    // Involuntary context switches.
+
+    // Node-wide, cumulative since boot: differences to be tracked, not the absolute values.
+    int64_t thp_alloc = -1, thp_fallback = -1;  // Huge pages granted vs refused.
+    int64_t pgscan_direct = -1; // Direct reclaim: an allocation had to wait.
+    int64_t compact_stall = -1; // Compaction entered on an allocation path.
+    int64_t numa_local = -1, numa_other = -1;   // Pages served near vs far.
 };
 
 
-// Returns some usage information of the process from the kernel.
-inline Usage usage_self()
+// Returns what the kernel currently reports, from both sources.
+inline Kernel_Counter read_kernel_counters()
 {
-    Usage u;
+    Kernel_Counter c;
 #if defined(__linux__) || defined(__APPLE__)
     struct rusage r;
     if(::getrusage(RUSAGE_SELF, &r) == 0)   // RUSAGE_SELF sums all threads.
     {
-        u.cpu_user = static_cast<double>(r.ru_utime.tv_sec) + r.ru_utime.tv_usec / 1e6;
-        u.cpu_sys  = static_cast<double>(r.ru_stime.tv_sec) + r.ru_stime.tv_usec / 1e6;
-        u.minflt   = r.ru_minflt;   u.majflt = r.ru_majflt;
-        u.nvcsw    = r.ru_nvcsw;    u.nivcsw = r.ru_nivcsw;
+        c.cpu_user = static_cast<double>(r.ru_utime.tv_sec) + r.ru_utime.tv_usec / 1e6;
+        c.cpu_sys  = static_cast<double>(r.ru_stime.tv_sec) + r.ru_stime.tv_usec / 1e6;
+        c.minflt   = r.ru_minflt;   c.majflt = r.ru_majflt;
+        c.nvcsw    = r.ru_nvcsw;    c.nivcsw = r.ru_nivcsw;
     }
 #endif
-    return u;
+
+#if defined(__linux__)
+    {
+        std::ifstream f("/proc/vmstat");
+        std::string k;
+        int64_t v = 0;
+        while(f >> k >> v)
+            if     (k == "thp_fault_alloc")     c.thp_alloc     = v;
+            else if(k == "thp_fault_fallback")  c.thp_fallback  = v;
+            else if(k == "pgscan_direct")       c.pgscan_direct = v;
+            else if(k == "compact_stall")       c.compact_stall = v;
+    }
+
+    for(int n = 0; ; ++n)   // numastat is per-node; sum over the nodes.
+    {
+        std::ifstream f("/sys/devices/system/node/node" + std::to_string(n) + "/numastat");
+        if(!f)
+            break;
+
+        std::string k;
+        int64_t v = 0;
+        while(f >> k >> v)
+            if     (k == "local_node")  c.numa_local = std::max<int64_t>(c.numa_local, 0) + v;
+            else if(k == "other_node")  c.numa_other = std::max<int64_t>(c.numa_other, 0) + v;
+    }
+#endif
+
+    return c;
 }
+
+
+// Kernel counters at the beginning of the run.
+inline const Kernel_Counter counters_at_start = read_kernel_counters();
 
 
 // Returns the size of the affinity mask, i.e. what `nproc` reports, not
@@ -254,7 +300,7 @@ namespace alpha
 // "measured as zero". No `t_e2e` field: the summarizer sums the buckets.
 struct Record
 {
-    static constexpr int schema_version = 4;
+    static constexpr int schema_version = 5;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     std::string host = host_name(), timestamp_utc = now_utc();
@@ -275,6 +321,11 @@ struct Record
     int64_t     threads_avail = -1, cpus_allowed = -1;
     uint64_t    exe_hash = 0;
     std::string env_tuning;
+
+    // Differences over the run.
+    int64_t     thp_alloc = -1, thp_fallback = -1;
+    int64_t     pgscan_direct = -1, compact_stall = -1;
+    int64_t     numa_local = -1, numa_other = -1;
 
     // Our method's phase breakdown. -1 for the baselines.
     double      t_prepage_pid = -1, t_pivots = -1, t_partition = -1, t_device_setup = -1,
@@ -310,6 +361,8 @@ struct Record
         J_NUM(cpu_user);     J_NUM(cpu_sys);
         J_NUM(minflt);       J_NUM(majflt);        J_NUM(nvcsw);      J_NUM(nivcsw);
         J_NUM(threads_avail);J_NUM(cpus_allowed);  J_NUM(exe_hash);   J_STR(env_tuning);
+        J_NUM(thp_alloc);    J_NUM(thp_fallback);  J_NUM(pgscan_direct);
+        J_NUM(compact_stall);J_NUM(numa_local);    J_NUM(numa_other);
         J_NUM(t_prepage_pid);  J_NUM(t_pivots);      J_NUM(t_partition);
         J_NUM(t_device_setup); J_NUM(t_initial_rank);J_NUM(t_exponentiate);
         J_NUM(t_concatenate);  J_NUM(n_partitions);  J_NUM(n_generations);
@@ -544,10 +597,24 @@ inline int finalize(Record& rec, const std::string& results_dir,
 
     rec.peak_rss = peak_rss_bytes();
 
-    const auto u   = usage_self();
-    rec.cpu_user   = u.cpu_user;    rec.cpu_sys = u.cpu_sys;
-    rec.minflt     = u.minflt;      rec.majflt  = u.majflt;
-    rec.nvcsw      = u.nvcsw;       rec.nivcsw  = u.nivcsw;
+    const auto k = read_kernel_counters();
+
+    // Per-process and cumulative from exec: the value is the run's own.
+    rec.cpu_user   = k.cpu_user;    rec.cpu_sys = k.cpu_sys;
+    rec.minflt     = k.minflt;      rec.majflt  = k.majflt;
+    rec.nvcsw      = k.nvcsw;       rec.nivcsw  = k.nivcsw;
+
+    // Node-wide and cumulative since boot: only the change across this run is
+    // ours, and only under --exclusive.
+    const auto since_start = [](const int64_t now, const int64_t base)
+                             { return (now < 0 || base < 0) ? -1 : now - base; };
+    rec.thp_alloc     = since_start(k.thp_alloc,     counters_at_start.thp_alloc);
+    rec.thp_fallback  = since_start(k.thp_fallback,  counters_at_start.thp_fallback);
+    rec.pgscan_direct = since_start(k.pgscan_direct, counters_at_start.pgscan_direct);
+    rec.compact_stall = since_start(k.compact_stall, counters_at_start.compact_stall);
+    rec.numa_local    = since_start(k.numa_local,    counters_at_start.numa_local);
+    rec.numa_other    = since_start(k.numa_other,    counters_at_start.numa_other);
+
     rec.cpus_allowed = cpus_allowed_count();
     rec.exe_hash     = executable_hash();
     rec.env_tuning   = tuning_env();

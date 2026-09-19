@@ -14,7 +14,7 @@ import statistics
 import sys
 
 GiB = 1 << 30
-SCHEMA = 4
+SCHEMA = 5
 
 # Accessed unconditionally below, so a record missing any of them would take the
 # whole summary down rather than reporting itself as the one bad record.
@@ -147,6 +147,36 @@ def main(argv):
     print("  ".join("-" * x for x in w))
     for r in rows:
         print(line(r))
+
+    mem = []
+    for (method, corpus, tok, alphabet, ntok, thr), rs in sorted(groups.items(),
+                                                                 key=lambda kv: kv[0][4]):
+        def med(key):
+            v = [r[key] for r in rs if r.get(key, -1) >= 0]
+            return statistics.median(v) if v else None
+
+        alloc, fb = med("thp_alloc"), med("thp_fallback")
+        loc, oth = med("numa_local"), med("numa_other")
+        scan, comp = med("pgscan_direct"), med("compact_stall")
+        if alloc is None and loc is None:
+            continue
+
+        mem.append([
+            method, corpus,
+            f"{fb / (alloc + fb):.1%}" if alloc is not None and (alloc + fb) else "-",
+            f"{oth / (loc + oth):.1%}" if loc is not None and (loc + oth) else "-",
+            f"{scan:.3e}" if scan else "-",
+            f"{comp:.3e}" if comp else "-",
+        ])
+
+    if mem:
+        mh = ("method", "corpus", "thp_refused", "numa_remote", "direct_reclaim", "compaction")
+        mw = [max([len(str(h))] + [len(str(r[i])) for r in mem]) for i, h in enumerate(mh)]
+        print("\nmemory behaviour (node-wide deltas; meaningful only under --exclusive)")
+        print("  ".join(str(x).ljust(mw[i]) for i, x in enumerate(mh)))
+        print("  ".join("-" * x for x in mw))
+        for r in mem:
+            print("  ".join(str(x).ljust(mw[i]) for i, x in enumerate(r)))
 
     # The matrix is no longer derivable from the script, so the manifest is the
     # only thing that distinguishes "never requested" from "requested but died".
