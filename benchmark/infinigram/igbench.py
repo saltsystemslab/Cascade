@@ -250,6 +250,18 @@ def cmd_kappa(a):
     die(f"table differs ({n}). At fixture scale HACK is not in play, so this is a real bug.")
 
 
+# Stages a corpus's input to the node-local drive. Called once before its
+# replicates.
+def cmd_stage(a):
+    r = row(a.corpus_root, a.corpus, a.tokenizer)
+    _, save, ds, _ = paths(a, r)
+    d, secs, n = stage(os.path.realpath(ds),
+                       os.path.realpath(os.path.join(save, "offset.0")),
+                       a.stage_root, f"{r['label']}-{r['tokenizer']}")
+    print(f"  staged      {n / 2**30:.1f} GiB to {d} in {secs}s" if n else
+          f"  staged      already present at {d}")
+
+
 # Lays out the baseline and gpu_saca index arms for a corpus: resolves the
 # array, makes it read-only, writes offset.0, and links both arms to them.
 def cmd_prep(a):
@@ -334,6 +346,11 @@ class MemSampler(threading.Thread):
 # Copies the input to a node-local drive, returning its directory and the
 # seconds taken. Replicates reuse a staged copy.
 def stage(src_ds, src_od, root, tag):
+    if not os.path.isdir(root) or not os.access(root, os.W_OK):
+        die(f"stage root {root} is not a writable directory on "
+            f"{os.uname().nodename}. The node-local drives differ per node "
+            f"-- /tmp2 exists on d4067 only. Set --stage-root/IG_STAGE_ROOT.")
+
     parent = os.path.join(root, "ig-stage")
     os.makedirs(parent, exist_ok=True)
     for other in os.listdir(parent):
@@ -351,6 +368,9 @@ def stage(src_ds, src_od, root, tag):
             os.unlink(dst)               # It is 444; copyfile would need write
 
         shutil.copyfile(src, dst)
+        fd = os.open(dst, os.O_RDONLY)   # Flush now; writeback must not
+        os.fsync(fd)                     # bleed into the first replicate
+        os.close(fd)
         os.chmod(dst, 0o444)             # Same guard as the source: tokenize()
         copied += os.path.getsize(dst)   # Must fail and not truncate
 
@@ -541,8 +561,11 @@ def cmd_run(a):
         "cpus_allowed": len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else -1,
         "status": status, "code": code, "detail": detail, "verify": "off",
         "t_load": -1,   # Initial text read sits inside make-part and cannot be separated.
-        "t_core": ph["build_sa"] if ph["build_sa"] is not None else -1, # concat cannot be skipped: an empty path fails its `open()`` and `/dev/null`` fails its set_len()
-                                                                        # concat is in the sidecar either way.
+        "t_core": (round(ph["build_sa"] + (fsync_s or 0), 2)
+                   if ph["build_sa"] is not None else -1),  # build_sa plus the flush. Their concat never fsyncs,
+                                                            # so the output SA does not persist yet when they finish.
+                                                            # and concat cannot be skipped: an empty path fails its `open()`` and
+                                                            # `/dev/null`` fails its set_len(); concat is in the sidecar either way.
         "t_write": -1,
         "peak_rss": 0,                      # 0, not -1: summarize.py renders 0 as "-"
         "peak_device": -1,
@@ -566,7 +589,7 @@ def cmd_run(a):
     rec["notes"] = ("peak_rss = MemTotal - min(MemAvailable), node-level under "
                     "--exclusive, not a single-process VmHWM; "
                     f"phases make_part={ph['make_part']} merge={ph['merge']} "
-                    f"concat={ph['concat']} (all three in t_core)")
+                    f"concat={ph['concat']} (all three + fsync in t_core)")
     side = {"run_id": rid, "phases_s": ph, "mem_gib": mem, "nb": nb, "jobs": jobs,
             "cpus": cpus, "ulimit": ulimit, "hacksize": HACK, "ratio": ratio,
             "per_batch_bytes": int(batch), "node_peak_bytes": peak,
@@ -589,7 +612,7 @@ def cmd_run(a):
 
     print(f"   status      {status} {detail}\n   t_core      {rec['t_core']}s "
           f"= make-part {ph['make_part']} + merge {ph['merge']} "
-          f"+ concat {ph['concat']}; fsync {fsync_s}"
+          f"+ concat {ph['concat']} + fsync {fsync_s}"
           + (f"\n   node peak   {peak / 2**30:.1f} GiB = {peak / batch:.2f}x per-batch"
              if peak else ""))
     sys.exit(0 if status == "ok" else 1)
@@ -614,6 +637,13 @@ def main():
     q.add_argument("--no-chmod", action="store_true")
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_prep)
+
+    q = s.add_parser("stage", parents=[common], help="copy a corpus's input to the node-local drive")
+    q.add_argument("corpus")
+    q.add_argument("--tokenizer")
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
+    q.set_defaults(fn=cmd_stage)
+
 
     q = s.add_parser("kappa", help="reference table; byte-identity check against theirs")
     q.add_argument("tokenized")
