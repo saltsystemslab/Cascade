@@ -136,7 +136,7 @@ def main(argv):
             f"{ntok / med / 1e6:.2f}" if med else "-",
             f"{statistics.median(cpu):.0f}" if cpu else "-",
             f"{rss / GiB:.2f}G" if rss else "-",
-            f"{rss / ntok:.2f}" if rss and ntok else "-",
+            f"{rss / ntok:.2f}" if rss and ntok and status == "ok" else "-",    # Only for runs that complete; OOMs won't report their intensity consistently.
             f"{dev / GiB:.2f}G" if dev > 0 else "-",
             "!" if bad_fields else "",
         ])
