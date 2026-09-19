@@ -541,9 +541,9 @@ def cmd_run(a):
         "cpus_allowed": len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else -1,
         "status": status, "code": code, "detail": detail, "verify": "off",
         "t_load": -1,   # Initial text read sits inside make-part and cannot be separated.
-        "t_core": (round(ph["make_part"] + ph["merge"], 2)
-                   if None not in (ph["make_part"], ph["merge"]) else -1),  # Concat splices the merged planes into table.0, so it is the dump
-        "t_write": ph["concat"] if ph["concat"] is not None else -1,
+        "t_core": ph["build_sa"] if ph["build_sa"] is not None else -1, # concat cannot be skipped: an empty path fails its `open()`` and `/dev/null`` fails its set_len()
+                                                                        # concat is in the sidecar either way.
+        "t_write": -1,
         "peak_rss": 0,                      # 0, not -1: summarize.py renders 0 as "-"
         "peak_device": -1,
         # CPU time sums across children, unlike ru_maxrss.
@@ -566,7 +566,7 @@ def cmd_run(a):
     rec["notes"] = ("peak_rss = MemTotal - min(MemAvailable), node-level under "
                     "--exclusive, not a single-process VmHWM; "
                     f"phases make_part={ph['make_part']} merge={ph['merge']} "
-                    f"concat={ph['concat']} (concat excluded from t_core)")
+                    f"concat={ph['concat']} (all three in t_core)")
     side = {"run_id": rid, "phases_s": ph, "mem_gib": mem, "nb": nb, "jobs": jobs,
             "cpus": cpus, "ulimit": ulimit, "hacksize": HACK, "ratio": ratio,
             "per_batch_bytes": int(batch), "node_peak_bytes": peak,
@@ -588,8 +588,8 @@ def cmd_run(a):
         os.replace(path + ".tmp", path)
 
     print(f"   status      {status} {detail}\n   t_core      {rec['t_core']}s "
-          f"= make-part {ph['make_part']} + merge {ph['merge']}; "
-          f"concat {ph['concat']}, fsync {fsync_s}"
+          f"= make-part {ph['make_part']} + merge {ph['merge']} "
+          f"+ concat {ph['concat']}; fsync {fsync_s}"
           + (f"\n   node peak   {peak / 2**30:.1f} GiB = {peak / batch:.2f}x per-batch"
              if peak else ""))
     sys.exit(0 if status == "ok" else 1)
