@@ -283,6 +283,37 @@ def cmd_prep(a):
         print(f"  {arm:<11} ready" + (" (table.0 present)" if has else ""))
 
 
+# Node-wide counters `bench.hpp` records for every method. Cumulative since
+# boot, so only the delta across a run matters, while under `--exclusive`.
+def kernel_counters():
+    c = dict.fromkeys(("thp_alloc", "thp_fallback", "pgscan_direct",
+                       "compact_stall", "numa_local", "numa_other"), -1)
+    vm = {"thp_fault_alloc": "thp_alloc", "thp_fault_fallback": "thp_fallback",
+          "pgscan_direct": "pgscan_direct", "compact_stall": "compact_stall"}
+    try:
+        for line in open("/proc/vmstat"):
+            k, _, v = line.partition(" ")
+            if k in vm:
+                c[vm[k]] = int(v)
+    except OSError:
+        pass
+
+    n = 0
+    while os.path.exists(f"/sys/devices/system/node/node{n}/numastat"):
+        try:
+            for line in open(f"/sys/devices/system/node/node{n}/numastat"):
+                k, _, v = line.partition(" ")
+                if k in ("local_node", "other_node"):
+                    key = "numa_local" if k == "local_node" else "numa_other"
+                    c[key] = max(c[key], 0) + int(v)
+        except OSError:
+            pass
+
+        n += 1
+
+    return c
+
+
 # Node memory low-water at 1 Hz. Runs are --exclusive, so this is the whole
 # build; a single-process peak does not exist here (make-part is `cpus`
 # subprocesses, ru_maxrss is a max not a sum, no memory cgroup on this node).
@@ -419,6 +450,7 @@ def cmd_run(a):
 
     log = os.path.join(a.results_dir, rid + ".log")
     r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    k0 = kernel_counters()
     s = MemSampler()
     s.start()
     with open(log, "wb") as lf:
@@ -433,6 +465,8 @@ def cmd_run(a):
     s.stop.set()
     s.join(5)
     r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+    k1 = kernel_counters()
+    kd = {k: (k1[k] - k0[k] if k0[k] >= 0 and k1[k] >= 0 else -1) for k in k0}
 
     # main.rs has no fsync, sync_all or flush anywhere, and BufWriter's drop
     # swallows errors, so concat's reported time is a copy into page cache, not a
@@ -491,17 +525,18 @@ def cmd_run(a):
     if not a.keep_temp:
         shutil.rmtree(work, ignore_errors=True)
 
-    # Only what summarize.py reads, plus cheap provenance. Their own phase
-    # fields are omitted rather than filled with -1: they are our method's, and
-    # everything infini-gram-specific is in the sidecar.
+    # `bench.hpp`'s field set. The fault and switch counters come from RUSAGE_CHILDREN,
+    # not RUSAGE_SELF: their pipeline is a subprocess tree, and these counters sum across children.
     rec = {
-        "schema_version": 4, "run_id": rid, "method": "infinigram",
+        "schema_version": 5, "run_id": rid, "method": "infinigram",
+        "build_type": "Release",
         "method_version": PIN_TAG,
         "commit": os.environ.get("IG_COMMIT", "unknown"),
         "host": os.uname().nodename,
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "input": real, "corpus": r["label"], "tokenizer": r["tokenizer"],
-        "alphabet": "token16", "n_tokens": n, "threads": cpus,
+        "alphabet": "token16", "symbol_bytes": 2, "n_symbols": n, "n_tokens": n,
+        "threads": cpus,
         "threads_avail": cpus,
         "cpus_allowed": len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else -1,
         "status": status, "code": code, "detail": detail, "verify": "off",
@@ -514,18 +549,33 @@ def cmd_run(a):
         # CPU time sums across children, unlike ru_maxrss.
         "cpu_user": round(r1.ru_utime - r0.ru_utime, 6),
         "cpu_sys": round(r1.ru_stime - r0.ru_stime, 6),
+        "minflt": r1.ru_minflt - r0.ru_minflt, "majflt": r1.ru_majflt - r0.ru_majflt,
+        "nvcsw": r1.ru_nvcsw - r0.ru_nvcsw, "nivcsw": r1.ru_nivcsw - r0.ru_nivcsw,
+        **kd,
         "exe_hash": int(sha256(binary)[:16], 16),
         "env_tuning": ";".join(sorted(f"{k}={v}" for k, v in os.environ.items()
                                       if k.startswith(("OMP_", "GPU_SACA_")))),
     }
+
     peak = (total - s.lo) * 1024 if (s.lo and total) else None
+    if peak:
+        # bench.hpp reads VmHWM of one process. That does not exist here: their pipeline is `cpus` concurrent
+        # subprocesses and this node has no memory cgroup, so the node-level low-water is the whole-build figure.
+        rec["peak_rss"] = peak
+
+    rec["notes"] = ("peak_rss = MemTotal - min(MemAvailable), node-level under "
+                    "--exclusive, not a single-process VmHWM; "
+                    f"phases make_part={ph['make_part']} merge={ph['merge']} "
+                    f"concat={ph['concat']} (concat excluded from t_core)")
     side = {"run_id": rid, "phases_s": ph, "mem_gib": mem, "nb": nb, "jobs": jobs,
             "cpus": cpus, "ulimit": ulimit, "hacksize": HACK, "ratio": ratio,
             "per_batch_bytes": int(batch), "node_peak_bytes": peak,
             "observed_multiplier": round(peak / batch, 2) if peak else None,
-            "prewarm": bool(a.prewarm), "status": status, "detail": detail,
+            "prewarm": bool(a.prewarm), "table_fsync_s": fsync_s,
+            "status": status, "detail": detail,
             "exit_code": code, "command": cmd,
             "table_sha256": sha256(sa) if status == "ok" else None,
+            "stage_root": a.stage_root, "stage_s": stage_s, "copyout_s": copyout_s,
             "infinigram_version": PIN_TAG}
 
     # Sidecar in a subdirectory: summarize.py globs *.json in the results dir and
