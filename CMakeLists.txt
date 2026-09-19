@@ -191,7 +191,7 @@ endif()
 execute_process(COMMAND git rev-parse --short HEAD
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         OUTPUT_VARIABLE BENCH_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-execute_process(COMMAND git status --porcelain
+execute_process(COMMAND git status --porcelain --untracked-files=no # Only tracked modifications make a build unreproducible.
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         OUTPUT_VARIABLE BENCH_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
 
