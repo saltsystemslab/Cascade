@@ -54,6 +54,8 @@ echo "host $(hostname)  cpus ${CPUS:-<igbench default>}  temp ${IG_TEMP_ROOT}  r
 [ -r /proc/meminfo ] && awk '/^Mem(Total|Available):/ {print "  " $1 " " $2 " " $3}' /proc/meminfo
 
 for pair in ${CORPORA:?CORPORA required}; do
+    # Stage once, before the replicates, so none of them carries the copy.
+    python3 "${HERE}/igbench.py" stage "${pair%%:*}" --tokenizer "${pair##*:}"
     for r in $(seq 1 "${REPS:-1}"); do
         # run skips itself when its record exists, so a resubmit resumes.
         # --force: a table.0 from a killed earlier attempt must not make
