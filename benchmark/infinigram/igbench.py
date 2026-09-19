@@ -300,6 +300,32 @@ class MemSampler(threading.Thread):
             self.stop.wait(1.0)
 
 
+# Copies the input to a node-local drive, returning its directory and the
+# seconds taken. Replicates reuse a staged copy.
+def stage(src_ds, src_od, root, tag):
+    parent = os.path.join(root, "ig-stage")
+    os.makedirs(parent, exist_ok=True)
+    for other in os.listdir(parent):
+        if other != tag:
+            shutil.rmtree(os.path.join(parent, other), ignore_errors=True)
+
+    d = os.path.join(parent, tag)
+    os.makedirs(d, exist_ok=True)
+    t, copied = time.monotonic(), 0
+    for name, src in (("tokenized.0", src_ds), ("offset.0", src_od)):
+        dst = os.path.join(d, name)
+        if os.path.exists(dst) and os.path.getsize(dst) == os.path.getsize(src):
+            continue
+        if os.path.exists(dst):
+            os.unlink(dst)               # It is 444; copyfile would need write
+
+        shutil.copyfile(src, dst)
+        os.chmod(dst, 0o444)             # Same guard as the source: tokenize()
+        copied += os.path.getsize(dst)   # Must fail and not truncate
+
+    return d, (round(time.monotonic() - t, 1) if copied else 0.0), copied
+
+
 # Runs their unmodified builder over one corpus and writes a benchmark
 # record plus a sidecar. Skips itself when a record already exists.
 def cmd_run(a):
@@ -324,7 +350,11 @@ def cmd_run(a):
     if fds > ulimit:
         die(f"merge needs ~{fds:,} fds but the hard limit is {ulimit:,}; "
             f"lower --cpus (fds go as cpus^2 * nb)")
-    temp = os.path.join(a.temp_root, f"ig-{os.environ.get('SLURM_JOB_ID', os.getpid())}")
+
+    tag = f"{os.environ.get('SLURM_JOB_ID', os.getpid())}"
+    work = os.path.join(a.temp_root, f"ig-{tag}")
+    temp, work_save = os.path.join(work, "temp"), os.path.join(work, "baseline")
+    work_sa, empty = os.path.join(work_save, "table.0"), os.path.join(work, "empty")
     rid = a.run_id or f"infinigram_{r['label']}-{r['tokenizer']}_token16_n{n}_t{cpus}_r{a.rep}"
 
     # Before the binary check: at the wrong tag the built binary is the wrong
@@ -338,15 +368,13 @@ def cmd_run(a):
         return print(f"== {rid}\n   skip (record exists)")
 
     if os.path.exists(sa):
-        # No record but a table means an earlier attempt died after concat
-        # created it -- and concat pre-sizes it, so it may be zero-tailed.
+        # A published table with no record is from an attempt that died before
+        # writing one. Refuse rather than silently replace a good index.
         if a.dry_run:
             print(f"   note        {sa} exists; a real run needs --force")
         elif not a.force:
-            die(f"{sa} exists without a record; build_sa() would skip the shard "
-                f"and report success. Check it, or rerun with --force.")
-        else:
-            os.unlink(sa)
+            die(f"{sa} exists without a record. Verify it with `check`, or pass "
+                f"--force to keep it and run anyway.")
 
     print(f"== {rid}\n   {r['bytes'] / 2**30:.1f} GiB, {n:,} tokens, ratio {ratio}\n"
           f"   cpus {cpus}  mem {mem} GiB  nb {nb}  jobs {jobs}  "
@@ -355,7 +383,7 @@ def cmd_run(a):
           f"{batch * 12.5 / 2**30:.0f} GiB @12.5x"
           + (f", node {total / 1048576:.0f} GiB" if total else ""))
     cmd = [sys.executable, "-m", "infini_gram.indexing",
-           "--data_dir", os.path.join(base, "empty-data-dir"), "--save_dir", save,
+           "--data_dir", empty, "--save_dir", work_save,
            "--temp_dir", temp, "--version", "4", "--token_dtype", "u16",
            "--shards", "1", "--workers", "1", "--cpus", str(cpus),
            "--mem", str(mem), "--ulimit", str(ulimit)]
@@ -363,8 +391,24 @@ def cmd_run(a):
         return print("   " + " ".join(cmd) + "\nDRY RUN")
 
     os.makedirs(a.results_dir, exist_ok=True)
-    os.makedirs(temp, exist_ok=True)
-    real = os.path.realpath(ds)
+    stage_dir, stage_s, staged = stage(
+        os.path.realpath(ds), os.path.realpath(os.path.join(save, "offset.0")),
+        a.stage_root, f"{r['label']}-{r['tokenizer']}")
+
+    if staged:
+        print(f"   staged      {staged / 2**30:.1f} GiB to {a.stage_root} in {stage_s}s")
+
+    for d in (temp, work_save, empty):
+        os.makedirs(d, exist_ok=True)
+
+    for name in ("tokenized.0", "offset.0"):    # infini-gram's tokenize() skips only when both exist in save_dir; symlinks satisfy it.
+        link = os.path.join(work_save, name)
+        if os.path.islink(link) or os.path.exists(link):
+            os.unlink(link)
+
+        os.symlink(os.path.join(stage_dir, name), link)
+
+    real = os.path.join(stage_dir, "tokenized.0")
     if a.prewarm:
         # Warm both arms alike.
         t = time.monotonic()
@@ -420,16 +464,32 @@ def cmd_run(a):
         status, detail = "bad_param", "tokenize() did not skip; verify the corpus"
     elif "Step 2 (build_sa): Skipped" in out or ph["build_sa"] is None:
         status, detail = "bad_param", "build_sa() skipped or never completed"
-    elif os.path.getsize(sa) != n * ratio:
-        status, detail = "lib_error", f"table.0 is {os.path.getsize(sa)}, want {n * ratio}"
+    elif not os.path.exists(work_sa) or os.path.getsize(work_sa) != n * ratio:
+        status = "lib_error"
+        detail = f"table.0 is {os.path.getsize(work_sa) if os.path.exists(work_sa) else 0}, want {n * ratio}"
 
-    # A surviving table.0 after a failure makes the next run skip the shard and
-    # report success on a corrupt index.
-    if status != "ok" and os.path.exists(sa):
-        print(f"   removing {sa}: run failed")
-        os.unlink(sa)
+    # Verify on the local copy while it is cheap, then publish to `/scratch`.
+    copyout_s = None
+    if status == "ok":
+        check_table(real, work_sa)
+        # infini-gram's SA build is deterministic with identical sha256 across runs.
+        # Replicates should have the same bytes, so publish once per corpus.
+        if os.path.exists(sa) and os.path.getsize(sa) == n * ratio:
+            print(f"   published   already present; copy skipped")
+        else:
+            t = time.monotonic()
+            shutil.copyfile(work_sa, sa)
+            copyout_s = round(time.monotonic() - t, 1)
+            print(f"   published   table.0 -> {sa} in {copyout_s}s")
+    else:
+        # A surviving table.0 would be taken for a finished index later.
+        for f in (work_sa, sa):
+            if os.path.exists(f):
+                print(f"   removing {f}: run failed")
+                os.unlink(f)
+
     if not a.keep_temp:
-        shutil.rmtree(temp, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
 
     # Only what summarize.py reads, plus cheap provenance. Their own phase
     # fields are omitted rather than filled with -1: they are our method's, and
@@ -445,9 +505,10 @@ def cmd_run(a):
         "threads_avail": cpus,
         "cpus_allowed": len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else -1,
         "status": status, "code": code, "detail": detail, "verify": "off",
-        "t_load": -1,                       # their load is fused into make-part
-        "t_core": ph["build_sa"] if ph["build_sa"] is not None else -1,
-        "t_write": -1,                      # and their write into concat
+        "t_load": -1,   # Initial text read sits inside make-part and cannot be separated.
+        "t_core": (round(ph["make_part"] + ph["merge"], 2)
+                   if None not in (ph["make_part"], ph["merge"]) else -1),  # Concat splices the merged planes into table.0, so it is the dump
+        "t_write": ph["concat"] if ph["concat"] is not None else -1,
         "peak_rss": 0,                      # 0, not -1: summarize.py renders 0 as "-"
         "peak_device": -1,
         # CPU time sums across children, unlike ru_maxrss.
@@ -477,11 +538,10 @@ def cmd_run(a):
         os.replace(path + ".tmp", path)
 
     print(f"   status      {status} {detail}\n   t_core      {rec['t_core']}s "
-          f"(make-part {ph['make_part']}, merge {ph['merge']}, concat {ph['concat']})"
+          f"= make-part {ph['make_part']} + merge {ph['merge']}; "
+          f"concat {ph['concat']}, fsync {fsync_s}"
           + (f"\n   node peak   {peak / 2**30:.1f} GiB = {peak / batch:.2f}x per-batch"
              if peak else ""))
-    if status == "ok":
-        check_table(real, sa)
     sys.exit(0 if status == "ok" else 1)
 
 
@@ -524,7 +584,10 @@ def main():
     q.add_argument("--results-dir", required=True)
     q.add_argument("--mem", type=int)
     q.add_argument("--cpus", type=int, help=f"default {THREADS}")
-    q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"))
+    q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"),
+                   help="node-local drive for temp and output (default /tmp)")
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"),
+                   help="node-local drive for the staged input (default /tmp2)")
     q.add_argument("--run-id")
     q.add_argument("--rep", type=int, default=1)
     q.add_argument("--no-prewarm", dest="prewarm", action="store_false")

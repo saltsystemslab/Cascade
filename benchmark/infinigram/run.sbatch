@@ -10,7 +10,7 @@
 #SBATCH --mem=0
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
-#SBATCH --time=24:00:00
+#SBATCH --time=30-00:00:00
 #SBATCH --output=%x-%j.out
 #SBATCH --error=%x-%j.err
 
@@ -24,7 +24,10 @@ RESULTS="${1:?results directory required}"
 if [ -r "${REPO}/benchmark/local.env" ]; then
     set +u; . "${REPO}/benchmark/local.env"; set -u
 fi
-export IG_TEMP_ROOT="${IG_TEMP_ROOT:-/tmp}"   # node-local NVMe; /tmp2 is shared, /scratch network
+
+# Two node-local NVMe drives: input is staged on one, temp and output on the other.
+export IG_TEMP_ROOT="${IG_TEMP_ROOT:-/tmp}"
+export IG_STAGE_ROOT="${IG_STAGE_ROOT:-/tmp2}"
 
 if [ -n "${MODULES:-}" ]; then
     set +u
@@ -60,6 +63,9 @@ for pair in ${CORPORA:?CORPORA required}; do
                 ${MEM:+--mem "${MEM}"}
         echo "    exit $?"
     done
+
+    # Drop the staged input once its replicates are done.
+    rm -rf "${IG_STAGE_ROOT}/ig-stage/${pair%%:*}-${pair##*:}"
 done
 
 python3 "${REPO}/benchmark/summarize.py" "${RESULTS}" || true
