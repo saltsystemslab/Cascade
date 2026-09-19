@@ -343,11 +343,12 @@ struct Record
         std::ostringstream o;
         o.setf(std::ios::fixed);
         o.precision(6);
-        const char* sep = "";
+        const char* sep = "\n    "; // One field per line for records to be human-readable.
         o << "{";
 
-        #define J_NUM(k) (o << sep << "\"" #k "\":"   << (k),             sep = ",")
-        #define J_STR(k) (o << sep << "\"" #k "\":\"" << esc(k) << '"',   sep = ",")
+        // No space after the colons: verify.sbatch greps records with `sed 's/.*"status":"\(...\)".*/'`.
+        #define J_NUM(k) (o << sep << "\"" #k "\":"   << (k),             sep = ",\n    ")
+        #define J_STR(k) (o << sep << "\"" #k "\":\"" << esc(k) << '"',   sep = ",\n    ")
 
         J_NUM(schema_version);
         J_STR(run_id);       J_STR(commit);        J_STR(build_type);
@@ -371,7 +372,24 @@ struct Record
         #undef J_NUM
         #undef J_STR
 
-        o << "}";
+        o << "\n}";
+        return o.str();
+    }
+
+
+    // Returns a summary of the records, required for the job log.
+    std::string summary() const
+    {
+        std::ostringstream o;
+        o.setf(std::ios::fixed);
+        o.precision(2);
+
+        o << method << ' ' << corpus << '-' << tokenizer << "  " << status;
+        if(status == "ok")
+            o << "  t_load=" << t_load << "s  t_core=" << t_core << "s  peak_rss=" << (peak_rss / 1e9) << "GB";
+        else if(!detail.empty())
+            o << "  " << detail;
+
         return o.str();
     }
 
@@ -626,7 +644,7 @@ inline int finalize(Record& rec, const std::string& results_dir,
         return 1;
     }
 
-    std::fprintf(stderr, "%s\n", rec.to_json().c_str());
+    std::fprintf(stderr, "%s\n", rec.summary().c_str());
     return 0;
 }
 
