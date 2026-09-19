@@ -389,6 +389,22 @@ def cmd_run(a):
     s.stop.set()
     s.join(5)
     r1 = resource.getrusage(resource.RUSAGE_CHILDREN)
+
+    # main.rs has no fsync, sync_all or flush anywhere, and BufWriter's drop
+    # swallows errors, so concat's reported time is a copy into page cache, not a
+    # durable write. Timing the flush here quantifies what their t_write omits,
+    # and keeps one run's writeback out of the next run's make-part.
+    fsync_s = None
+    if os.path.exists(work_sa):
+        try:
+            t = time.monotonic()
+            fd = os.open(work_sa, os.O_RDONLY)
+            os.fsync(fd)
+            os.close(fd)
+            fsync_s = round(time.monotonic() - t, 3)
+        except OSError:
+            pass
+
     out = open(log, errors="replace").read()
     g = lambda p: (lambda m: float(m.group(1)) if m else None)(re.search(p, out))
     ph = {"make_part": g(r"2\.1 \(make-part\): Done\. Took ([\d.]+)"),
