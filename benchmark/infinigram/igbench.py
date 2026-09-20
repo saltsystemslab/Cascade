@@ -460,14 +460,6 @@ def cmd_run(a):
         os.symlink(os.path.join(stage_dir, name), link)
 
     real = os.path.join(stage_dir, "tokenized.0")
-    if a.prewarm:
-        # Warm both arms alike.
-        t = time.monotonic()
-        with open(real, "rb") as f:
-            while f.read(1 << 24):
-                pass
-        print(f"   prewarm     {r['bytes'] / 2**30:.1f} GiB in {time.monotonic() - t:.1f}s")
-
     log = os.path.join(a.results_dir, rid + ".log")
     r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
     k0 = kernel_counters()
@@ -594,7 +586,7 @@ def cmd_run(a):
             "cpus": cpus, "ulimit": ulimit, "hacksize": HACK, "ratio": ratio,
             "per_batch_bytes": int(batch), "node_peak_bytes": peak,
             "observed_multiplier": round(peak / batch, 2) if peak else None,
-            "prewarm": bool(a.prewarm), "table_fsync_s": fsync_s,
+            "table_fsync_s": fsync_s,
             "status": status, "detail": detail,
             "exit_code": code, "command": cmd,
             "table_sha256": sha256(sa) if status == "ok" else None,
@@ -670,7 +662,6 @@ def main():
                    help="node-local drive for the staged input (default /tmp2)")
     q.add_argument("--run-id")
     q.add_argument("--rep", type=int, default=1)
-    q.add_argument("--no-prewarm", dest="prewarm", action="store_false")
     q.add_argument("--keep-temp", action="store_true")
     q.add_argument("--force", action="store_true", help="delete a stale table.0 first")
     q.add_argument("--rerun", action="store_true", help="redo a run that has a record")
