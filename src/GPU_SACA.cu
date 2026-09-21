@@ -1447,7 +1447,7 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
         {
             // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
             // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
-            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, P_id))
+            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, ell, P_id))
             {
                 std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
                 std::exit(EXIT_FAILURE);

@@ -14,11 +14,11 @@
 namespace gpu_saca::test
 {
 
-bool validate_previous_gen_fwd_tag(const idx_t suf, const idx_t n, const idx_t stride, const p_id_t* const P_id)
+bool validate_previous_gen_fwd_tag(const idx_t suf, const idx_t n, const idx_t stride, const idx_t ell, const p_id_t* const P_id)
 {
     const auto j = bit_layout::suffix_of(suf);  // Suffix.
     const auto ctx_prev = stride;   // Last generation's context.
-    const p_id_t phi_prev = (j + ctx_prev < n ? P_id[j + ctx_prev] : 0);
+    const auto phi_prev = bit_layout::fwd_tag(P_id, j + ctx_prev, n, ell);
     return bit_layout::tag_of(suf) == phi_prev;
 }
 
@@ -102,8 +102,8 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
             // `λ < 2`, and this is guaranteed to hold for everyone up-to generation 1.
             // Also, a forwarded pill carries tag 0 by construction.
             {
-                const p_id_t phi = bit_layout::tag_of(msg_target[i]);
-                const p_id_t expected_phi = (target + 2 * ctx < n ? P_id[target + 2 * ctx] : p_id_t(0));
+                const auto phi = bit_layout::tag_of(msg_target[i]);
+                const auto expected_phi = bit_layout::fwd_tag(P_id, target + 2 * ctx, n, self->ell);
                 if(!is_poison_pill(msg_rank[i]) && ctx <= 2 * self->ell && phi != expected_phi)
                 {
                     is_valid = false;
