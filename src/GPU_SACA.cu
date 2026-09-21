@@ -241,7 +241,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 {
     const idx_t p_sz_max = partition_size_upper_bound();    // Maximum supported partition-size based on the device-memory budget.
     const idx_t p_min = (n_ + p_sz_max - 1) / p_sz_max;     // Minimum number of partitions.
-    const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PART_COUNT);    // Maximum number of partitions.
+    const idx_t p_max = std::min<idx_t>(PARTITION_SLACK_FACTOR * p_min, MAX_PART_COUNT - ell);  // Maximum number of partitions; see `fwd_tag` for the `ell` bias.
     const idx_t s = OVERSAMPLING_FACTOR * p_max * std::log2(n_);    // Number of samples.
     std::vector<Pivot_Key> S(s);    // The samples.
 
@@ -299,7 +299,7 @@ void GPU_SACA<T_sym_>::select_pivots()
 
         p_ = pivots.size() + 1;
 
-        if(!bit_layout::validate(n_, p_))
+        if(!bit_layout::validate(n_, p_ + ell)) // See `fwd_tag` for the `ell` bias.
         {
             std::cerr << "Bit-packing layout violated. Aborting.\n";
             std::exit(EXIT_FAILURE);
@@ -365,10 +365,10 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     }
 
     // The (primary, secondary) key packing scheme, or very large `n`, can demand more partitions than the partition-ID type can index.
-    if(p_min > MAX_PART_COUNT)
+    if(p_min > MAX_PART_COUNT - ell)    // See `fwd_tag` for the `ell` bias.
     {
         std::cerr   << "Current partitioning policy requires at least " << p_min << " partitions for the " << n_ << "-length text. "
-                    << "But `p_id_t` can index at most " << MAX_PART_COUNT << " partitions. Aborting.\n";
+                    << "But the forward tags can index at most " << (MAX_PART_COUNT - ell) << " partitions. Aborting.\n";
         std::exit(EXIT_FAILURE);
     }
 
@@ -668,7 +668,9 @@ void GPU_SACA<T_sym_>::partition()
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
             {
-                const p_id_t phi = (i + ell < n_ ? P_id[i + ell] : 0);  // Forward tag for generation 0.
+                const auto phi = bit_layout::fwd_tag(P_id, i + ell, n_, ell);   // Forward tag for generation 0.
+                // TODO: skip staging for generation 0 this way:
+                // const p_id_t beta = (i >= ell ? P_id[i - ell] : 0);  // Backward tag for generation 0.
                 P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi));  // Suffix packed with its forward tag, seeded at generation 0.
             }
 
