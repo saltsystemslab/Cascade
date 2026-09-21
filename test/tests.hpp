@@ -55,14 +55,14 @@ T_sym_ universe_split_threshold(const T_sym_* T, idx_t n);
 // `P_sz`) is correct: for each suffix `s` in the `p`'th partition, checks
 // (1) whether it landed in the partition expected by `P_id`, ie `P_id[s] == p`;
 // (2) that it is not duplicated anywhere; and (3) its forward tag is the
-// expected one, ie `P_id[s + ell] == tag_of(s)`.
+// expected one.
 bool validate_partition_contents(idx_t n, idx_t ell, const p_id_t* P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
 
 // Returns `true` iff the suffix `suf` packed with its previous generation's
 // forward-tag correctly matches to the ground truth available from partition-ID
-// map `P_id`. There are `n` total suffixes and current generation's stride is
-// `stride`.
-bool validate_previous_gen_fwd_tag(idx_t suf, idx_t n, idx_t stride, const p_id_t* P_id);
+// map `P_id`. There are `n` total suffixes, current generation's stride is
+// `stride`, and the initial-ranking context-size is `ell`.
+bool validate_previous_gen_fwd_tag(idx_t suf, idx_t n, idx_t stride, idx_t ell, const p_id_t* P_id);
 
 // Returns `true` iff the target coherence invariant holds for the suffixes
 // `j_1` and `j_2` with respective local ranks `r_1` and `r_2`. The suffixes

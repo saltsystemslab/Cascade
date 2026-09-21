@@ -37,7 +37,7 @@ bool validate_partition_contents(const idx_t n, const idx_t ell, const p_id_t* c
         for(idx_t i = 0; i < sz; ++i)
         {
             const auto j = bit_layout::suffix_of(suf_buf[i]);
-            const auto phi = (j + ell < n ? P_id[j + ell] : p_id_t(0));
+            const auto phi = bit_layout::fwd_tag(P_id, j + ell, n, ell);
             if(j >= n || P_id[j] != p_id || present[j] || bit_layout::tag_of(suf_buf[i]) != phi)
                 content_match = false;
 

@@ -283,6 +283,8 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         const msg_rank_t to_forward = bit_layout::secondary_of(K[i]);
         msg_target[slot] = bit_layout::pack(j - (ctx >> 1), 0); // Forwarded poison-pills need not carry a forward tag;
                                                                 // recipient will retire regardless due to uniqueness pullback.
+                                                                // NB: `0` is the extreme value of `fwd_tag`'s reserved band, not partition 0;
+                                                                // immaterial here, as the recipient's tertiary is never consulted.
         msg_rank[slot] = poison_pill(to_forward);
     }
 }
