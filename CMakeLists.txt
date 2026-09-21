@@ -179,32 +179,62 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 
 
+# Target GPU architecture.
+if(NOT DEFINED CUDA_ARCH)
+    set(CUDA_ARCH "120-real")
+endif()
+
+
+# Benchmark provenance: every benchmark driver (the baselines in `benchmark/`
+# and our own in `src/`) needs to stamp the same commit into its records.
+# Tolerant of a missing .git.
+execute_process(COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE BENCH_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain --untracked-files=no # Only tracked modifications make a build unreproducible.
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE BENCH_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+
+if(NOT BENCH_COMMIT)
+    set(BENCH_COMMIT "unknown")
+elseif(BENCH_DIRTY)
+    set(BENCH_COMMIT "${BENCH_COMMIT}-dirty")
+endif()
+
+set(BENCH_PROVENANCE
+        BENCH_COMMIT="${BENCH_COMMIT}"
+        BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+
+
 # Add required subdirectories to the build.
 add_subdirectory(src)
 add_subdirectory(test)
 
-add_subdirectory(benchmark)
+# The harness vendors its baselines and creates its targets at configure-time,
+# and needs to be excluded from core build.
+option(BENCHMARK "Build the baseline-benchmark harness (libsais, libcubwt)" OFF)
+if(BENCHMARK)
+    add_subdirectory(benchmark)
+endif()
 
 
 # Set some CUDA-specific properties.
 set_property(TARGET core            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET libcubwt        PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET libcubwt_driver PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET bench_gpu_saca  PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-set(CUDA_ARCH "120-real")
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET libcubwt        PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET libcubwt_driver PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET bench_gpu_saca  PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
 # Define dependencies between the targets.
 add_dependencies(${PROJECT_NAME} core)
+add_dependencies(bench_gpu_saca core)
 add_dependencies(core prj_concurrentqueue)
 add_dependencies(tests prj_concurrentqueue) # TODO: fix this hack.
 
@@ -213,11 +243,12 @@ add_dependencies(tests prj_concurrentqueue) # TODO: fix this hack.
 
 target_compile_options(core PRIVATE ${COMPILE_FLAGS})
 target_compile_options(tests PRIVATE ${COMPILE_FLAGS})
-target_compile_options(libcubwt PRIVATE ${COMPILE_FLAGS})
 
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_FLAGS})
-target_compile_options(libcubwt_driver PRIVATE ${COMPILE_FLAGS})
 target_compile_options(test PRIVATE ${COMPILE_FLAGS})
+target_compile_options(bench_gpu_saca PRIVATE ${COMPILE_FLAGS})
+target_compile_definitions(bench_gpu_saca PRIVATE ${BENCH_PROVENANCE})
+target_compile_options(bench_gpu_saca PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)   # `nvcc` does not recognize OpenMP directives.
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
 # `nvcc` does not recognize OpenMP directives.
@@ -229,7 +260,6 @@ target_compile_options(tests PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fop
 
 # Link to `zlib`, required to support `gzip` files.
 target_link_libraries(core PRIVATE ZLIB::ZLIB)
-target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
 target_link_libraries(core PRIVATE CUDA::cudart)
@@ -244,7 +274,7 @@ target_link_libraries(core PRIVATE tests)
 
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
-target_link_libraries(libcubwt_driver PRIVATE libcubwt)
+target_link_libraries(bench_gpu_saca PRIVATE core OpenMP::OpenMP_CXX)
 
 # Link the tester.
 target_link_libraries(test PRIVATE core)
@@ -253,17 +283,15 @@ target_link_libraries(test PRIVATE core)
 # Set the link flags for the targets.
 
 target_link_libraries(core PRIVATE ${LINK_FLAGS})
-target_link_libraries(libcubwt PRIVATE ${LINK_FLAGS})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${LINK_FLAGS})
-target_link_libraries(libcubwt_driver PRIVATE ${LINK_FLAGS})
 target_link_libraries(test PRIVATE ${LINK_FLAGS})
 
 
 # Set the installation directory. The parent directory is `/usr/local/` by default, and the
 # user may set it to a different path by passing a value for `CMAKE_INSTALL_PREFIX`. The target
 # executable is installed inside a sub-directory named `bin` within the parent directory.
-install(TARGETS ${PROJECT_NAME} libcubwt_driver
+install(TARGETS ${PROJECT_NAME}
         DESTINATION bin
         )
 

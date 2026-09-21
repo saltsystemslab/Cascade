@@ -126,17 +126,21 @@ void GPU_SACA<T_sym_>::build_SA()
         const auto t_a = now();
         {   PROFILE_SCOPE("fault_in_partition_IDs");    util::prepage(P_id, n_);   }
         const auto t_b = now();
-        std::cerr   << "Partition-ID map prepaging completed. Time taken: " << duration(t_b - t_a) << "s"
-                    << " (" << (n_ * sizeof(p_id_t) / (1024.0 * 1024.0 * 1024.0) / duration(t_b - t_a)) << " GBs/s).\n";
+        build_timing_.prepage_pid = duration(t_b - t_a);
+        std::cerr   << "Partition-ID map prepaging completed. Time taken: " << build_timing_.prepage_pid << "s"
+                    << " (" << (n_ * sizeof(p_id_t) / (1024.0 * 1024.0 * 1024.0) / build_timing_.prepage_pid) << " GBs/s).\n";
     }
 
+    const auto t_l = now();
     {   PROFILE_SCOPE("load_text");                 load_text();    }
 
     const auto t_0 = now();
+    build_timing_.text_load = duration(t_0 - t_l);
 
     {   PROFILE_SCOPE("select_pivots");             select_pivots();    }
     const auto t_1 = now();
-    std::cerr << "Pivots selection completed. Time taken: " << duration(t_1 - t_0) << "s.\n";
+    build_timing_.pivots = duration(t_1 - t_0);
+    std::cerr << "Pivots selection completed. Time taken: " << build_timing_.pivots << "s.\n";
 
     {   PROFILE_SCOPE("partition");                 partition();
         if(!partition_sizes_fit())
@@ -146,7 +150,8 @@ void GPU_SACA<T_sym_>::build_SA()
         }
     }
     const auto t_2 = now();
-    std::cerr << "Partitioning completed. Time taken: " << duration(t_2 - t_1) << "s.\n";
+    build_timing_.partition = duration(t_2 - t_1);
+    std::cerr << "Partitioning completed. Time taken: " << build_timing_.partition << "s.\n";
 
     {
         PROFILE_SCOPE("allocate_device_space");
@@ -163,26 +168,31 @@ void GPU_SACA<T_sym_>::build_SA()
         setup_staging();
     }
     const auto t_3 = now();
-    std::cerr << "Device-space allocated and staging-setup completed. Time taken: " << duration(t_3 - t_2) << "s.\n";
+    build_timing_.device_setup = duration(t_3 - t_2);
+    std::cerr << "Device-space allocated and staging-setup completed. Time taken: " << build_timing_.device_setup << "s.\n";
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
     const auto t_4 = now();
-    std::cerr << "Initial ranking completed. Time taken: " << duration(t_4 - t_3) << "s.\n";
+    build_timing_.initial_rank = duration(t_4 - t_3);
+    std::cerr << "Initial ranking completed. Time taken: " << build_timing_.initial_rank << "s.\n";
 
     {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_5 = now();
-    std::cerr << "Prefix-exponentiation completed. Time taken: " << duration(t_5 - t_4) << "s.\n";
+    build_timing_.exponentiate = duration(t_5 - t_4);
+    std::cerr << "Prefix-exponentiation completed. Time taken: " << build_timing_.exponentiate << "s.\n";
 
     {   PROFILE_SCOPE("drop_partition_IDs");        util::deallocate(P_id), P_id = nullptr;  }
 
     {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(op_path_);}
+    const auto t_6 = now();
+    build_timing_.concatenate = duration(t_6 - t_5);
+    std::cerr << "Partition-concatenation completed. Time taken: " << build_timing_.concatenate  << "s.\n";
 
     {   PROFILE_SCOPE("drop_backend");              backend_.reset();   spill_->cleanup();   }
 
-    const auto t_6 = now();
-    std::cerr << "Partition-concatenation completed. Time taken: " << duration(t_6 - t_5) << "s.\n";
+    build_timing_.n = n_, build_timing_.p = p_, build_timing_.gen_c = cohort_sz.size();
 }
 
 
@@ -1920,13 +1930,18 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
     }));
     INSTRUMENT(probe::P().start_sampler());
 
-    // Open the output file and preallocate it.
-    const auto fd = ::open(op.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644); // Only owner can read-write, others read-only.
-    if(fd < 0)
-        util::file::exit_on_io_failure("open", op);
+    // Open the output file and preallocate it. An empty `op` instructs
+    // construction without output dump.
+    const auto dump = !op.empty();
+    const auto fd = dump ? ::open(op.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1; // Only owner can read-write, others read-only.
+    if(dump)
+    {
+        if(fd < 0)
+            util::file::exit_on_io_failure("open", op);
 
-    if(::fallocate(fd, 0, 0, n_ * sizeof(idx_t)) != 0)
-        util::file::exit_on_io_failure("fallocate", op);
+        if(::fallocate(fd, 0, 0, n_ * sizeof(idx_t)) != 0)
+            util::file::exit_on_io_failure("fallocate", op);
+    }
 
 
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
@@ -2046,7 +2061,8 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
                             INSTRUMENT(probe::P().me().bytes += s->size() * sizeof(idx_t));
 
                             // Drain the slab's suffixes.
-                            util::file::write_and_flush(fd, op, s->suf(), s->size() * sizeof(idx_t), (P_off[s->p_id()] + s->off()) * sizeof(idx_t));
+                            if(dump)
+                                util::file::write_and_flush(fd, op, s->suf(), s->size() * sizeof(idx_t), (P_off[s->p_id()] + s->off()) * sizeof(idx_t));
                         }
 
                         F.enqueue(s);   // This slab is free now.
@@ -2106,6 +2122,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
 
     // Close the output file.
+    if(dump)
     {
         // The earlier per-chunk `sync_file_range`s only queued writebacks, with no guarantees on
         // actual completions. Therefore block until the writes physically complete.
