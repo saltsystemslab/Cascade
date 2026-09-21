@@ -12,7 +12,7 @@
 
 // Bit-layout of the two packed 64-bit words the algorithm carries:
 // suffix:
-//      63 .. 48 :  forward routing tag;
+//      63 .. 48 :  forward tag: (biased) partition-ID of the secondary-source of the next generation (see `fwd_tag` for the "bias");
 //      47 .. 0 :   value
 // key:
 //      63 :        spare;
@@ -23,13 +23,16 @@ namespace gpu_saca::bit_layout
 {
 
 constexpr idx_t WORD_BITS = 64;
-constexpr idx_t TAG_BITS = 16;  // Forward-tag: a partition-ID.
+constexpr idx_t TAG_BITS = 16;  // Forward-tag: a partition-ID, biased past the reserved band; see `fwd_tag`.
 constexpr idx_t VAL_BITS = WORD_BITS - TAG_BITS;    // 48: suffix-indices and global ranks up to ~2.8e14.
 constexpr idx_t SUF_BITS = VAL_BITS;
 
 static_assert(TAG_BITS + VAL_BITS == WORD_BITS, "fields must tile a full word");
-static_assert(sizeof(p_id_t) * 8 <= TAG_BITS, "tag field must hold be able to hold `p_id_t`");
 static_assert(sizeof(idx_t) * 8 == WORD_BITS, "bit_layout assumes a 64-bit `idx_t`");
+
+// NB: necessary, but not sufficient: the tag also carries the `ell`-wide bias `fwd_tag` applies,
+// so `validate` must be passed the biased partition-count.
+static_assert(sizeof(p_id_t) * 8 <= TAG_BITS, "tag field must hold be able to hold `p_id_t`");
 
 
 constexpr idx_t TAG_SHIFT = VAL_BITS;   // Bit position of the forward-tag in a word.
@@ -80,6 +83,15 @@ CUDA_SPECIFIER inline idx_t tag_of(const idx_t w) { return w >> TAG_SHIFT; }
 
 // Returns word `w` with its forward tag replaced by `tag`.
 CUDA_SPECIFIER inline idx_t retag(const idx_t w, const idx_t tag) { return pack(w & VAL_MASK, tag); }
+
+// Returns the forward tag for a suffix whose secondary-source of the next
+// generation is the suffix `tgt`, of an `n`-length text with partition-ID map
+// `P_id`. Real partition-IDs are biased up by `ell`, reserving the bottom `ell`
+// tag-values for sources lying past the text's end. Reserved value decreases as
+// the source runs farther past, ordering the shorter of two such sources first.
+// In absence of a text-terminator, this keeps the ranking prefix-aware.
+inline idx_t fwd_tag(const p_id_t* const P_id, const idx_t tgt, const idx_t n, const idx_t ell)
+{ return tgt < n ? static_cast<idx_t>(P_id[tgt]) + ell : (n + ell - 1 - tgt); }
 
 // Returns the suffix-index held in word `w`.
 CUDA_SPECIFIER inline idx_t suffix_of(const idx_t w) { return value_of(w); }
