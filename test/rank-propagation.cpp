@@ -188,7 +188,6 @@ bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* const P_id, con
 
 // Template instantiations for the required instances.
 
-template bool validate_messages(const Staging_Slab&, const GPU_SACA<char>* self, const p_sz_t*);
 template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint8_t>* self, const p_sz_t*);
 template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint16_t>* self, const p_sz_t*);
 template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint32_t>* self, const p_sz_t*);

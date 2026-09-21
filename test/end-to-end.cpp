@@ -107,13 +107,11 @@ bool is_correct_SA(const std::string& text_path, const std::string& SA_path)
 
 
 // Template instantiations for the required instances.
-template bool is_correct_SA(const idx_t*, const char*, idx_t);
 template bool is_correct_SA(const idx_t*, const uint8_t*, idx_t);
 template bool is_correct_SA(const idx_t*, const uint16_t*, idx_t);
 template bool is_correct_SA(const idx_t*, const uint32_t*, idx_t);
 template bool is_correct_SA(const idx_t*, const uint64_t*, idx_t);
 
-template bool is_correct_SA<char>(const std::string&, const std::string&);
 template bool is_correct_SA<uint8_t>(const std::string&, const std::string&);
 template bool is_correct_SA<uint16_t>(const std::string&, const std::string&);
 template bool is_correct_SA<uint32_t>(const std::string&, const std::string&);

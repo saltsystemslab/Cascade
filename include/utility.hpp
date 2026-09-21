@@ -8,9 +8,9 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <type_traits>
 #include <limits>
 #include <utility>
-#include <random>
 #include <vector>
 #include <filesystem>
 #include <fstream>
@@ -128,6 +128,10 @@ template <typename T_sym_, uint64_t N = (8 / sizeof(T_sym_))>
 CUDA_SPECIFIER
 uint64_t pack_word(const T_sym_* const T)
 {
+    // A signed symbol would sign-extend across every higher symbol-slot of the word, so the word's numeric order would stop matching the text's
+    // lexicographic order.
+    static_assert(std::is_unsigned_v<T_sym_>, "the symbol type must be unsigned");
+
     if constexpr(N == 0)
         return 0;
     else

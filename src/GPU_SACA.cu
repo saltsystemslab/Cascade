@@ -2143,7 +2143,6 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
 
 // Template instantiations for the required instances.
-template class GPU_SACA<char>;
 template class GPU_SACA<uint8_t>;
 template class GPU_SACA<uint16_t>;
 template class GPU_SACA<uint32_t>;

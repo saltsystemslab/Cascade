@@ -96,12 +96,10 @@ T_sym_ universe_split_threshold(const T_sym_* T, const std::size_t n)
 
 
 // Template instantiations for the required instances.
-template bool validate_partition_IDs(const char*, idx_t, const std::vector<Pivot_Key>&, const p_id_t*);
 template bool validate_partition_IDs(const uint8_t*, idx_t, const std::vector<Pivot_Key>&, const p_id_t*);
 template bool validate_partition_IDs(const uint16_t*, idx_t, const std::vector<Pivot_Key>&, const p_id_t*);
 template bool validate_partition_IDs(const uint32_t*, idx_t, const std::vector<Pivot_Key>&, const p_id_t*);
 
-template char       universe_split_threshold(const char*, std::size_t);
 template uint8_t    universe_split_threshold(const uint8_t*, std::size_t);
 template uint16_t   universe_split_threshold(const uint16_t*, std::size_t);
 
