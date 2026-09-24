@@ -147,8 +147,8 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 }
 
 
-// Ranks the distinct key groups and primary-key groups from the sorted arrays
-// `K` and `SA` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
+// Ranks the distinct key groups and primary-key groups from the sorted array
+// `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
 // respectively, and marks the keys' activeness-flags into `is_active`. The
 // first entry of a group is ranked by its offset into `K`, whereas the rest of
 // the entries in the group are ranked `0`.
@@ -156,10 +156,10 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
+void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t n,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
                                                                             uint8_t* const __restrict__ is_active,
-                                                                            idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_c, idx_t* const __restrict__ tertiary_split_c)
+                                                                            idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -172,7 +172,7 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
         atomicAdd(reinterpret_cast<unsigned long long*>(pill_c), (unsigned long long)1);
 #endif
 
-    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y] && bit_layout::tag_of(SA[x]) == bit_layout::tag_of(SA[y]); };
+    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y]; };
 
     if(i == 0)
     {
@@ -185,10 +185,6 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
 #ifdef TESTS
         if(!test::validate_coherent_pill_receipts(K[i - 1], K[i]))
             __trap();
-
-        const bool pair_tie = (bit_layout::primary_of(K[i]) == bit_layout::primary_of(K[i - 1]) && bit_layout::secondary_of(K[i]) == bit_layout::secondary_of(K[i - 1]));
-        if(pair_tie && bit_layout::tag_of(SA[i]) != bit_layout::tag_of(SA[i - 1]))  // The tertiary splits a (primary, secondary)-tie.
-            atomicAdd(reinterpret_cast<unsigned long long*>(tertiary_split_c), (unsigned long long)1);
 #endif
         const bool key_tie = tied(i, i - 1);
         const bool primary_key_tie = (bit_layout::primary_of(K[i]) == bit_layout::primary_of(K[i - 1]));
