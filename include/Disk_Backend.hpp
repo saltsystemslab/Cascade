@@ -28,7 +28,7 @@ private:
     std::vector<Direct_File> suf_;  // Suffix-files of the partitions.
     std::vector<Direct_File> key_;  // Key-files of the partitions.
 
-    std::vector<Direct_File> msg_tgt_tag_[2];   // Message-target files of the partitions' inboxes, per generation-parity.
+    std::vector<Direct_File> msg_tgt_[2];   // Message-target files of the partitions' inboxes, per generation-parity.
     std::vector<Direct_File> msg_rank_[2];  // Message-rank files of the partitions' inboxes, per generation-parity.
 
     Spill_Store* const spill_;  // Spill-store to open the deferred files from.
@@ -61,7 +61,7 @@ public:
 
     // Returns the `p_id`'th partition's inbox message-target file for the
     // generation-parity currently being written.
-    auto& msg_tgt_tag(const p_id_t p_id) { return msg_tgt_tag_[write_parity_][p_id]; }
+    auto& msg_tgt(const p_id_t p_id) { return msg_tgt_[write_parity_][p_id]; }
 
     // Returns the `p_id`'th partition's inbox message-rank file for the
     // generation-parity currently being written.

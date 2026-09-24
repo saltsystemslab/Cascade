@@ -18,9 +18,9 @@ const char* Spill_Store::role_name(const Spill_Role role)
     case Spill_Role::suf:       return "suf";
     case Spill_Role::key:       return "key";
 
-    case Spill_Role::msg_tgt_tag_0: return "msg_tgt_tag_0";
+    case Spill_Role::msg_tgt_0:     return "msg_tgt_0";
     case Spill_Role::msg_rank_0:    return "msg_rank_0";
-    case Spill_Role::msg_tgt_tag_1: return "msg_tgt_tag_1";
+    case Spill_Role::msg_tgt_1:     return "msg_tgt_1";
     case Spill_Role::msg_rank_1:    return "msg_rank_1";
     }
 

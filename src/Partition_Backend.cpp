@@ -166,7 +166,7 @@ void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s
     {
         const auto to_write = a_r - a_l;
         const auto write_off = msg_written_[parity][p_id].fetch_add(to_write, std::memory_order_relaxed);
-        disk_.msg_tgt_tag(p_id).write_at(s.msg_target() + (a_l - base), to_write * sizeof(idx_t), write_off * sizeof(idx_t));
+        disk_.msg_tgt(p_id).write_at(s.msg_target() + (a_l - base), to_write * sizeof(idx_t), write_off * sizeof(idx_t));
         disk_.msg_rank(p_id).write_at(s.msg_rank() + (a_l - base), to_write * sizeof(msg_rank_t), write_off * sizeof(msg_rank_t));
     }
     else    // Degenerate case of too short message-block.
@@ -207,7 +207,7 @@ void Partition_Backend::flush_overflow(const p_id_t p_id, const bool final)
 
     const auto parity = inbox_write_parity_;
     const auto write_off = msg_written_[parity][p_id].fetch_add(to_write, std::memory_order_relaxed);
-    disk_.msg_tgt_tag(p_id).write_at(ov_tgt_[p_id], to_write * sizeof(idx_t), write_off * sizeof(idx_t));
+    disk_.msg_tgt(p_id).write_at(ov_tgt_[p_id], to_write * sizeof(idx_t), write_off * sizeof(idx_t));
     disk_.msg_rank(p_id).write_at(ov_rank_[p_id], to_write * sizeof(msg_rank_t), write_off * sizeof(msg_rank_t));
 
     const auto rem = (to_write < ov_sz_[p_id] ? ov_sz_[p_id] - to_write : 0);
