@@ -406,7 +406,8 @@ def cmd_run(a):
     work = os.path.join(a.temp_root, f"ig-{tag}")
     temp, work_save = os.path.join(work, "temp"), os.path.join(work, "baseline")
     work_sa, empty = os.path.join(work_save, "table.0"), os.path.join(work, "empty")
-    rid = a.run_id or f"infinigram_{r['label']}-{r['tokenizer']}_token16_n{n}_t{cpus}_r{a.rep}"
+    short = ALIAS.get(r["label"], r["label"])   # The other baselines record the aliased name, so group on it too.
+    rid = a.run_id or f"infinigram_{short}-{r['tokenizer']}_token16_n{n}_t{cpus}_r{a.rep}"
 
     # Before the binary check: at the wrong tag the built binary is the wrong
     # binary, so "go build it" would be the wrong advice.
@@ -546,7 +547,7 @@ def cmd_run(a):
         "commit": os.environ.get("IG_COMMIT", "unknown"),
         "host": os.uname().nodename,
         "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "input": real, "corpus": r["label"], "tokenizer": r["tokenizer"],
+        "input": real, "corpus": short, "tokenizer": r["tokenizer"],
         "alphabet": "token16", "symbol_bytes": 2, "n_symbols": n, "n_tokens": n,
         "threads": cpus,
         "threads_avail": cpus,
