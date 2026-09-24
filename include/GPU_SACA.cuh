@@ -274,8 +274,8 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_cur_gen(beta[i]), static_cast<unsigned int>(1));
         const msg_rank_t primary = packed_key_ ? bit_layout::primary_of(K[i]) : K[i];   // `j`'s local rank.
 
-        // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
-        msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));
+        // Target recipient `j - ctx` will need `j`'s rank as its secondary at next gen.
+        msg_target[slot] = j - ctx;
         msg_rank[slot] = (i < *active_sz ? primary : poison_pill(primary));
     }
 
@@ -284,10 +284,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         // Where to put the `beta[i]`'th partition's next incoming message.
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
         const msg_rank_t to_forward = bit_layout::secondary_of(K[i]);
-        msg_target[slot] = bit_layout::pack(j - (ctx >> 1), 0); // Forwarded poison-pills need not carry a forward tag;
-                                                                // recipient will retire regardless due to uniqueness pullback.
-                                                                // NB: `0` is the extreme value of `fwd_tag`'s reserved band, not partition 0;
-                                                                // immaterial here, as the recipient's tertiary is never consulted.
+        msg_target[slot] = j - (ctx >> 1);
         msg_rank[slot] = poison_pill(to_forward);
     }
 }
@@ -302,7 +299,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
 template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
+                            const idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= msg_c)
@@ -326,7 +323,6 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
     // Deliver the message's payload.
     const auto key = bit_layout::key(primary[low], extract_rank(msg_rank[i]));  // Pack in the received secondary.
     K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key; // Mark poison-pill if received, to forward it afterwards.
-    SA[low] = bit_layout::pack(tgt, bit_layout::tag_of(msg_tgt[i]));    // Pack in the received forward tag.
 }
 
 

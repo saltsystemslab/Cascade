@@ -88,23 +88,6 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
                 }
             }
 
-            // Forward tag check: the `phi`-tag carried in this message must be correct.
-            // A sender that retired this generation can carry a stale forward tag: if its query for the
-            // extension suffix has look-back depth `λ >= 2`, then the message it had received earlier had
-            // a stale forward tag; this is benign per tertiary-irrelevance. Stale tags are impossible when
-            // `λ < 2`, and this is guaranteed to hold for everyone up-to generation 1.
-            // Also, a forwarded pill carries tag 0 by construction.
-            {
-                const auto phi = bit_layout::tag_of(msg_target[i]);
-                const auto expected_phi = bit_layout::fwd_tag(P_id, target + 2 * ctx, n, self->ell);
-                if(!is_poison_pill(msg_rank[i]) && ctx <= 2 * self->ell && phi != expected_phi)
-                {
-                    is_valid = false;
-                    std::cerr << "Some messages carry incorrect forward tag.\n";
-                    #pragma omp cancel for
-                }
-            }
-
             // Rank check: the rank carried in this message must fall in the sender's partition's (i.e. this one's) range in the final SA.
             {
                 const auto r = extract_rank(msg_rank[i]);

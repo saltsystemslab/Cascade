@@ -13,6 +13,7 @@
 // Bit-layout of the two packed 64-bit words the algorithm carries:
 // suffix:
 //      63 .. 48 :  forward tag: (biased) partition-ID of the secondary-source of the next generation (see `fwd_tag` for the "bias");
+//                  used at generation 0 only, and stale afterwards;
 //      47 .. 0 :   value
 // key:
 //      63 :        spare;
