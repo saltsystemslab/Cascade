@@ -83,6 +83,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
     active_set_sz_d = nullptr;
     unserved_c_d = nullptr;
     pill_c_d = nullptr;
+    tertiary_split_c_d = nullptr;
 }
 
 
@@ -113,6 +114,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     CUDA_CHECK(cudaFree(active_set_sz_d));
     CUDA_CHECK(cudaFree(unserved_c_d));
     CUDA_CHECK(cudaFree(pill_c_d));
+    CUDA_CHECK(cudaFree(tertiary_split_c_d));
 }
 
 
@@ -526,6 +528,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
         CUDA_CHECK(cudaMalloc(&unserved_c_d, sizeof(idx_t)));
         CUDA_CHECK(cudaMalloc(&pill_c_d, sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(&tertiary_split_c_d, sizeof(idx_t)));
     }
 
     return true;
@@ -1675,7 +1678,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K_sorted, SA_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active, unserved_c_d, pill_c_d);
+                (K_sorted, SA_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active, unserved_c_d, pill_c_d, tertiary_split_c_d);
 #ifdef TESTS
             cudaLaunchHostFunc(stream[buf_id], fatal_error_callback, std::string("target coherence invariant violated").data());
 #else
@@ -1829,6 +1832,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 #ifdef TESTS
             CUDA_CHECK(cudaMemset(unserved_c_d, 0, sizeof(idx_t)));
             CUDA_CHECK(cudaMemset(pill_c_d, 0, sizeof(idx_t)));
+            CUDA_CHECK(cudaMemset(tertiary_split_c_d, 0, sizeof(idx_t)));
 #endif
             drive_pipeline<false>();
         }
@@ -1853,6 +1857,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             idx_t pill_c_h;
             CUDA_CHECK(cudaMemcpy(&pill_c_h, pill_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
             std::cerr << "Active suffixes with poison-pill received for generation " << gen << ": " << pill_c_h << ".\n";
+
+            idx_t tertiary_split_c_h;
+            CUDA_CHECK(cudaMemcpy(&tertiary_split_c_h, tertiary_split_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
+            std::cerr << "Adjacent (primary, secondary)-ties split by the tertiary for generation " << gen << ": " << tertiary_split_c_h << ".\n";
         }
 #endif
 

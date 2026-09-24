@@ -159,7 +159,7 @@ __global__
 void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
                                                                             uint8_t* const __restrict__ is_active,
-                                                                            idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_c)
+                                                                            idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_c, idx_t* const __restrict__ tertiary_split_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -185,6 +185,10 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
 #ifdef TESTS
         if(!test::validate_coherent_pill_receipts(K[i - 1], K[i]))
             __trap();
+
+        const bool pair_tie = (bit_layout::primary_of(K[i]) == bit_layout::primary_of(K[i - 1]) && bit_layout::secondary_of(K[i]) == bit_layout::secondary_of(K[i - 1]));
+        if(pair_tie && bit_layout::tag_of(SA[i]) != bit_layout::tag_of(SA[i - 1]))  // The tertiary splits a (primary, secondary)-tie.
+            atomicAdd(reinterpret_cast<unsigned long long*>(tertiary_split_c), (unsigned long long)1);
 #endif
         const bool key_tie = tied(i, i - 1);
         const bool primary_key_tie = (bit_layout::primary_of(K[i]) == bit_layout::primary_of(K[i - 1]));
