@@ -158,7 +158,8 @@ template <idx_t BLOCK_SZ>
 __global__
 void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                                            uint8_t* const __restrict__ is_active, idx_t* const __restrict__ unserved_c)
+                                                                            uint8_t* const __restrict__ is_active,
+                                                                            idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -167,6 +168,8 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
 #ifdef TESTS
     if(bit_layout::secondary_absent(K[i]))  // No message joined this suffix.
         atomicAdd(reinterpret_cast<unsigned long long*>(unserved_c), (unsigned long long)1);
+    else if(bit_layout::received_poison_pill(K[i])) // A poison-pill joined this suffix.
+        atomicAdd(reinterpret_cast<unsigned long long*>(pill_c), (unsigned long long)1);
 #endif
 
     const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y] && bit_layout::tag_of(SA[x]) == bit_layout::tag_of(SA[y]); };
