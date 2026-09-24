@@ -1635,10 +1635,9 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
                 (K_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active, unserved_c_d, pill_c_d);
-#ifdef TESTS
-            cudaLaunchHostFunc(stream[buf_id], fatal_error_callback, std::string("target coherence invariant violated").data());
-#else
             CUDA_CHECK(cudaGetLastError());
+#ifdef TESTS
+            synchronize_or_abort(stream[buf_id], "Target Coherence Invariant violated");
 #endif
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(

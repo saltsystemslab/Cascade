@@ -13,16 +13,14 @@
 namespace gpu_saca
 {
 
-void CUDART_CB fatal_error_callback(void* const user_data)
+void synchronize_or_abort(const cudaStream_t s, const char* const reason)
 {
-    // Check if the stream or device has fallen into an error state.
-    const auto err = cudaGetLastError();
+    const auto err = cudaStreamSynchronize(s);
 
-    // If the kernel prior to this `__trap()`-ed, `err` will be `cudaErrorLaunchFailure`.
+    // If a kernel on `s` `__trap()`-ed, `err` will be `cudaErrorLaunchFailure`.
     if(err != cudaSuccess)
     {
-        std::cerr <<    "\n[ASYNC BACKDOOR] Fatal GPU error detected: " << cudaGetErrorString(err) <<
-                        "; due to: " << static_cast<const char*>(user_data) << ". Aborting.\n";
+        std::cerr << "\nFatal GPU error detected: " << cudaGetErrorString(err) << "; due to: " << reason << ". Aborting.\n";
         std::exit(EXIT_FAILURE);
     }
 }
