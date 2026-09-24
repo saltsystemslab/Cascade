@@ -14,18 +14,11 @@
 namespace gpu_saca::test
 {
 
-bool validate_previous_gen_fwd_tag(const idx_t suf, const idx_t n, const idx_t stride, const idx_t ell, const p_id_t* const P_id)
+bool validate_coherent_targets(const idx_t j_1, const idx_t r_1, const idx_t j_2, const idx_t r_2, const idx_t n, const idx_t stride, const idx_t ell, const p_id_t* const P_id)
 {
-    const auto j = bit_layout::suffix_of(suf);  // Suffix.
-    const auto ctx_prev = stride;   // Last generation's context.
-    const auto phi_prev = bit_layout::fwd_tag(P_id, j + ctx_prev, n, ell);
-    return bit_layout::tag_of(suf) == phi_prev;
-}
-
-
-bool validate_coherent_tags(const idx_t j_1, const idx_t r_1, const idx_t j_2, const idx_t r_2)
-{
-    return r_1 != r_2 || bit_layout::tag_of(j_1) == bit_layout::tag_of(j_2);
+    const auto src_1 = bit_layout::suffix_of(j_1) + stride; // Secondary-source of `j_1`.
+    const auto src_2 = bit_layout::suffix_of(j_2) + stride; // Secondary-source of `j_2`.
+    return r_1 != r_2 || bit_layout::fwd_tag(P_id, src_1, n, ell) == bit_layout::fwd_tag(P_id, src_2, n, ell);
 }
 
 

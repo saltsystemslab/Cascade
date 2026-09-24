@@ -1449,22 +1449,13 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
     {
         const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
 
-        for(idx_t i = 0; i < sz; ++i)
-        {
-            // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
-            // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
-            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, ell, P_id))
-            {
-                std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            if(i > 0 && !test::validate_coherent_tags(suf[i - 1], key[i - 1], suf[i], key[i]))
+        // Suffixes tied after generation `t - 1` must draw their secondaries at generation `t` from the same partition.
+        for(idx_t i = 1; i < sz; ++i)
+            if(!test::validate_coherent_targets(suf[i - 1], key[i - 1], suf[i], key[i], n_, stride, ell, P_id))
             {
                 std::cerr << "Target coherence invariant broken. Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
-        }
     }
 #endif
 
