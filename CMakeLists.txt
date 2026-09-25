@@ -209,6 +209,7 @@ set(BENCH_PROVENANCE
 # Add required subdirectories to the build.
 add_subdirectory(src)
 add_subdirectory(test)
+add_subdirectory(tools)
 
 # The harness vendors its baselines and creates its targets at configure-time,
 # and needs to be excluded from core build.
