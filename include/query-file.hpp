@@ -43,15 +43,15 @@ static_assert(sizeof(SA_Interval) == 16, "`.itv` records must be 16 bytes.");
 // Header of a `.qry` batch-file.
 struct Query_File_Header
 {
-    char        magic[8];   // `QRY_MAGIC`.
-    uint32_t    version;    // `QRY_VERSION`.
-    uint32_t    sym_bytes;  // Width of a symbol.
-    uint64_t    q_c;        // Number of queries.
-    uint64_t    sym_c;      // Total number of symbols across the queries.
-    uint64_t    min_len;    // Length of the shortest query.
-    uint64_t    max_len;    // Length of the longest query.
-    uint64_t    seed;       // Seed of the generator, for provenance.
-    uint64_t    reserved;
+    char magic[8];  // `QRY_MAGIC`.
+    uint32_t version;   // `QRY_VERSION`.
+    uint32_t sym_bytes; // Width of a symbol.
+    uint64_t q_c;   // Number of queries.
+    uint64_t sym_c; // Total number of symbols across the queries.
+    uint64_t min_len;   // Length of the shortest query.
+    uint64_t max_len;   // Length of the longest query.
+    uint64_t seed;  // Seed of the generator, for provenance.
+    uint64_t reserved;
 };
 
 static_assert(sizeof(Query_File_Header) == 64, "`.qry` header must be 64 bytes.");
