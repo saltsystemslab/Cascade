@@ -55,9 +55,9 @@ namespace gpu_saca  // TODO: why are all the following in the parent namespace?
     }
 
 
-    // Background worker function launched by CUDA driver to catch `__trap()`s from
-    // fatal error(s).
-    void CUDART_CB fatal_error_callback(void* user_data);
+    // Blocks until the work enqueued on stream `s` completes, and aborts if it
+    // failed, reporting `reason` as the cause.
+    void synchronize_or_abort(cudaStream_t s, const char* reason);
 }
 
 

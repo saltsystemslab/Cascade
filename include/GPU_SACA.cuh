@@ -147,8 +147,8 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 }
 
 
-// Ranks the distinct key groups and primary-key groups from the sorted arrays
-// `K` and `SA` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
+// Ranks the distinct key groups and primary-key groups from the sorted array
+// `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
 // respectively, and marks the keys' activeness-flags into `is_active`. The
 // first entry of a group is ranked by its offset into `K`, whereas the rest of
 // the entries in the group are ranked `0`.
@@ -156,9 +156,10 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
+void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t n,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                                            uint8_t* const __restrict__ is_active, idx_t* const __restrict__ unserved_c)
+                                                                            uint8_t* const __restrict__ is_active,
+                                                                            idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -167,9 +168,11 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
 #ifdef TESTS
     if(bit_layout::secondary_absent(K[i]))  // No message joined this suffix.
         atomicAdd(reinterpret_cast<unsigned long long*>(unserved_c), (unsigned long long)1);
+    else if(bit_layout::received_poison_pill(K[i])) // A poison-pill joined this suffix.
+        atomicAdd(reinterpret_cast<unsigned long long*>(pill_c), (unsigned long long)1);
 #endif
 
-    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y] && bit_layout::tag_of(SA[x]) == bit_layout::tag_of(SA[y]); };
+    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y]; };
 
     if(i == 0)
     {
@@ -271,8 +274,8 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_cur_gen(beta[i]), static_cast<unsigned int>(1));
         const msg_rank_t primary = packed_key_ ? bit_layout::primary_of(K[i]) : K[i];   // `j`'s local rank.
 
-        // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
-        msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));
+        // Target recipient `j - ctx` will need `j`'s rank as its secondary at next gen.
+        msg_target[slot] = j - ctx;
         msg_rank[slot] = (i < *active_sz ? primary : poison_pill(primary));
     }
 
@@ -281,10 +284,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         // Where to put the `beta[i]`'th partition's next incoming message.
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
         const msg_rank_t to_forward = bit_layout::secondary_of(K[i]);
-        msg_target[slot] = bit_layout::pack(j - (ctx >> 1), 0); // Forwarded poison-pills need not carry a forward tag;
-                                                                // recipient will retire regardless due to uniqueness pullback.
-                                                                // NB: `0` is the extreme value of `fwd_tag`'s reserved band, not partition 0;
-                                                                // immaterial here, as the recipient's tertiary is never consulted.
+        msg_target[slot] = j - (ctx >> 1);
         msg_rank[slot] = poison_pill(to_forward);
     }
 }
@@ -299,7 +299,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
 template <idx_t BLOCK_SZ>
 __global__
 void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
+                            const idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= msg_c)
@@ -323,7 +323,6 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
     // Deliver the message's payload.
     const auto key = bit_layout::key(primary[low], extract_rank(msg_rank[i]));  // Pack in the received secondary.
     K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key; // Mark poison-pill if received, to forward it afterwards.
-    SA[low] = bit_layout::pack(tgt, bit_layout::tag_of(msg_tgt[i]));    // Pack in the received forward tag.
 }
 
 

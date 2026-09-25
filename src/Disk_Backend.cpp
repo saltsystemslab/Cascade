@@ -16,7 +16,7 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
     const auto p = P_cap_.size();
     suf_.reserve(p), key_.reserve(p);
     for(std::size_t parity = 0; parity < 2; ++parity)
-        msg_tgt_tag_[parity].reserve(p), msg_rank_[parity].reserve(p);
+        msg_tgt_[parity].reserve(p), msg_rank_[parity].reserve(p);
 
     for(p_id_t p_id = 0; p_id < p; ++p_id)
     {
@@ -36,14 +36,14 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
         // exponentiation, the first phase writing to them.
         {
             constexpr auto parity = write_parity(0);
-            msg_tgt_tag_[parity].emplace_back(spill.open(p_id, msg_tgt_tag_role(parity), Direct_File::Mode::read_write));
+            msg_tgt_[parity].emplace_back(spill.open(p_id, msg_tgt_role(parity), Direct_File::Mode::read_write));
             msg_rank_[parity].emplace_back(spill.open(p_id, msg_rank_role(parity), Direct_File::Mode::read_write));
 
             const auto cap = P_cap_[p_id] + MSG_ALIGN;
-            msg_tgt_tag_[parity].back().preallocate(cap * sizeof(idx_t));
+            msg_tgt_[parity].back().preallocate(cap * sizeof(idx_t));
             msg_rank_[parity].back().preallocate(cap * sizeof(msg_rank_t));
 
-            msg_tgt_tag_[parity ^ 1].emplace_back(), msg_rank_[parity ^ 1].emplace_back();
+            msg_tgt_[parity ^ 1].emplace_back(), msg_rank_[parity ^ 1].emplace_back();
         }
     }
 }
@@ -56,11 +56,11 @@ void Disk_Backend::open_deferred_inboxes()
 
     for(p_id_t p_id = 0; p_id < p; ++p_id)
     {
-        msg_tgt_tag_[parity][p_id] = spill_->open(p_id, msg_tgt_tag_role(parity), Direct_File::Mode::read_write);
+        msg_tgt_[parity][p_id] = spill_->open(p_id, msg_tgt_role(parity), Direct_File::Mode::read_write);
         msg_rank_[parity][p_id] = spill_->open(p_id, msg_rank_role(parity), Direct_File::Mode::read_write);
 
         const auto cap = P_cap_[p_id] + MSG_ALIGN;
-        msg_tgt_tag_[parity][p_id].preallocate(cap * sizeof(idx_t));
+        msg_tgt_[parity][p_id].preallocate(cap * sizeof(idx_t));
         msg_rank_[parity][p_id].preallocate(cap * sizeof(msg_rank_t));
     }
 }
@@ -80,7 +80,7 @@ void Disk_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, 
 
 void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz_t sz, idx_t* const tgt, msg_rank_t* const rank) const
 {
-    msg_tgt_tag_[read_parity_][p_id].read_at(tgt, sz * sizeof(idx_t), off * sizeof(idx_t));
+    msg_tgt_[read_parity_][p_id].read_at(tgt, sz * sizeof(idx_t), off * sizeof(idx_t));
     msg_rank_[read_parity_][p_id].read_at(rank, sz * sizeof(msg_rank_t), off * sizeof(msg_rank_t));
 }
 

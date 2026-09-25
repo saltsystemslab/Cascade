@@ -147,6 +147,8 @@ private:
 
         idx_t* unserved_c_d;                // Counters across partitions in a generation: active suffixes with no messaged received;
                                             // temporary, for verification purposes.
+        idx_t* pill_c_d;                    // Counters across partitions in a generation: active suffixes with a poison-pill received;
+                                            // temporary, for verification purposes.
     // }
 
 

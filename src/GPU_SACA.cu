@@ -82,6 +82,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
 
     active_set_sz_d = nullptr;
     unserved_c_d = nullptr;
+    pill_c_d = nullptr;
 }
 
 
@@ -111,6 +112,7 @@ GPU_SACA<T_sym_>::~GPU_SACA()
 
     CUDA_CHECK(cudaFree(active_set_sz_d));
     CUDA_CHECK(cudaFree(unserved_c_d));
+    CUDA_CHECK(cudaFree(pill_c_d));
 }
 
 
@@ -523,6 +525,7 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
 
         CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
         CUDA_CHECK(cudaMalloc(&unserved_c_d, sizeof(idx_t)));
+        CUDA_CHECK(cudaMalloc(&pill_c_d, sizeof(idx_t)));
     }
 
     return true;
@@ -1443,22 +1446,13 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
     {
         const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
 
-        for(idx_t i = 0; i < sz; ++i)
-        {
-            // This suffix survived generation `t - 1`. So it must have used the correct forward tag there.
-            // Suffixes retired at generation `t - 1` could've had "incorrect" tags, but tertiary-irrelevance at their dying moments renders those stale tags unused.
-            if(!test::validate_previous_gen_fwd_tag(suf[i], n_, stride, ell, P_id))
-            {
-                std::cerr << "Incorrect forward tags used at last generation. Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            if(i > 0 && !test::validate_coherent_tags(suf[i - 1], key[i - 1], suf[i], key[i]))
+        // Suffixes tied after generation `t - 1` must draw their secondaries at generation `t` from the same partition.
+        for(idx_t i = 1; i < sz; ++i)
+            if(!test::validate_coherent_targets(suf[i - 1], key[i - 1], suf[i], key[i], n_, stride, ell, P_id))
             {
                 std::cerr << "Target coherence invariant broken. Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
-        }
     }
 #endif
 
@@ -1599,68 +1593,36 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     cub::DoubleBuffer<idx_t> key(K, A);
 
 
-    // Sort the partition by (primary, secondary, tertiary): two phase radix sort.
+    // Sort the partition by (primary, secondary).
     {
-        // Sort by the tertiary (forward tag).
-        {
-            // Populate identity permutation.
-            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (perm.Current(), part_sz);
-            CUDA_CHECK(cudaGetLastError());
+        // Populate identity permutation.
+        iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
 
-            // Sort the forward tags.
-            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                workspace, ws_sz,
-                suf, perm,  // The tertiary (forward tag) is packed in suffix.
-                part_sz,
-                static_cast<int>(bit_layout::TAG_SHIFT), static_cast<int>(bit_layout::WORD_BITS),
-                stream[buf_id]
-            ));
+        // Sort the (primary, secondary) ranks.
+        CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
+            workspace, ws_sz,
+            key, perm,
+            part_sz,
+            0, bit_layout::KEY_BITS,
+            stream[buf_id]
+        ));
 
-            // Shuffle keys and backward tags per the forward-tag-order permutation.
-            shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (key.Alternate(), key.Current(), perm.Current(), part_sz);
-            CUDA_CHECK(cudaGetLastError());
-            key.selector ^= 1;
+        // Shuffle suffixes and backward tags per the (primary, secondary)-order permutation.
+        shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+        suf.selector ^= 1;
 
-            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
-            CUDA_CHECK(cudaGetLastError());
-            beta.selector ^= 1;
-        }
+        shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
+        CUDA_CHECK(cudaGetLastError());
+        beta.selector ^= 1;
 
-
-        // Sort by (primary, secondary).
-        {
-            // Populate identity permutation.
-            iota_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (perm.Current(), part_sz);
-            CUDA_CHECK(cudaGetLastError());
-
-            // Sort the (primary, secondary) ranks.
-            CUDA_CHECK(cub::DeviceRadixSort::SortPairs(
-                workspace, ws_sz,
-                key, perm,
-                part_sz,
-                0, bit_layout::KEY_BITS,
-                stream[buf_id]
-            ));
-
-            // Shuffle suffixes and backward tags per the (primary, secondary)-order permutation.
-            shuffle_kernel<idx_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (suf.Alternate(), suf.Current(), perm.Current(), part_sz);
-            CUDA_CHECK(cudaGetLastError());
-            suf.selector ^= 1;
-
-            shuffle_kernel<beta_t, BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (beta.Alternate(), beta.Current(), perm.Current(), part_sz);
-            CUDA_CHECK(cudaGetLastError());
-            beta.selector ^= 1;
-
-            K_sorted = key.Current(), K_re_ranked = key.Alternate();
-            SA_sorted = suf.Current(), SA_re_ranked = suf.Alternate();
-            beta_sorted = beta.Current(), beta_re_ranked = beta.Alternate();
-        }
+        K_sorted = key.Current(), K_re_ranked = key.Alternate();
+        SA_sorted = suf.Current(), SA_re_ranked = suf.Alternate();
+        beta_sorted = beta.Current(), beta_re_ranked = beta.Alternate();
     }
 
 
@@ -1672,11 +1634,10 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         // Track groups with distinct keys and distinct primary-keys, and mark non-unique keys.
         {
             rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
-                (K_sorted, SA_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active, unserved_c_d);
-#ifdef TESTS
-            cudaLaunchHostFunc(stream[buf_id], fatal_error_callback, std::string("target coherence invariant violated").data());
-#else
+                (K_sorted, part_sz, key_group_rank, primary_key_group_rank, is_active, unserved_c_d, pill_c_d);
             CUDA_CHECK(cudaGetLastError());
+#ifdef TESTS
+            synchronize_or_abort(stream[buf_id], "Target Coherence Invariant violated");
 #endif
 
             CUDA_CHECK(cub::DeviceScan::InclusiveScan(
@@ -1825,6 +1786,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             PROFILE_SCOPE("sort_and_rank_dispatch");
 #ifdef TESTS
             CUDA_CHECK(cudaMemset(unserved_c_d, 0, sizeof(idx_t)));
+            CUDA_CHECK(cudaMemset(pill_c_d, 0, sizeof(idx_t)));
 #endif
             drive_pipeline<false>();
         }
@@ -1845,6 +1807,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
                 std::cerr << "Active suffixes with no message received: " << unserved_c_h << ". Aborting.\n";
                 std::exit(EXIT_FAILURE);
             }
+
+            idx_t pill_c_h;
+            CUDA_CHECK(cudaMemcpy(&pill_c_h, pill_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
+            std::cerr << "Active suffixes with poison-pill received for generation " << gen << ": " << pill_c_h << ".\n";
         }
 #endif
 
