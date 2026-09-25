@@ -224,12 +224,14 @@ set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET bench_gpu_saca  PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET test_query      PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET bench_gpu_saca  PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET test_query      PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
 # Define dependencies between the targets.
@@ -249,6 +251,9 @@ target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 target_compile_options(bench_gpu_saca PRIVATE ${COMPILE_FLAGS})
 target_compile_definitions(bench_gpu_saca PRIVATE ${BENCH_PROVENANCE})
 target_compile_options(bench_gpu_saca PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)   # `nvcc` does not recognize OpenMP directives.
+target_compile_options(sa_convert PRIVATE ${COMPILE_FLAGS})
+target_compile_options(test_query PRIVATE ${COMPILE_FLAGS})
+target_compile_options(test_query PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
 # `nvcc` does not recognize OpenMP directives.
@@ -275,6 +280,8 @@ target_link_libraries(core PRIVATE tests)
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
 target_link_libraries(bench_gpu_saca PRIVATE core OpenMP::OpenMP_CXX)
+target_link_libraries(sa_convert PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(test_query PRIVATE tests OpenMP::OpenMP_CXX)
 
 # Link the tester.
 target_link_libraries(test PRIVATE core)
@@ -286,6 +293,8 @@ target_link_libraries(core PRIVATE ${LINK_FLAGS})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${LINK_FLAGS})
 target_link_libraries(test PRIVATE ${LINK_FLAGS})
+target_link_libraries(sa_convert PRIVATE ${LINK_FLAGS})
+target_link_libraries(test_query PRIVATE ${LINK_FLAGS})
 
 
 # Set the installation directory. The parent directory is `/usr/local/` by default, and the
