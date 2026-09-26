@@ -16,6 +16,17 @@ import sys
 GiB = 1 << 30
 SCHEMA = 5
 
+# A run is comparable to another run only if the machine was in the same state.
+# thp_alloc + thp_fallback is a constant of the workload separates the good runs
+# from the bad ones:
+#
+#      0.0%  every run on a healthy node (2026-09-19 placement test x4,
+#            and the same campaign's dolmasample x3)
+#      6.4%  node marginally crowded                    t_core   +8%
+#     45.0%  forced local against a full node                   +35%
+#    24-78%  the 2026-09-19 campaign's degraded runs     +36% to +124%
+THP_REFUSED_MAX = 0.10
+
 # Accessed unconditionally below, so a record missing any of them would take the
 # whole summary down rather than reporting itself as the one bad record.
 REQUIRED = ("run_id", "method", "corpus", "alphabet", "n_tokens", "threads",
@@ -85,6 +96,21 @@ def inconsistencies(rs):
     return out
 
 
+def fragmentation(rs):
+    """Runs that began on a fragmented node. Unlike `inconsistencies` this is not
+    a harness fault: it is the machine reporting that it could not give this run
+    the huge pages it gave the others."""
+    out = []
+    for r in rs:
+        alloc, fb = r.get("thp_alloc", -1), r.get("thp_fallback", -1)
+        if alloc < 0 or fb < 0 or alloc + fb == 0:
+            continue    # Pre-schema-5, or not Linux: nothing was measured.
+        frac = fb / (alloc + fb)
+        if frac > THP_REFUSED_MAX:
+            out.append(f"{r['run_id']} refused {frac:.1%}")
+    return out
+
+
 def main(argv):
     if not argv or argv[0] in ("-h", "--help"):
         print(__doc__)
@@ -123,8 +149,12 @@ def main(argv):
                if r.get("cpu_user", -1) >= 0 and r.get("cpu_sys", -1) >= 0]
         avail = sorted({r.get("threads_avail", -1) for r in rs})
         bad_fields = inconsistencies(rs)
+        frag = fragmentation(rs)
         if bad_fields:
-            flagged.append((method, corpus, bad_fields))
+            flagged.append((method, corpus, "replicates differ in", bad_fields))
+        if frag:
+            flagged.append((method, corpus, "ran on a fragmented node "
+                            f"(>{THP_REFUSED_MAX:.0%} of huge pages refused):", frag))
         rows.append([
             method, corpus, tok, alphabet, f"{ntok:.3e}", thr,
             avail[0] if len(avail) == 1 else "/".join(map(str, avail)),
@@ -138,7 +168,7 @@ def main(argv):
             f"{rss / GiB:.2f}G" if rss else "-",
             f"{rss / ntok:.2f}" if rss and ntok and status == "ok" else "-",    # Only for runs that complete; OOMs won't report their intensity consistently.
             f"{dev / GiB:.2f}G" if dev > 0 else "-",
-            "!" if bad_fields else "",
+            "!" if bad_fields or frag else "",
         ])
 
     w = [max([len(str(h))] + [len(str(r[i])) for r in rows]) for i, h in enumerate(hdr)]
@@ -161,9 +191,17 @@ def main(argv):
         if alloc is None and loc is None:
             continue
 
+        # The worst replicate, not the median: this is a health check, and a group
+        # with one degraded run is a group holding one number that cannot be
+        # pooled with the rest.
+        ratios = [r["thp_fallback"] / (r["thp_alloc"] + r["thp_fallback"]) for r in rs
+                  if r.get("thp_alloc", -1) >= 0 and r.get("thp_fallback", -1) >= 0
+                  and r["thp_alloc"] + r["thp_fallback"] > 0]
+        refused = max(ratios) if ratios else None
+
         mem.append([
             method, corpus,
-            f"{fb / (alloc + fb):.1%}" if alloc is not None and (alloc + fb) else "-",
+            f"{refused:.1%}{'*' if refused > THP_REFUSED_MAX else ''}" if refused is not None else "-",
             f"{oth / (loc + oth):.1%}" if loc is not None and (loc + oth) else "-",
             f"{scan:.3e}" if scan else "-",
             f"{comp:.3e}" if comp else "-",
@@ -173,6 +211,9 @@ def main(argv):
         mh = ("method", "corpus", "thp_refused", "numa_remote", "direct_reclaim", "compaction")
         mw = [max([len(str(h))] + [len(str(r[i])) for r in mem]) for i, h in enumerate(mh)]
         print("\nmemory behaviour (node-wide deltas; meaningful only under --exclusive)")
+        print(f"thp_refused is the worst replicate, the rest are medians.  "
+              f"* over {THP_REFUSED_MAX:.0%}: the node could not serve that run's "
+              "huge pages, so its t_core is not comparable to one that got them")
         print("  ".join(str(x).ljust(mw[i]) for i, x in enumerate(mh)))
         print("  ".join("-" * x for x in mw))
         for r in mem:
@@ -202,10 +243,11 @@ def main(argv):
     for m in check(runs):
         print(f"WARN: {m}")
 
-    # `!` above means replicates of one configuration did not agree on something
-    # that cannot legitimately vary between them.
-    for method, corpus, fields in flagged:
-        print(f"WARN: {method}/{corpus} replicates differ in {'; '.join(fields)}")
+    # `!` above means either that replicates of one configuration did not agree
+    # on something that cannot legitimately vary between them, or that the node
+    # was fragmented when the run started.
+    for method, corpus, why, details in flagged:
+        print(f"WARN: {method}/{corpus} {why} {'; '.join(details)}")
 
     # A failed run is the E2.1 result for its row, so surface the reason.
     for r in runs:
