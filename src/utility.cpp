@@ -1,12 +1,15 @@
 
 #include "utility.hpp"
 #include "utility.cuh"
+#include "env.hpp"
 
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 
 #include <cstring>
 #include <fstream>
+#include <cerrno>
 #include <cstdlib>
 
 
@@ -46,6 +49,45 @@ std::size_t available_memory()
 
     std::cerr << "Could not read `MemAvailable` from /proc/meminfo. Aborting.\n";
     std::exit(EXIT_FAILURE);
+}
+
+
+void* reserve_memory(const std::size_t bytes)
+{
+    if(bytes == 0)
+        return nullptr;
+
+    // Over-map by a huge page, and trim the mapping down to a huge-page aligned base.
+    const auto res_bytes = (bytes + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
+    const auto map_bytes = res_bytes + HUGE_PAGE_SIZE;
+    void* const map = ::mmap(nullptr, map_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if(map == MAP_FAILED)
+    {
+        std::cerr   << "Could not reserve " << (res_bytes / (1024.0 * 1024.0 * 1024.0)) << "GBs of address-space: " << std::strerror(errno) << "."
+                    << " Address-space reservations require `vm.overcommit_memory` to be 0 or 1. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    const auto map_addr = reinterpret_cast<std::uintptr_t>(map);
+    const auto base = (map_addr + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
+    const auto head = base - map_addr;  // Unaligned head to trim.
+    const auto tail = map_bytes - head - res_bytes; // Surplus tail to trim.
+    if(head > 0)
+        ::munmap(map, head);
+    if(tail > 0)
+        ::munmap(reinterpret_cast<void*>(base + res_bytes), tail);
+
+    if(env::get_u64("GPU_SACA_MADV_HUGEPAGE").value_or(0) != 0) // Best-effort: opts into synchronous compaction on faults too, under `defrag=madvise`.
+        ::madvise(reinterpret_cast<void*>(base), res_bytes, MADV_HUGEPAGE);
+
+    return reinterpret_cast<void*>(base);
+}
+
+
+void unreserve_memory(void* const ptr, const std::size_t bytes)
+{
+    if(ptr != nullptr)
+        ::munmap(ptr, (bytes + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1));
 }
 
 

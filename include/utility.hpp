@@ -79,6 +79,7 @@ namespace gpu_saca::util
 
 constexpr std::size_t L1_CACHE_LINE_SIZE = 64;
 constexpr std::size_t PAGE_SIZE = 4096;
+constexpr std::size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;
 
 
 // Wrapper class for a data-element of type `T_` to ensure that in a linear
@@ -201,6 +202,15 @@ void prepage(T_* const ptr, const std::size_t size)
 
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
+
+// Returns a reservation of `bytes` bytes of address-space, `HUGE_PAGE_SIZE`-
+// aligned and backed by physical memory only when touched; `nullptr` for empty
+// reservations. The reservation opts into transparent huge pages iff the env
+// var `GPU_SACA_MADV_HUGEPAGE` is non-zero.
+void* reserve_memory(std::size_t bytes);
+
+// Releases the reservation `ptr` of `bytes` bytes, made with `reserve_memory`.
+void unreserve_memory(void* ptr, std::size_t bytes);
 
 // Returns from `/proc/self/smaps` (pseudo-file with memory consumption metrics
 // for each memory mapping), for the memory mapping containing the address `p`,
