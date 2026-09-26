@@ -14,7 +14,7 @@ import statistics
 import sys
 
 GiB = 1 << 30
-SCHEMA = 5
+SCHEMA = 6
 
 # A run is comparable to another run only if the machine was in the same state.
 # thp_alloc + thp_fallback is a constant of the workload separates the good runs
@@ -199,21 +199,35 @@ def main(argv):
                   and r["thp_alloc"] + r["thp_fallback"] > 0]
         refused = max(ratios) if ratios else None
 
+        # The replicate that started with the least huge-page-capable memory,
+        # reported with its own free total so the pair stays coherent. Read them
+        # together: small `huge` beside a large `free` is a fragmented node,
+        # small beside small is merely a full one, and the two want different
+        # remedies. This is the state the run inherited -- `thp_refused` is what
+        # that state then cost it.
+        starts = [(r["buddy_free_huge"], r["buddy_free"]) for r in rs
+                  if r.get("buddy_free_huge", -1) >= 0 and r.get("buddy_free", -1) >= 0]
+        huge0, free0 = min(starts) if starts else (None, None)
+
         mem.append([
             method, corpus,
             f"{refused:.1%}{'*' if refused > THP_REFUSED_MAX else ''}" if refused is not None else "-",
             f"{oth / (loc + oth):.1%}" if loc is not None and (loc + oth) else "-",
             f"{scan:.3e}" if scan else "-",
             f"{comp:.3e}" if comp else "-",
+            f"{free0 / GiB:.0f}G" if free0 is not None else "-",
+            f"{huge0 / GiB:.0f}G" if huge0 is not None else "-",
         ])
 
     if mem:
-        mh = ("method", "corpus", "thp_refused", "numa_remote", "direct_reclaim", "compaction")
+        mh = ("method", "corpus", "thp_refused", "numa_remote", "direct_reclaim",
+              "compaction", "free@start", "huge@start")
         mw = [max([len(str(h))] + [len(str(r[i])) for r in mem]) for i, h in enumerate(mh)]
         print("\nmemory behaviour (node-wide deltas; meaningful only under --exclusive)")
-        print(f"thp_refused is the worst replicate, the rest are medians.  "
-              f"* over {THP_REFUSED_MAX:.0%}: the node could not serve that run's "
-              "huge pages, so its t_core is not comparable to one that got them")
+        print(f"thp_refused and the @start pair are the worst replicate, the rest are "
+              f"medians.  * over {THP_REFUSED_MAX:.0%}: the node could not serve that "
+              "run's huge pages,\n  so its t_core is not comparable to one that got them."
+              "  huge@start well under free@start means the node was fragmented, not full")
         print("  ".join(str(x).ljust(mw[i]) for i, x in enumerate(mh)))
         print("  ".join("-" * x for x in mw))
         for r in mem:

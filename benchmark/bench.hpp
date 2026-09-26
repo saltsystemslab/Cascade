@@ -168,6 +168,12 @@ struct Kernel_Counter
     int64_t pgscan_direct = -1; // Direct reclaim: an allocation had to wait.
     int64_t compact_stall = -1; // Compaction entered on an allocation path.
     int64_t numa_local = -1, numa_other = -1;   // Pages served near vs far.
+
+    // Node-wide instantaneous levels, NOT counters: what the allocator holds at
+    // the moment they are read. The value worth recording is therefore the one
+    // taken at the start of the run, never a difference across it.
+    int64_t buddy_free = -1;        // Free bytes across every node, zone, order.
+    int64_t buddy_free_huge = -1;   // Of those, what sits in 2 MiB-or-larger blocks.
 };
 
 
@@ -209,6 +215,45 @@ inline Kernel_Counter read_kernel_counters()
         while(f >> k >> v)
             if     (k == "local_node")  c.numa_local = std::max<int64_t>(c.numa_local, 0) + v;
             else if(k == "other_node")  c.numa_other = std::max<int64_t>(c.numa_other, 0) + v;
+    }
+
+    {   // /proc/buddyinfo: free-block counts, per node, per zone, per order.
+        // Order 9 is 2 MiB where pages are 4 KiB, i.e. one transparent huge
+        // page, so blocks at order >= 9 are those a THP fault can still be
+        // served from. Small here while buddy_free is large means the node is
+        // fragmented rather than full, which is the state that costs: under
+        // defrag=madvise the kernel does not attempt compaction for an ordinary
+        // heap allocation, so the fault quietly drops to 4 KiB pages and the
+        // node stays that way for every run after it.
+        const int64_t page = ::sysconf(_SC_PAGESIZE);
+        int huge_order = 0;
+        while(page > 0 && (page << huge_order) < (int64_t(2) << 20))
+            ++huge_order;
+
+        std::ifstream f("/proc/buddyinfo");
+        std::string line;
+        while(page > 0 && std::getline(f, line))
+        {
+            // "Node 0, zone   Normal  12694  83681 ..." -- the node number
+            // carries a comma and the zone name varies, so seek past both.
+            const auto z = line.find("zone");
+            if(z == std::string::npos)
+                continue;
+
+            std::istringstream ss(line.substr(z + 4));
+            std::string zone;
+            if(!(ss >> zone))
+                continue;
+
+            int64_t blocks = 0;
+            for(int order = 0; ss >> blocks; ++order)
+            {
+                const int64_t bytes = blocks * (int64_t(1) << order) * page;
+                c.buddy_free = std::max<int64_t>(c.buddy_free, 0) + bytes;
+                if(order >= huge_order)
+                    c.buddy_free_huge = std::max<int64_t>(c.buddy_free_huge, 0) + bytes;
+            }
+        }
     }
 #endif
 
@@ -300,7 +345,7 @@ namespace alpha
 // "measured as zero". No `t_e2e` field: the summarizer sums the buckets.
 struct Record
 {
-    static constexpr int schema_version = 5;
+    static constexpr int schema_version = 6;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     std::string host = host_name(), timestamp_utc = now_utc();
@@ -326,6 +371,9 @@ struct Record
     int64_t     thp_alloc = -1, thp_fallback = -1;
     int64_t     pgscan_direct = -1, compact_stall = -1;
     int64_t     numa_local = -1, numa_other = -1;
+
+    // Not differences: the allocator's state at the instant the run started.
+    int64_t     buddy_free = -1, buddy_free_huge = -1;
 
     // Our method's phase breakdown. -1 for the baselines.
     double      t_prepage_pid = -1, t_pivots = -1, t_partition = -1, t_device_setup = -1,
@@ -364,6 +412,7 @@ struct Record
         J_NUM(threads_avail);J_NUM(cpus_allowed);  J_NUM(exe_hash);   J_STR(env_tuning);
         J_NUM(thp_alloc);    J_NUM(thp_fallback);  J_NUM(pgscan_direct);
         J_NUM(compact_stall);J_NUM(numa_local);    J_NUM(numa_other);
+        J_NUM(buddy_free);   J_NUM(buddy_free_huge);
         J_NUM(t_prepage_pid);  J_NUM(t_pivots);      J_NUM(t_partition);
         J_NUM(t_device_setup); J_NUM(t_initial_rank);J_NUM(t_exponentiate);
         J_NUM(t_concatenate);  J_NUM(n_partitions);  J_NUM(n_generations);
@@ -632,6 +681,12 @@ inline int finalize(Record& rec, const std::string& results_dir,
     rec.compact_stall = since_start(k.compact_stall, counters_at_start.compact_stall);
     rec.numa_local    = since_start(k.numa_local,    counters_at_start.numa_local);
     rec.numa_other    = since_start(k.numa_other,    counters_at_start.numa_other);
+
+    // Levels, not counters: the state the run began in, which is what decided
+    // whether its huge-page faults could be served at all. Differencing these
+    // would instead measure how much of the node this run itself ate.
+    rec.buddy_free      = counters_at_start.buddy_free;
+    rec.buddy_free_huge = counters_at_start.buddy_free_huge;
 
     rec.cpus_allowed = cpus_allowed_count();
     rec.exe_hash     = executable_hash();
