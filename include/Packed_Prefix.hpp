@@ -18,16 +18,17 @@ namespace gpu_saca
 // to the `\ell` knob. It defines the resolution of the initial-ranking phase:
 // `ELL_WORDS * 8 / sizeof(T_sym)` symbols.
 #ifndef PREF_KEY_WORDS
-    constexpr idx_t ELL_WORDS = 2;
+    constexpr idx_t ELL_WORDS = 4;
 #else
     constexpr idx_t ELL_WORDS = PREF_KEY_WORDS;
 #endif
 
 // Number of 64-bit words in the partitioning prefix, i.e. in a pivot: the `K`
 // knob. It defines the discriminating power of the pivots:
-// `K_WORDS * 8 / sizeof(T_sym)` symbols.
+// `K_WORDS * 8 / sizeof(T_sym)` symbols. It defaults independently of
+// `ELL_WORDS`, so widening the initial sort-key leaves the pivots unchanged.
 #ifndef PIVOT_WORDS
-    constexpr idx_t K_WORDS = ELL_WORDS;
+    constexpr idx_t K_WORDS = 2;
 #else
     constexpr idx_t K_WORDS = PIVOT_WORDS;
 #endif
