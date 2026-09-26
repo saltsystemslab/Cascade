@@ -17,7 +17,7 @@ struct Build_Timing
     double text_load   = -1;    // Time spent in  allocating, pre-paging, and reading the text.
     double pivots      = -1;    // Time spent in selecting pivots.
     double partition   = -1;    // Time spent in partitioning.
-    double device_setup = -1;   // Time spent in device allocation and staging setup.
+    double device_setup = -1;   // Time spent in device allocation, plus in awaiting the staging setup pinned in the background.
     double initial_rank = -1;   // Time spent in initial ranking.
     double exponentiate = -1;   // Time spent in prefix exponentiation.
     double concatenate  = -1;   // Time spent in concatenating partitions.

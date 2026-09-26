@@ -23,6 +23,7 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <thread>
 
 
 // TODO: name algorithm.
@@ -102,6 +103,8 @@ private:
         idx_t admit_budget_;    // Maximum slab-count that may be posted for reading at the same time (i.e. committed to open assemblies).
 
         std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
+        std::thread slab_pinner_;   // Background thread to pin the slab pool.
+        double slab_pin_time_;  // Time taken to pin the slab pool, in seconds.
 
         // TODO: the following staging data structures need to move to their dedicated class.
 

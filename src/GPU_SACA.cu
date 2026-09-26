@@ -54,6 +54,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
     , p_(0)
     , P_id(nullptr)
     , ctx_(0)
+    , slab_pin_time_(0)
     , workspace_sz(0)
 {
     if(n_ == 0)
@@ -89,6 +90,9 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
+    if(slab_pinner_.joinable()) // The slab-pinner may still be alive if the build failed to reach its await.
+        slab_pinner_.join();
+
     util::deallocate(T_h_);
     util::deallocate(P_id);
 
@@ -164,13 +168,15 @@ void GPU_SACA<T_sym_>::build_SA()
         }
     }
 
-    // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
+    // Await allocation of the staging slab pool bridging the backend to the device.
     {
-        PROFILE_SCOPE("setup_staging");
-        setup_staging();
+        PROFILE_SCOPE("await_staging");
+        slab_pinner_.join();
     }
     const auto t_3 = now();
     build_timing_.device_setup = duration(t_3 - t_2);
+    std::cerr   << "Slab-pool pinning completed in the background. Time taken: " << slab_pin_time_ << "s"
+                << " (" << (slab_pool_memory() / (1024.0 * 1024.0 * 1024.0) / slab_pin_time_) << " GBs/s).\n";
     std::cerr << "Device-space allocated and staging-setup completed. Time taken: " << build_timing_.device_setup << "s.\n";
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
@@ -663,6 +669,18 @@ void GPU_SACA<T_sym_>::partition()
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->spilled_suf(p_id)});
         }
+
+
+        // Pin the slab pool in the background, overlapped with the scatter.
+        slab_pinner_ = std::thread(
+            [this]
+            {
+                PROFILE_SCOPE("setup_staging");
+                const auto t_0 = timer::now();
+                setup_staging();
+                slab_pin_time_ = timer::duration(timer::now() - t_0);
+            }
+        );
 
 
         // Add suffix indices to their corresponding partitions (through the buffers).
