@@ -145,6 +145,23 @@ bool validate_inbox_mass(const Partition_Backend& backend)
 }
 
 
+uint64_t message_checksum(const idx_t* const tgt, const msg_rank_t* const rank, const idx_t n)
+{
+    const auto mix = [](uint64_t z) // SplitMix64's finalizer, as the per-message hash.
+    {
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    };
+
+    uint64_t sum = 0;   // Wrapping sum of the messages' hashes: independent of their order.
+    for(idx_t i = 0; i < n; ++i)
+        sum += mix(mix(tgt[i]) + rank[i]);
+
+    return sum;
+}
+
+
 bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* const P_id, const idx_t n)
 {
     bool is_valid = true;

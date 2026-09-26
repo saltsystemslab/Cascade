@@ -43,6 +43,7 @@ private:
 
         std::vector<std::atomic<p_sz_t>> msg_count_[2]; // Size of each destination-partition's inbox, including the buffered messages; per generation-parity.
         std::vector<std::atomic<p_sz_t>> msg_written_[2];   // Messages actually written to the backend, per destination; per generation-parity.
+        std::vector<std::atomic<uint64_t>> msg_sum_[2]; // Order-independent checksum of each destination-partition's inbox, per generation-parity.
 
         std::vector<idx_t*> ov_tgt_;    // Block-overflow buffers for message-targets, per destination.
         std::vector<msg_rank_t*> ov_rank_;  // Rank-buffers, parallel to `ov_tgt_`.
@@ -150,6 +151,11 @@ public:
     // Returns the message-count in the `p_id'`th partition's inbox for the
     // current generation (written to at the preceding generation).
     p_sz_t inbox_size(p_id_t p_id) const;
+
+    // Returns the order-independent checksum of the messages in the `p_id`'th
+    // partition's inbox for the current generation (written to at the preceding
+    // generation).
+    uint64_t inbox_checksum(const p_id_t p_id) const { return msg_sum_[inbox_read_parity_][p_id]; }
 
     // Returns the total size of the inboxes written to at the last generation.
     idx_t inbox_mass_last_gen() const;

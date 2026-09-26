@@ -1405,12 +1405,21 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 #ifdef TESTS
                         {
                             idx_t read_msg = 0;
+                            uint64_t read_sum = 0;  // Order-independent checksum of the messages read.
                             for(auto* s : p_assembly->slab)
-                                read_msg += s->inbox_sz();
+                                read_msg += s->inbox_sz(),
+                                read_sum += test::message_checksum(s->msg_target(), s->msg_rank(), s->inbox_sz());
 
                             if(read_msg != backend_->inbox_size(p_id))
                             {
                                 std::cerr << "Read inbox size at current generation does not equal to written inbox size at previous generation. Aborting.\n";
+                                std::exit(EXIT_FAILURE);
+                            }
+
+                            // The size-check above is by construction, as the slabs' inbox sizes derive from `inbox_size`; this one is not.
+                            if(read_sum != backend_->inbox_checksum(p_id))
+                            {
+                                std::cerr << "Read inbox messages at current generation differ from the ones written at previous generation. Aborting.\n";
                                 std::exit(EXIT_FAILURE);
                             }
                         }

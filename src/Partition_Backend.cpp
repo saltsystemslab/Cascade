@@ -3,6 +3,7 @@
 #include "utility.hpp"
 #include "utility.cuh"
 #include "Pipeline_Probe.hpp"
+#include "tests.hpp"
 
 #include <cstring>
 #include <mutex>
@@ -30,7 +31,8 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
 
     for(idx_t parity = 0; parity < 2; ++parity)
         msg_count_[parity] = std::vector<std::atomic<p_sz_t>>(p_),
-        msg_written_[parity] = std::vector<std::atomic<p_sz_t>>(p_);
+        msg_written_[parity] = std::vector<std::atomic<p_sz_t>>(p_),
+        msg_sum_[parity] = std::vector<std::atomic<uint64_t>>(p_);
 
     for(idx_t p_id = 0; p_id < p_; ++p_id)
         ov_tgt_[p_id] = util::aligned_allocate<idx_t>(OV_CAP, Direct_File::DISK_BLOCK),
@@ -148,7 +150,12 @@ void Partition_Backend::write_messages(const Staging_Slab& s)
         const auto l_q = (q > 0 ? msg_off[q - 1] : 0), r_q = msg_off[q];
         const auto l = std::max(l_slab, l_q), r = std::min(r_slab, r_q); // Intersect the slab's slice with the `q`-destined slice.
         if(l < r)
+        {
+#ifdef TESTS
+            msg_sum_[inbox_write_parity_][q].fetch_add(test::message_checksum(s.msg_target() + (l - l_slab), s.msg_rank() + (l - l_slab), r - l), std::memory_order_relaxed);
+#endif
             append_messages(q, s, l, r);
+        }
     }
 }
 
@@ -230,7 +237,7 @@ void Partition_Backend::open_generation(const idx_t gen)
     std::memset(msg_off_, 0, p_ * p_* sizeof(p_sz_t));
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
-        msg_count_[parity][p_id] = 0, msg_written_[parity][p_id] = 0;
+        msg_count_[parity][p_id] = 0, msg_written_[parity][p_id] = 0, msg_sum_[parity][p_id] = 0;
         ov_sz_[p_id] = 0;
     }
 }
