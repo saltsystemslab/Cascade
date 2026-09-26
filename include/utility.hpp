@@ -323,6 +323,10 @@ void exit_on_io_failure(const char* op, const std::string& path);
 // that dirty pages do not pile up from a long output-stream.
 void write_and_flush(int fd, const std::string& path, const void* buf, std::size_t bytes, std::size_t off);
 
+// Raises the soft limit on the process's open files to the hard limit, if the
+// soft limit falls below `required`. Aborts if the hard limit falls below it.
+void raise_open_files_limit(std::size_t required);
+
 }
 
 

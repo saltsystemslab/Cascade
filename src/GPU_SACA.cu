@@ -191,6 +191,9 @@ void GPU_SACA<T_sym_>::build_SA()
     build_timing_.exponentiate = duration(t_5 - t_4);
     std::cerr << "Prefix-exponentiation completed. Time taken: " << build_timing_.exponentiate << "s.\n";
 
+    // Free the inboxes' scratch-space ahead of the suffix array's output.
+    {   PROFILE_SCOPE("retire_messages");           backend_->retire_messages();    }
+
     {   PROFILE_SCOPE("drop_partition_IDs");        util::deallocate(P_id), P_id = nullptr;  }
 
     {   PROFILE_SCOPE("concatenate_partitions");    concatenate_partitions(op_path_);}
@@ -665,6 +668,7 @@ void GPU_SACA<T_sym_>::partition()
             }
 
             setup_staging_config();
+            util::file::raise_open_files_limit(SPILL_ROLE_C * p_ + 64); // Spill-files of all partitions at once, plus slack for the rest of the process.
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
             backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, host_budget, fixed_budget(), p_);
 
@@ -1773,13 +1777,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
-    // Open the inboxes that initial-ranking didn't need to write to.
-    {
-        PROFILE_SCOPE("open_deferred_inboxes");
-        backend_->open_deferred_inboxes();
-    }
-
-
     idx_t gen = 1;
     for(idx_t k = ell; k < n_; k *= 2, ++gen)
     {

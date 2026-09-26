@@ -55,9 +55,9 @@ std::size_t Partition_Backend::fixed_budget(const p_id_t p)
 }
 
 
-void Partition_Backend::open_deferred_inboxes()
+void Partition_Backend::retire_messages()
 {
-    disk_.open_deferred_inboxes();
+    disk_.retire_inboxes();
 }
 
 
@@ -162,6 +162,8 @@ void Partition_Backend::write_messages(const Staging_Slab& s)
 
 void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s, const p_sz_t l, const p_sz_t r)
 {
+    disk_.ensure_inbox(p_id);   // The only entry for messages to the inbox-files, the degenerate buffering-only case included.
+
     const auto parity = inbox_write_parity_;
     msg_count_[parity][p_id].fetch_add(r - l, std::memory_order_relaxed);
 

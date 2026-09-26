@@ -6,6 +6,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 
 #include <cstring>
 #include <fstream>
@@ -159,6 +160,33 @@ void write_and_flush(const int fd, const std::string& path, const void* const bu
     // This does not wait, hence the dirty set stays small without the writer stalling.
     if(::sync_file_range(fd, off, bytes, SYNC_FILE_RANGE_WRITE) != 0)
         exit_on_io_failure("sync_file_range", path);
+}
+
+
+void raise_open_files_limit(const std::size_t required)
+{
+    rlimit lim;
+    if(::getrlimit(RLIMIT_NOFILE, &lim) != 0)
+    {
+        std::cerr << "getrlimit(RLIMIT_NOFILE) failed; error: " << std::strerror(errno) << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    if(lim.rlim_cur == RLIM_INFINITY || lim.rlim_cur >= required)
+        return;
+
+    if(lim.rlim_max != RLIM_INFINITY && lim.rlim_max < required)
+    {
+        std::cerr << "The hard limit of " << lim.rlim_max << " open files falls below the " << required << " the spill-store may require. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    lim.rlim_cur = (lim.rlim_max == RLIM_INFINITY ? required : lim.rlim_max);   // The open-files limit cannot go infinite.
+    if(::setrlimit(RLIMIT_NOFILE, &lim) != 0)
+    {
+        std::cerr << "setrlimit(RLIMIT_NOFILE) failed; error: " << std::strerror(errno) << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 }

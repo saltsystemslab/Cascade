@@ -86,8 +86,9 @@ public:
     // Returns the count of partitions.
     auto p() const { return p_; }
 
-    /// Opens the inbox-files of the parity first written at generation 1.
-    void open_deferred_inboxes();
+    // Retires the inboxes of both the generation-parities. To be invoked once
+    // past the last generation, as no inbox is read or written onward.
+    void retire_messages();
 
     // Opens the `p_id`'th partition's key-file.
     void open_key(p_id_t p_id);
