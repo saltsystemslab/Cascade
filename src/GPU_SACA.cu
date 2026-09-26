@@ -553,9 +553,12 @@ void GPU_SACA<T_sym_>::setup_staging_config()
             chunk_cap_ = CHUNK_CAP;
         else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
         {
+            // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
             constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
-            static_assert(CHUNK_CAP % elems_per_disk_blk == 0, "`CHUNK_CAP` must be disk-block aligned.");
-            chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
+            constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
+            static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
+            static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
+            chunk_cap_ = ((P_sz_max + cap_granularity - 1) / cap_granularity) * cap_granularity;
         }
     }
 

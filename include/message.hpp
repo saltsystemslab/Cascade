@@ -34,6 +34,11 @@ constexpr inline std::size_t MESSAGE_BYTES = sizeof(idx_t) + sizeof(msg_rank_t);
 // required for `O_DIRECT` alignment purposes.
 constexpr inline std::size_t MSG_ALIGN = Direct_File::DISK_BLOCK / std::min<idx_t>(sizeof(idx_t), sizeof(msg_rank_t));
 
+// Count of RAM message-chunks tiling a staging-slab's inbox-range. Slab-
+// capacities are multiples of `MSG_CHUNKS_PER_SLAB * MSG_ALIGN`, so that every
+// message-chunk holds whole `MSG_ALIGN`-groups of messages.
+constexpr inline std::size_t MSG_CHUNKS_PER_SLAB = 8;
+
 
 // Returns `true` iff the message-rank `r` is a poison-pill.
 CUDA_SPECIFIER
