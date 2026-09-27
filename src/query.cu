@@ -14,6 +14,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <limits>
 #include <map>
 #include <random>
@@ -32,16 +33,22 @@ const char* const USAGE =
 R"(Usage:
   query info --index DIR
       Prints the index's metadata and whether it fits the device.
-  query find --index DIR --queries Q.qry [--q N] [--text-res R] [--sa-res R] [--spot N]
-             [--reps K] [--itv-out F] [--cnt-out F] [--validate]
-      Finds the SA-intervals of the first N (default: all) queries of Q.qry, K
-      times (default 3), and reports the load, transfer, and search times and
-      the counts' hash. R is `device` (default) or `pinned`; --spot sets the
-      suffix-array order spot-checks at load (default 100000). --validate checks
-      every interval with the O(m) certificate on the device.
-  query gen --index DIR --out Q.qry --q N --len L1[,L2,...] [--kind K] [--seed S]
-      Writes N queries of lengths drawn from L1, L2, ...: substrings of the text
-      at random positions (K = substring, default), or random symbols (K = random).
+  query find --index DIR --queries Q1.qry[,Q2.qry,...] [--q N] [--text-res R] [--sa-res R]
+             [--spot N] [--reps K] [--itv-out F] [--cnt-out F] [--cnt-dir D] [--validate]
+      Loads the index once, and finds the SA-intervals of the first N (default:
+      all) queries of every query file, K times (default 3); reports the load,
+      transfer, and search times and the counts' hash. R is `device` (default)
+      or `pinned`; --spot sets the suffix-array order spot-checks at load
+      (default 100000). --validate checks every interval with the O(m)
+      certificate on the device. The counts of a single query file go to
+      --cnt-out, or those of each to D/<stem>.cnt.
+  query gen --index DIR --out Q.qry --kind K [--q N --len L1[,L2,...]] [--source F]
+            [--vocab V] [--seed S]
+      Writes N queries of lengths drawn from L1, L2, ...: K = substring (default)
+      takes substrings of the index's text, or of the text F of the same symbols
+      (held-out); mutated, substrings with one symbol replaced; random, symbols
+      drawn from [0, V); unigram, every symbol of [0, V) once. V defaults to the
+      symbol type's range.
 )";
 
 
@@ -142,46 +149,26 @@ int run_info(const Args& a)
 }
 
 
+// Finds the SA-intervals of the first `q_max` queries of the file `path` with
+// `eng`, `reps` times, and prints the batch's `key=value` lines. Checks the
+// intervals if `validate`, and writes them and their counts to `itv_path` and
+// `cnt_path` unless empty. Returns the exit status.
 template <typename T_sym_>
-int run_find(const Args& a)
+int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const uint64_t q_max, const uint64_t reps, const bool validate,
+               const std::string& itv_path, const std::string& cnt_path)
 {
-    std::string err;
-    uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3;
-    Query_Options opt;
-    if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
-        || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
-    {
-        std::fprintf(stderr, "error: %s\n", err.empty() ? "unknown residency" : err.c_str());
-        return 2;
-    }
-
-    opt.spot = spot;
-    reps = std::max<uint64_t>(reps, 1);
-
     std::vector<uint64_t> off;
     std::vector<T_sym_> sym;
     Query_File_Header h;
-    if(!query_file::read(a.get("queries"), q_max, off, sym, h, err))
+    std::string err;
+    if(!query_file::read(path, q_max, off, sym, h, err))
     {
         std::fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
 
     const idx_t q = off.size() - 1;
-
-    Query_Engine<T_sym_> eng;
-    if(!eng.load(a.get("index"), opt, err))
-    {
-        std::fprintf(stderr, "error: %s\n", err.c_str());
-        return 1;
-    }
-
-    const auto& idx = eng.index();
-    const auto& st = idx.stats();
-    std::printf("index=%s\nn=%" PRIu64 "\nsym_bytes=%u\ntext_res=%s\nsa_res=%s\nt_load_text=%.3f\nt_load_sa=%.3f\n"
-                "spot_pairs=%" PRIu64 "\nt_spot=%.3f\nqueries=%s\nq=%" PRIu64 "\nsym_c=%" PRIu64 "\n",
-                a.get("index").c_str(), idx.n(), idx.sym_bytes(), residency_name(idx.text_residency()), residency_name(idx.sa_residency()),
-                st.t_text, st.t_sa, st.spot_pairs, st.t_spot, a.get("queries").c_str(), q, off[q]);
+    std::printf("queries=%s\nq=%" PRIu64 "\nsym_c=%" PRIu64 "\n", path.c_str(), q, off[q]);
 
     uint64_t* off_d = nullptr;
     T_sym_* sym_d = nullptr;
@@ -229,7 +216,7 @@ int run_find(const Args& a)
                 reps, t_h2d, sorted.front(), sorted[sorted.size() / 2], t_d2h, q / sorted.front(), hits, occ, query_file::counts_hash(out.data(), q));
 
     int rc = 0;
-    if(a.has("validate"))
+    if(validate)
     {
         unsigned long long* flags_d = nullptr;
         unsigned long long flags[2] = {0, q};  // Failing count, and the first failing query.
@@ -243,20 +230,20 @@ int run_find(const Args& a)
         std::printf("validate=%s\nvalidate_failed=%llu\nt_validate=%.6f\n", flags[0] == 0 ? "pass" : "FAIL", flags[0], seconds(e0, e1));
         if(flags[0] != 0)
         {
-            std::fprintf(stderr, "error: %llu intervals fail the certificate; the first is query %llu\n", flags[0], flags[1]);
+            std::fprintf(stderr, "error: %s: %llu intervals fail the certificate; the first is query %llu\n", path.c_str(), flags[0], flags[1]);
             rc = 1;
         }
     }
 
-    if(a.has("itv-out") && !query_file::write_intervals(a.get("itv-out"), out.data(), q))
+    if(!itv_path.empty() && !query_file::write_intervals(itv_path, out.data(), q))
     {
-        std::fprintf(stderr, "error: cannot write %s\n", a.get("itv-out").c_str());
+        std::fprintf(stderr, "error: cannot write %s\n", itv_path.c_str());
         rc = 1;
     }
 
-    if(a.has("cnt-out") && !query_file::write_counts(a.get("cnt-out"), out.data(), q))
+    if(!cnt_path.empty() && !query_file::write_counts(cnt_path, out.data(), q))
     {
-        std::fprintf(stderr, "error: cannot write %s\n", a.get("cnt-out").c_str());
+        std::fprintf(stderr, "error: cannot write %s\n", cnt_path.c_str());
         rc = 1;
     }
 
@@ -270,10 +257,68 @@ int run_find(const Args& a)
 
 
 template <typename T_sym_>
+int run_find(const Args& a)
+{
+    std::string err;
+    uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3;
+    Query_Options opt;
+    if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
+        || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
+    {
+        std::fprintf(stderr, "error: %s\n", err.empty() ? "unknown residency" : err.c_str());
+        return 2;
+    }
+
+    std::vector<std::string> files;
+    const std::string list = a.get("queries");
+    for(std::size_t b = 0; b < list.size(); )
+    {
+        const auto e = std::min(list.find(',', b), list.size());
+        if(e > b)
+            files.push_back(list.substr(b, e - b));
+        b = e + 1;
+    }
+
+    if(files.empty() || (files.size() > 1 && (a.has("cnt-out") || a.has("itv-out"))))
+    {
+        std::fprintf(stderr, "error: %s\n", files.empty() ? "no query file" : "--cnt-out and --itv-out take a single query file; use --cnt-dir");
+        return 2;
+    }
+
+    opt.spot = spot;
+    reps = std::max<uint64_t>(reps, 1);
+
+    Query_Engine<T_sym_> eng;
+    if(!eng.load(a.get("index"), opt, err))
+    {
+        std::fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+
+    const auto& idx = eng.index();
+    const auto& st = idx.stats();
+    std::printf("index=%s\nn=%" PRIu64 "\nsym_bytes=%u\ntext_res=%s\nsa_res=%s\nt_load_text=%.3f\nt_load_sa=%.3f\nspot_pairs=%" PRIu64 "\nt_spot=%.3f\n",
+                a.get("index").c_str(), idx.n(), idx.sym_bytes(), residency_name(idx.text_residency()), residency_name(idx.sa_residency()),
+                st.t_text, st.t_sa, st.spot_pairs, st.t_spot);
+
+    // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`.
+    int rc = 0;
+    for(const auto& f : files)
+    {
+        const std::string cnt = a.has("cnt-dir") ? (std::filesystem::path(a.get("cnt-dir")) / std::filesystem::path(f).stem()).string() + ".cnt"
+                                                 : a.get("cnt-out");
+        rc |= find_batch(eng, f, q_max, reps, a.has("validate"), a.get("itv-out"), cnt);
+    }
+
+    return rc;
+}
+
+
+template <typename T_sym_>
 int run_gen(const Args& a)
 {
     std::string err;
-    uint64_t q = 0, seed = 1;
+    uint64_t q = 0, seed = 1, vocab = uint64_t(std::numeric_limits<T_sym_>::max()) + 1;
     std::vector<uint64_t> lens;
     const std::string kind = a.get("kind", "substring");
     try
@@ -288,10 +333,13 @@ int run_gen(const Args& a)
     }
     catch(const std::exception&) { lens.clear(); }
 
-    if(!get_u64(a, "q", q, err) || !get_u64(a, "seed", seed, err) || q == 0 || lens.empty() || !a.has("out")
-        || (kind != "substring" && kind != "random"))
+    const bool unigram = (kind == "unigram"), from_text = (kind == "substring" || kind == "mutated");
+    if(!get_u64(a, "q", q, err) || !get_u64(a, "seed", seed, err) || !get_u64(a, "vocab", vocab, err) || !a.has("out")
+        || (kind != "substring" && kind != "mutated" && kind != "random" && !unigram) || vocab == 0
+        || (!unigram && (q == 0 || lens.empty())))
     {
-        std::fprintf(stderr, "error: %s\n", err.empty() ? "gen needs --out, --q > 0, --len, and --kind substring|random" : err.c_str());
+        std::fprintf(stderr, "error: %s\n", err.empty() ? "gen needs --out, --kind substring|mutated|random|unigram, and --q > 0 and --len unless unigram"
+                                                        : err.c_str());
         return 2;
     }
 
@@ -302,11 +350,21 @@ int run_gen(const Args& a)
         return 1;
     }
 
+    // The text to draw substrings from: the index's, or a held-out one of the same symbols.
+    const std::string source = a.get("source", m.text);
     std::vector<T_sym_> T;
-    if(kind == "substring")
+    if(from_text)
     {
-        T.resize(m.n);
-        if(!index_io::read_range(m.text, 0, m.n * sizeof(T_sym_), reinterpret_cast<uint8_t*>(T.data()), err))
+        std::error_code ec;
+        const auto bytes = std::filesystem::file_size(source, ec);
+        if(ec || bytes == 0 || bytes % sizeof(T_sym_) != 0)
+        {
+            std::fprintf(stderr, "error: cannot use %s as a text of %zu-byte symbols\n", source.c_str(), sizeof(T_sym_));
+            return 1;
+        }
+
+        T.resize(bytes / sizeof(T_sym_));
+        if(!index_io::read_range(source, 0, bytes, reinterpret_cast<uint8_t*>(T.data()), err))
         {
             std::fprintf(stderr, "error: %s\n", err.c_str());
             return 1;
@@ -314,22 +372,39 @@ int run_gen(const Args& a)
     }
 
     std::mt19937_64 rng(seed);
+    const auto symbol = [&] { return static_cast<T_sym_>(rng() % vocab); };
     std::vector<uint64_t> off = {0};
     std::vector<T_sym_> sym;
-    for(uint64_t i = 0; i < q; ++i)
+    if(unigram)
     {
-        const uint64_t len = std::min<uint64_t>(lens[rng() % lens.size()], m.n);
-        if(kind == "substring")
+        q = vocab;
+        for(uint64_t c = 0; c < vocab; ++c)
         {
-            const uint64_t pos = rng() % (m.n - len + 1);
-            sym.insert(sym.end(), T.begin() + pos, T.begin() + pos + len);
+            sym.push_back(static_cast<T_sym_>(c));
+            off.push_back(sym.size());
         }
-        else
-            for(uint64_t j = 0; j < len; ++j)
-                sym.push_back(static_cast<T_sym_>(rng()));
-
-        off.push_back(sym.size());
     }
+    else
+        for(uint64_t i = 0; i < q; ++i)
+        {
+            const uint64_t len = (from_text ? std::min<uint64_t>(lens[rng() % lens.size()], T.size()) : lens[rng() % lens.size()]);
+            if(from_text)
+            {
+                const uint64_t pos = rng() % (T.size() - len + 1);
+                sym.insert(sym.end(), T.begin() + pos, T.begin() + pos + len);
+                if(kind == "mutated" && len > 0 && vocab > 1)  // One symbol replaced by a different one.
+                {
+                    T_sym_& x = sym[sym.size() - len + rng() % len];
+                    const T_sym_ old = x;
+                    while((x = symbol()) == old) {}
+                }
+            }
+            else
+                for(uint64_t j = 0; j < len; ++j)
+                    sym.push_back(symbol());
+
+            off.push_back(sym.size());
+        }
 
     if(!query_file::write(a.get("out"), off, sym, seed, err))
     {
@@ -337,7 +412,8 @@ int run_gen(const Args& a)
         return 1;
     }
 
-    std::printf("out=%s\nq=%" PRIu64 "\nsym_c=%zu\nkind=%s\nseed=%" PRIu64 "\n", a.get("out").c_str(), q, sym.size(), kind.c_str(), seed);
+    std::printf("out=%s\nq=%" PRIu64 "\nsym_c=%zu\nkind=%s\nsource=%s\nvocab=%" PRIu64 "\nseed=%" PRIu64 "\n", a.get("out").c_str(), q,
+                sym.size(), kind.c_str(), from_text ? source.c_str() : "-", vocab, seed);
     return 0;
 }
 
