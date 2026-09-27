@@ -104,6 +104,7 @@ inline bool certify(const T_sym_* const T, const idx_t n, const uint8_t* const S
 // comparing at most `max_cmp` symbols: `-1`, `1`, or `0` if undecided within
 // `max_cmp` symbols. An exhausted suffix is smaller than any extension of it.
 template <typename T_sym_>
+CUDA_SPECIFIER
 inline int cmp_suffixes(const T_sym_* const T, const idx_t n, const idx_t i, const idx_t j, const idx_t max_cmp)
 {
     const idx_t len_i = n - i, len_j = n - j;

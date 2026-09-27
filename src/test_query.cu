@@ -8,12 +8,14 @@
 #include "query-file.hpp"
 #include "query_tests.hpp"
 #include "sa40.hpp"
+#include "Suffix_Index.hpp"
 
 #include <unistd.h>
 
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -416,6 +418,62 @@ bool test_spot_check()
     return true;
 }
 
+
+// Writes into `dir` a query index of the text `T` with the padded suffix array
+// `SA`, the suffix array split into `parts` parts. Returns `false` with a reason
+// in `err` on failure.
+template <typename T_sym_>
+bool write_index(const std::filesystem::path& dir, const std::vector<T_sym_>& T, const std::vector<uint8_t>& SA, const idx_t parts,
+                 std::string& err)
+{
+    Index_Meta m;
+    m.n = T.size();
+    m.sym_bytes = sizeof(T_sym_);
+    m.text = (dir / "text.bin").string();
+    m.sa_part_off = index_meta::part_offsets(m.sa_bytes(), parts);
+    m.sa_source = "test_query";
+    std::ofstream(m.text, std::ios::binary).write(reinterpret_cast<const char*>(T.data()), m.n * sizeof(T_sym_));
+    for(idx_t i = 0; i < parts; ++i)
+    {
+        m.sa_part.push_back((dir / ("sa.u40.part" + std::to_string(i))).string());
+        std::ofstream(m.sa_part[i], std::ios::binary).write(reinterpret_cast<const char*>(SA.data() + m.sa_part_off[i]), m.part_bytes(i));
+    }
+
+    return index_meta::write(dir.string(), m, err);
+}
+
+
+bool test_index_host_tiers()
+{
+    // `uint32_t` symbols on whose little-endian bytes byte order and numeric order disagree.
+    std::mt19937_64 rng(9);
+    const uint32_t alpha[] = {0x00000001u, 0x00000100u, 0x00010000u, 0xFFFFFFFFu};
+    std::vector<uint32_t> T(5000);
+    for(auto& x : T)
+        x = alpha[rng() % 4];
+
+    const auto SA = test::build_sa40(T);
+    const auto dir = scratch_dir("host-tiers");
+    std::string err;
+    CHECK(write_index(dir, T, SA, 2, err), "%s", err.c_str());
+
+    Suffix_Index idx;
+    CHECK(idx.load(dir.string(), Residency::pageable, Residency::pageable, 100000, err), "%s", err.c_str());
+    CHECK(idx.host_accessible() && !idx.device_accessible() && !idx.stats().spot_on_device, "unexpected placement of a host-only index");
+    CHECK(std::memcmp(idx.host_text<uint32_t>(), T.data(), T.size() * sizeof(uint32_t)) == 0, "text differs after loading");
+    CHECK(std::memcmp(idx.host_sa(), SA.data(), SA_WIDTH * T.size()) == 0, "suffix array differs after loading");
+    for(idx_t b = 0; b < TEXT_PAD_BYTES; ++b)
+        CHECK(reinterpret_cast<const uint8_t*>(idx.host_text<uint32_t>())[T.size() * sizeof(uint32_t) + b] == 0, "text padding is not zero");
+    for(idx_t b = 0; b < SA_PAD_BYTES; ++b)
+        CHECK(idx.host_sa()[SA_WIDTH * T.size() + b] == 0, "suffix-array padding is not zero");
+
+    CHECK(write_index(dir, T, test::build_sa40_byte_order(T), 1, err), "%s", err.c_str());
+    CHECK(!idx.load(dir.string(), Residency::pageable, Residency::pageable, T.size(), err) && !idx.loaded(),
+          "a misordered suffix array must be rejected by the host spot-check");
+
+    return true;
+}
+
 }
 
 
@@ -436,6 +494,7 @@ int main()
         {"oracle vs brute force",   test_oracle_random},
         {"edge cases",              test_edge_cases},
         {"order spot-check",        test_spot_check},
+        {"index load, host tiers",  test_index_host_tiers},
     };
 
     int failed = 0;
