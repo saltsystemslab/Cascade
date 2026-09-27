@@ -2063,6 +2063,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
                         {
                             INSTRUMENT_TIMER(probe::P().me().io_ns);
                             INSTRUMENT(probe::P().me().bytes += s->size() * sizeof(idx_t));
+                            INSTRUMENT(probe::P().me().disk_bytes += (dump ? s->size() * sizeof(idx_t) : 0));
 
                             // Drain the slab's suffixes.
                             if(dump)

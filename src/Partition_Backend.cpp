@@ -96,6 +96,7 @@ void Partition_Backend::read_suffixes(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * sizeof(idx_t));
+    INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * sizeof(idx_t)));
 
     read_suf_chunk(s.p_id(), s.off(), s.size(), s.suf());
 }
@@ -109,6 +110,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
     {
         INSTRUMENT_TIMER(probe::P().me().io_ns);
         INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
+        INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * (sizeof(idx_t) + sizeof(p_sz_t))));
         read_chunk(s.p_id(), s.off(), s.size(), suf, key);
     }
 }
@@ -153,6 +155,7 @@ void Partition_Backend::read_messages(Staging_Slab& s)
     if(hi > n_r)
     {
         const auto from = std::max(lo, n_r);
+        INSTRUMENT(probe::P().me().disk_bytes += (hi - from) * MESSAGE_BYTES);
         disk_.read_messages(p_id, from - n_r, hi - from, s.msg_target() + (from - lo), s.msg_rank() + (from - lo));
     }
 }
@@ -162,6 +165,7 @@ void Partition_Backend::write(const Staging_Slab& s)
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
+    INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * (sizeof(idx_t) + sizeof(p_sz_t))));
 
     const auto p_id = s.p_id();
     const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
@@ -304,6 +308,7 @@ void Partition_Backend::release_inbox(RAM_Inbox& in)
 
 void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s, const p_sz_t l, const p_sz_t r)
 {
+    INSTRUMENT(probe::P().me().disk_bytes += (r - l) * MESSAGE_BYTES);
     disk_.ensure_inbox(p_id);   // The only entry for messages to the inbox-files, the degenerate buffering-only case included.
 
     const auto parity = inbox_write_parity_;
