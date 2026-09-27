@@ -185,6 +185,7 @@ void GPU_SACA<T_sym_>::build_SA()
     std::cerr << "Initial ranking completed. Time taken: " << build_timing_.initial_rank << "s.\n";
 
     {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
+    backend_->raise_cap(n_ * sizeof(T_sym_));   // The text's space now goes to the backend's RAM-tier.
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_5 = now();
@@ -718,6 +719,8 @@ void GPU_SACA<T_sym_>::partition()
         }
 #endif
     }
+
+    backend_->raise_cap(Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_));  // The scatter buffers' space now goes to the backend's RAM-tier.
 }
 
 
@@ -1791,7 +1794,9 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 
             // A line of its own, as the split between the tiers depends on timing, unlike the rest.
             const idx_t disk_count = backend_->disk_mass_last_gen();
-            std::cerr << "Inbox-tiers for generation " << gen << ": " << (msg_count - disk_count) << " messages in RAM, " << disk_count << " on disk.\n";
+            const auto& budget = backend_->budget();
+            std::cerr <<    "Inbox-tiers for generation " << gen << ": " << (msg_count - disk_count) << " messages in RAM, " << disk_count << " on disk."
+                            " RAM-tier: " << (budget.used() / (1024.0 * 1024.0 * 1024.0)) << "GBs charged, of " << (budget.cap() / (1024.0 * 1024.0 * 1024.0)) << "GBs cap.\n";
         }
 #endif
 

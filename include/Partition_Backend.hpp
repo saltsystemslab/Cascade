@@ -113,7 +113,8 @@ public:
     // Constructs a backend for partitions with capacities `P_cap`, staged in
     // slabs of capacity `chunk_cap`. It spills to spill-store `spill` whenever
     // the memory `budget` of the host, less its fixed allocation cost
-    // `fixed_bytes` cannot hold some data.
+    // `fixed_bytes` cannot hold some data. The elastic RAM-tier starts with
+    // what the partitions' residency plan leaves of the budget.
     Partition_Backend(const std::vector<idx_t>& P_cap, idx_t chunk_cap, Spill_Store& spill, std::size_t budget, std::size_t fixed_bytes, p_id_t p);
 
     Partition_Backend(const Partition_Backend&) = delete;
@@ -124,6 +125,13 @@ public:
     // Returns the fixed RAM-budget (in bytes) required by the backend for `p`
     // partitions. Currently: the block-overflow buffers for the messages.
     static std::size_t fixed_budget(p_id_t p);
+
+    // Raises the cap of the elastic RAM-tier by `b` bytes, freed from some
+    // fixed allocation.
+    void raise_cap(const std::size_t b) { budget_.raise_cap(b); }
+
+    // Returns the host-memory budget of the elastic RAM-tier.
+    const auto& budget() const { return budget_; }
 
     // Returns the count of partitions.
     auto p() const { return p_; }
