@@ -105,7 +105,7 @@ membind() { if [ -n "${BIND}" ]; then numactl --membind="$1" "${@:2}"; else "${@
 # Build in-job, for the node's own toolchain.
 ARCH="${HWPROBE_ARCH:-sm_120}"
 nvcc -O3 -std=c++17 -arch="${ARCH}" "${HP}/gpu_memory.cu" -o "${OUT}/bin/gpu_memory" \
-    && nvcc -O3 -std=c++17 -arch="${ARCH}" -Xcompiler -pthread "${HP}/pinned_host.cu" -o "${OUT}/bin/pinned_host" \
+    && nvcc -O3 -std=c++17 -arch="${ARCH}" -Xcompiler -pthread "${HP}/pinned_host.cu" -lcuda -o "${OUT}/bin/pinned_host" \
     && g++ -O3 -std=c++17 -march=native -pthread "${HP}/host_memory.cpp" -o "${OUT}/bin/host_memory" \
     || { echo "FATAL: build failed"; exit 1; }
 
