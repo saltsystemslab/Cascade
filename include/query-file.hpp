@@ -212,6 +212,32 @@ inline bool write_counts(const std::string& path, const SA_Interval* const I, co
 }
 
 
+// Writes the counts `c[0, q)` as a `.cnt` file at `path`. Returns `false` on
+// failure.
+inline bool write_counts(const std::string& path, const uint64_t* const c, const uint64_t q)
+{
+    auto* const f = std::fopen(path.c_str(), "wb");
+    if(f == nullptr)
+        return false;
+
+    const bool ok = (q == 0 || std::fwrite(c, sizeof(uint64_t), q, f) == q);
+    return std::fclose(f) == 0 && ok;
+}
+
+
+// Folds the little-endian bytes of the count `c` into the FNV-1a hash `h`.
+inline uint64_t fnv1a_count(uint64_t h, const uint64_t c)
+{
+    for(int b = 0; b < 8; ++b)
+    {
+        h ^= (c >> (8 * b)) & 0xFF;
+        h *= 0x100000001b3ull;
+    }
+
+    return h;
+}
+
+
 // Returns the 64-bit FNV-1a hash of the bytes of the `.cnt` representation of
 // the intervals `I[0, q)`, i.e. of the little-endian `uint64_t` counts. Equals
 // the FNV-1a hash of the `.cnt` file's content, so that engines' results can be
@@ -220,14 +246,19 @@ inline uint64_t counts_hash(const SA_Interval* const I, const uint64_t q)
 {
     uint64_t h = 0xcbf29ce484222325ull;
     for(uint64_t i = 0; i < q; ++i)
-    {
-        const uint64_t c = I[i].hi - I[i].lo;
-        for(int b = 0; b < 8; ++b)
-        {
-            h ^= (c >> (8 * b)) & 0xFF;
-            h *= 0x100000001b3ull;
-        }
-    }
+        h = fnv1a_count(h, I[i].hi - I[i].lo);
+
+    return h;
+}
+
+
+// Returns the 64-bit FNV-1a hash of the `.cnt` representation of the counts
+// `c[0, q)`, as `counts_hash` of intervals does.
+inline uint64_t counts_hash(const uint64_t* const c, const uint64_t q)
+{
+    uint64_t h = 0xcbf29ce484222325ull;
+    for(uint64_t i = 0; i < q; ++i)
+        h = fnv1a_count(h, c[i]);
 
     return h;
 }
