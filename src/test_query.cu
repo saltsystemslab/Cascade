@@ -1,14 +1,18 @@
 
 // Test runner of the query engine: fixtures across symbol widths, edge cases,
-// and oracles. Exits `0` iff every test passes. Host-side tests only need a C++
-// compiler; device-side tests are compiled under `nvcc` alone.
+// and oracles, host-side and on the device. Exits `0` iff every test passes;
+// the device tests are skipped without a device.
 
 #include "CPU_Reference.hpp"
 #include "Index_Meta.hpp"
+#include "Query_Engine.hpp"
+#include "Suffix_Index.hpp"
 #include "query-file.hpp"
 #include "query_tests.hpp"
 #include "sa40.hpp"
-#include "Suffix_Index.hpp"
+#include "utility.cuh"
+
+#include <cuda_runtime.h>
 
 #include <unistd.h>
 
@@ -202,25 +206,20 @@ std::vector<T_sym_> random_text(const idx_t n, const std::vector<T_sym_>& alpha,
 }
 
 
-// Checks the oracle `ref::find_one`, the certificate, and the batch validator on
-// a fixture text `T`, against the suffix-array-free `brute_find`.
+// Returns in `off` and `sym` a batch of `count` fixture queries over the text `T`
+// of the symbols `alpha`: substrings, possibly running past the text's end,
+// random patterns, mutated substrings, and zero-tails.
 template <typename T_sym_>
-bool check_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const char* const what)
+void fixture_queries(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, std::mt19937_64& rng, const int count,
+                     std::vector<uint64_t>& off, std::vector<T_sym_>& sym)
 {
     const idx_t n = T.size();
-    const auto SA = test::build_sa40(T);
-
-    std::string err;
-    const auto sa = [&](const idx_t r) { return sa40::load(SA.data(), r); };
-    CHECK(ref::spot_check_sa_order(T.data(), n, sa, n, n, seed, err), "%s: %s", what, err.c_str());
-
-    std::mt19937_64 rng(seed);
-    std::vector<uint64_t> off = {0};
-    std::vector<T_sym_> sym;
+    off.assign(1, 0);
+    sym.clear();
     const auto push = [&](const std::vector<T_sym_>& P) { sym.insert(sym.end(), P.begin(), P.end()); off.push_back(sym.size()); };
 
     const idx_t lens[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 100};
-    for(int k = 0; k < 400; ++k)
+    for(int k = 0; k < count; ++k)
     {
         const idx_t m = lens[rng() % (sizeof(lens) / sizeof(lens[0]))];
         const idx_t pos = rng() % n;
@@ -259,6 +258,25 @@ bool check_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alph
 
         push(P);
     }
+}
+
+
+// Checks the oracle `ref::find_one`, the certificate, and the batch validator on
+// a fixture text `T`, against the suffix-array-free `brute_find`.
+template <typename T_sym_>
+bool check_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const char* const what)
+{
+    const idx_t n = T.size();
+    const auto SA = test::build_sa40(T);
+
+    std::string err;
+    const auto sa = [&](const idx_t r) { return sa40::load(SA.data(), r); };
+    CHECK(ref::spot_check_sa_order(T.data(), n, sa, n, n, seed, err), "%s: %s", what, err.c_str());
+
+    std::mt19937_64 rng(seed);
+    std::vector<uint64_t> off;
+    std::vector<T_sym_> sym;
+    fixture_queries(T, alpha, rng, 400, off, sym);
 
     const idx_t q = off.size() - 1;
     std::vector<SA_Interval> I(q);
@@ -419,6 +437,14 @@ bool test_spot_check()
 }
 
 
+// Returns `true` iff a CUDA device is available.
+bool gpu_available()
+{
+    int c = 0;
+    return cudaGetDeviceCount(&c) == cudaSuccess && c > 0;
+}
+
+
 // Writes into `dir` a query index of the text `T` with the padded suffix array
 // `SA`, the suffix array split into `parts` parts. Returns `false` with a reason
 // in `err` on failure.
@@ -440,6 +466,158 @@ bool write_index(const std::filesystem::path& dir, const std::vector<T_sym_>& T,
     }
 
     return index_meta::write(dir.string(), m, err);
+}
+
+
+// Returns the count of the intervals `I` of the batch `off`, `sym` that fail the
+// certificate on the device.
+template <typename T_sym_>
+unsigned long long device_certify(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t>& off, const std::vector<T_sym_>& sym,
+                                  const std::vector<SA_Interval>& I)
+{
+    const idx_t q = I.size();
+    uint64_t* off_d = nullptr;
+    T_sym_* sym_d = nullptr;
+    SA_Interval* I_d = nullptr;
+    unsigned long long* flags_d = nullptr;
+    unsigned long long flags[2] = {0, q};
+    CUDA_CHECK(cudaMalloc(&off_d, off.size() * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&sym_d, std::max<std::size_t>(sym.size(), 1) * sizeof(T_sym_)));
+    CUDA_CHECK(cudaMalloc(&I_d, std::max<idx_t>(q, 1) * sizeof(SA_Interval)));
+    CUDA_CHECK(cudaMalloc(&flags_d, sizeof(flags)));
+    CUDA_CHECK(cudaMemcpy(off_d, off.data(), off.size() * sizeof(uint64_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(sym_d, sym.data(), sym.size() * sizeof(T_sym_), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(I_d, I.data(), q * sizeof(SA_Interval), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(flags_d, flags, sizeof(flags), cudaMemcpyHostToDevice));
+
+    eng.certify_async(off_d, sym_d, q, I_d, flags_d, flags_d + 1, 0);
+    CUDA_CHECK(cudaMemcpy(flags, flags_d, sizeof(flags), cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaFree(off_d));
+    CUDA_CHECK(cudaFree(sym_d));
+    CUDA_CHECK(cudaFree(I_d));
+    CUDA_CHECK(cudaFree(flags_d));
+    return flags[0];
+}
+
+
+// Checks the device engine against the oracle on the fixture text `T` of the
+// symbols `alpha`, in every device-accessible placement, with the suffix array
+// in `parts` parts; and that the device certificate accepts its intervals and
+// rejects perturbed ones.
+template <typename T_sym_>
+bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const idx_t parts,
+                       const char* const what)
+{
+    const auto dir = scratch_dir("gpu");
+    const auto SA = test::build_sa40(T);
+    std::string err;
+    CHECK(write_index(dir, T, SA, parts, err), "%s: %s", what, err.c_str());
+
+    std::mt19937_64 rng(seed);
+    std::vector<uint64_t> off;
+    std::vector<T_sym_> sym;
+    fixture_queries(T, alpha, rng, 400, off, sym);
+    const idx_t q = off.size() - 1, n = T.size();
+    std::vector<SA_Interval> want(q), got(q);
+    for(idx_t i = 0; i < q; ++i)
+        want[i] = ref::find_one(T.data(), n, SA.data(), sym.data() + off[i], off[i + 1] - off[i]);
+
+    for(const auto text_res : {Residency::device, Residency::pinned})
+        for(const auto sa_res : {Residency::device, Residency::pinned})
+        {
+            const std::string where = std::string(what) + " (text " + residency_name(text_res) + ", suffix array " + residency_name(sa_res) + ")";
+            Query_Engine<T_sym_> eng;
+            CHECK(eng.load(dir.string(), Query_Options{text_res, sa_res, 100000}, err), "%s: %s", where.c_str(), err.c_str());
+            std::fill(got.begin(), got.end(), SA_Interval{~uint64_t(0), ~uint64_t(0)});
+            eng.find(off.data(), sym.data(), q, got.data());
+            for(idx_t i = 0; i < q; ++i)
+                CHECK(same(got[i], want[i]), "%s: query %" PRIu64 ": device [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")",
+                      where.c_str(), i, got[i].lo, got[i].hi, want[i].lo, want[i].hi);
+
+            CHECK(device_certify(eng, off, sym, got) == 0, "%s: the device certificate rejects correct intervals", where.c_str());
+            auto wrong = got;
+            idx_t perturbed = 0;
+            for(auto& I : wrong)
+                if(I.hi < n)
+                    ++I.hi, ++perturbed;
+            CHECK(device_certify(eng, off, sym, wrong) == perturbed, "%s: the device certificate accepts perturbed intervals", where.c_str());
+        }
+
+    return true;
+}
+
+
+bool test_gpu_find()
+{
+    std::mt19937_64 rng(7);
+    for(const idx_t n : {1, 2, 3, 17, 1000, 20000})
+    {
+        const idx_t parts = (SA_WIDTH * n >= 2 * SA_PAGE_BYTES ? 2 : 1);   // Parts are page-aligned.
+        for(const idx_t sigma : {2, 4, 65536})
+        {
+            std::vector<uint16_t> alpha;
+            for(idx_t s = 0; s < sigma; ++s)
+                alpha.push_back(static_cast<uint16_t>(sigma == 65536 ? s : (s * 65535) / (sigma - 1)));
+            const auto T = random_text<uint16_t>(n, alpha, 0xFFFF, 50, rng);
+            const std::string what = "u16 n=" + std::to_string(n) + " sigma=" + std::to_string(sigma);
+            if(!check_gpu_fixture(T, alpha, rng(), parts, what.c_str()))   return false;
+        }
+
+        {
+            const std::vector<uint8_t> alpha = {0, 1, 2, 0x7F, 0x80, 0xFE, 0xFF};
+            const auto T = random_text<uint8_t>(n, alpha, 0xFF, 40, rng);
+            if(!check_gpu_fixture(T, alpha, rng(), parts, ("u8 n=" + std::to_string(n)).c_str()))   return false;
+        }
+        {
+            const std::vector<uint32_t> alpha = {0, 1, 0x7FFFFFFFu, 0x80000000u, 0x80000001u, 0xFFFFFFFEu};
+            const auto T = random_text<uint32_t>(n, alpha, 0xFFFFFFFFu, 40, rng);
+            if(!check_gpu_fixture(T, alpha, rng(), parts, ("u32 n=" + std::to_string(n)).c_str()))   return false;
+        }
+    }
+
+    // Periodic text: deep common prefixes.
+    std::vector<uint16_t> T;
+    for(int i = 0; i < 3000; ++i)
+        T.push_back(static_cast<uint16_t>(i % 2 ? 7 : 3));
+
+    return check_gpu_fixture(T, {3, 7}, 13, 2, "u16 periodic (ab)^k");
+}
+
+
+bool test_gpu_rejects()
+{
+    // A little-endian `uint16_t` text on which byte order and numeric order disagree.
+    std::mt19937_64 rng(5);
+    std::vector<uint16_t> T(4000);
+    for(auto& x : T)
+        x = static_cast<uint16_t>(rng() % 4 == 0 ? 0x0100 : (rng() % 2 ? 0x0001 : 0x0201));
+
+    const auto SA = test::build_sa40(T);
+    const auto dir = scratch_dir("gpu-rejects");
+    std::string err;
+    Query_Engine<uint16_t> eng;
+
+    CHECK(write_index(dir, T, test::build_sa40_byte_order(T), 1, err), "%s", err.c_str());
+    CHECK(!eng.load(dir.string(), Query_Options{}, err), "a byte-order suffix array must be rejected at load");
+
+    auto swapped = SA;
+    const idx_t x = sa40::load(SA.data(), 100), y = sa40::load(SA.data(), 101);
+    sa40::store(swapped.data(), 100, y);
+    sa40::store(swapped.data(), 101, x);
+    CHECK(write_index(dir, T, swapped, 2, err), "%s", err.c_str());
+    CHECK(!eng.load(dir.string(), Query_Options{Residency::pinned, Residency::device, 100000}, err), "a swapped pair must be rejected at load");
+
+    CHECK(write_index(dir, T, SA, 1, err), "%s", err.c_str());
+    CHECK(eng.load(dir.string(), Query_Options{}, err), "%s", err.c_str());
+    Query_Engine<uint8_t> narrow;
+    CHECK(!narrow.load(dir.string(), Query_Options{}, err), "a symbol-width mismatch must be rejected");
+    CHECK(!eng.load(dir.string(), Query_Options{Residency::pageable, Residency::device, 0}, err), "a host-only placement must be rejected");
+
+    std::filesystem::resize_file(dir / "sa.u40.part0", SA_WIDTH * T.size() - 1);
+    CHECK(!eng.load(dir.string(), Query_Options{}, err), "a truncated suffix array must be rejected");
+
+    return true;
 }
 
 
@@ -485,21 +663,31 @@ int main()
         return 1;
     }
 
-    struct Test { const char* name; std::function<bool()> fn; };
+    struct Test { const char* name; std::function<bool()> fn; bool gpu; };
     const std::vector<Test> tests =
     {
-        {"sa40 round-trip",         test_sa40_round_trip},
-        {"query-file round-trip",   test_query_file_round_trip},
-        {"index-meta round-trip",   test_index_meta_round_trip},
-        {"oracle vs brute force",   test_oracle_random},
-        {"edge cases",              test_edge_cases},
-        {"order spot-check",        test_spot_check},
-        {"index load, host tiers",  test_index_host_tiers},
+        {"sa40 round-trip",         test_sa40_round_trip,       false},
+        {"query-file round-trip",   test_query_file_round_trip, false},
+        {"index-meta round-trip",   test_index_meta_round_trip, false},
+        {"oracle vs brute force",   test_oracle_random,         false},
+        {"edge cases",              test_edge_cases,            false},
+        {"order spot-check",        test_spot_check,            false},
+        {"index load, host tiers",  test_index_host_tiers,      false},
+        {"device find vs oracle",   test_gpu_find,              true},
+        {"device load rejects",     test_gpu_rejects,           true},
     };
 
-    int failed = 0;
+    const bool gpu = gpu_available();
+    int failed = 0, skipped = 0;
     for(const auto& t : tests)
     {
+        if(t.gpu && !gpu)
+        {
+            ++skipped;
+            std::fprintf(stderr, "[test_query] %-24s SKIP (no device)\n", t.name);
+            continue;
+        }
+
         const bool ok = t.fn();
         failed += !ok;
         std::fprintf(stderr, "[test_query] %-24s %s\n", t.name, ok ? "PASS" : "FAIL");
@@ -508,6 +696,6 @@ int main()
     std::error_code ec;
     std::filesystem::remove_all(std::filesystem::temp_directory_path() / ("gsa-test-query-" + std::to_string(::getpid())), ec);
 
-    std::fprintf(stderr, "[test_query] %d / %zu tests failed\n", failed, tests.size());
+    std::fprintf(stderr, "[test_query] %d / %zu tests failed, %d skipped\n", failed, tests.size(), skipped);
     return failed == 0 ? 0 : 1;
 }
