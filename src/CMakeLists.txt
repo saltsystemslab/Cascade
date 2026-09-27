@@ -31,8 +31,8 @@ add_executable(test test.cu)
 # baselines, and building this does not drag in the baselines' network fetches.
 add_executable(bench_gpu_saca bench_gpu_saca.cu)
 
-# Query engine: its core library and tests.
-add_library(query_core STATIC Suffix_Index.cu)
+# Query engine.
+add_library(query_core STATIC Suffix_Index.cu Query_Engine.cu)
 add_executable(test_query test_query.cu)
 
 
@@ -44,4 +44,5 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE}
 target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})
 target_include_directories(bench_gpu_saca PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 target_include_directories(query_core PRIVATE ${INCLUDE_DIR})
+target_include_directories(query PRIVATE ${INCLUDE_DIR})
 target_include_directories(test_query PRIVATE ${INCLUDE_DIR} ${TESTS_INCLUDE})

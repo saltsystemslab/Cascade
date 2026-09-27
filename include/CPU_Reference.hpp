@@ -77,6 +77,7 @@ inline SA_Interval find_one(const T_sym_* const T, const idx_t n, const uint8_t*
 // over the text `T[0, n)`, provided that the suffix array `SA` is sorted: it
 // checks the interval's boundary suffixes against `P`, in `O(m)` time.
 template <typename T_sym_>
+CUDA_SPECIFIER
 inline bool certify(const T_sym_* const T, const idx_t n, const uint8_t* const SA, const T_sym_* const P, const idx_t m, const SA_Interval& I)
 {
     if(I.lo > I.hi || I.hi > n)
