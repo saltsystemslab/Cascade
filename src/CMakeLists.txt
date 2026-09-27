@@ -12,6 +12,7 @@ set(PROJECT_SRC
         Spill_Store.cpp
         Disk_Backend.cpp
         RAM_Backend.cpp
+        Message_Pool.cpp
         Partition_Backend.cpp
         Residency_Plan.cpp
         Pipeline_Probe.cpp

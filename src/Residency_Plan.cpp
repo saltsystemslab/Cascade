@@ -13,6 +13,8 @@ namespace gpu_saca
 
 Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_t budget, const std::size_t fixed_bytes):
       data_(P_cap.size(), 0)
+    , force_spill_(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) != 0)
+    , data_resident_(0)
 {
     constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
 
@@ -25,8 +27,7 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
     constexpr auto data_elem_bytes = sizeof(idx_t) + sizeof(p_sz_t);    // Per-suffix cost of a partition's content: suffix index and local rank.
 
     auto available = budget - fixed_bytes;
-    std::size_t data_resident = 0;
-    if(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) == 0)   // `GPU_SACA_FORCE_SPILL` spills all data regardless of the budget.
+    if(!force_spill_)   // `GPU_SACA_FORCE_SPILL` spills all data regardless of the budget.
     {
         // Admit as many partitions' data as the budget allows, largest-first.
         std::vector<p_id_t> order(P_cap.size());
@@ -37,7 +38,7 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
         {
             const auto sz = data_elem_bytes * P_cap[p_id];
             if(sz <= available)
-                data_[p_id] = 1, available -= sz, data_resident += sz;
+                data_[p_id] = 1, available -= sz, data_resident_ += sz;
         }
     }
 
@@ -46,9 +47,7 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_
     const auto data_c = std::count(data_.cbegin(), data_.cend(), 1);
         std::cerr << "Residency plan (budget: " << GB(budget) << "GBs, fixed: " << GB(fixed_bytes) << "GBs):\n"
               << "\tdata:   " << data_c << "/" << P_cap.size() << " partitions, "
-              << GB(data_resident) << "GBs resident, " << GB(n * data_elem_bytes - data_resident) << "GBs spilled.\n";
-#else
-    (void)data_resident;
+              << GB(data_resident_) << "GBs resident, " << GB(n * data_elem_bytes - data_resident_) << "GBs spilled.\n";
 #endif
 }
 

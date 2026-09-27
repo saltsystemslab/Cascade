@@ -30,6 +30,10 @@ enum class Spill_Role
     msg_rank_1, // Senders' ranks, parallel to `msg_tgt_1`.
 };
 
+// Count of spill-roles, i.e. the maximum count of spill-files a partition has
+// open at once.
+constexpr std::size_t SPILL_ROLE_C = static_cast<std::size_t>(Spill_Role::msg_rank_1) + 1;
+
 
 // Returns the message-target inbox role a generation with parity `parity`
 // writes to.

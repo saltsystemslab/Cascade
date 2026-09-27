@@ -54,6 +54,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
     , p_(0)
     , P_id(nullptr)
     , ctx_(0)
+    , slab_pin_time_(0)
     , workspace_sz(0)
 {
     if(n_ == 0)
@@ -89,6 +90,9 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
 template <typename T_sym_>
 GPU_SACA<T_sym_>::~GPU_SACA()
 {
+    if(slab_pinner_.joinable()) // The slab-pinner may still be alive if the build failed to reach its await.
+        slab_pinner_.join();
+
     util::deallocate(T_h_);
     util::deallocate(P_id);
 
@@ -164,13 +168,15 @@ void GPU_SACA<T_sym_>::build_SA()
         }
     }
 
-    // Prepare the partition-backend and allocate staging slabs bridging the backend to the device.
+    // Await allocation of the staging slab pool bridging the backend to the device.
     {
-        PROFILE_SCOPE("setup_staging");
-        setup_staging();
+        PROFILE_SCOPE("await_staging");
+        slab_pinner_.join();
     }
     const auto t_3 = now();
     build_timing_.device_setup = duration(t_3 - t_2);
+    std::cerr   << "Slab-pool pinning completed in the background. Time taken: " << slab_pin_time_ << "s"
+                << " (" << (slab_pool_memory() / (1024.0 * 1024.0 * 1024.0) / slab_pin_time_) << " GBs/s).\n";
     std::cerr << "Device-space allocated and staging-setup completed. Time taken: " << build_timing_.device_setup << "s.\n";
 
     {   PROFILE_SCOPE("initial_rank");              initial_rank();}
@@ -179,11 +185,15 @@ void GPU_SACA<T_sym_>::build_SA()
     std::cerr << "Initial ranking completed. Time taken: " << build_timing_.initial_rank << "s.\n";
 
     {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
+    backend_->raise_cap(n_ * sizeof(T_sym_));   // The text's space now goes to the backend's RAM-tier.
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_5 = now();
     build_timing_.exponentiate = duration(t_5 - t_4);
     std::cerr << "Prefix-exponentiation completed. Time taken: " << build_timing_.exponentiate << "s.\n";
+
+    // Free the inboxes' scratch-space ahead of the suffix array's output.
+    {   PROFILE_SCOPE("retire_messages");           backend_->retire_messages();    }
 
     {   PROFILE_SCOPE("drop_partition_IDs");        util::deallocate(P_id), P_id = nullptr;  }
 
@@ -547,9 +557,12 @@ void GPU_SACA<T_sym_>::setup_staging_config()
             chunk_cap_ = CHUNK_CAP;
         else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
         {
+            // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
             constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
-            static_assert(CHUNK_CAP % elems_per_disk_blk == 0, "`CHUNK_CAP` must be disk-block aligned.");
-            chunk_cap_ = ((P_sz_max + elems_per_disk_blk - 1) / elems_per_disk_blk) * elems_per_disk_blk;
+            constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
+            static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
+            static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
+            chunk_cap_ = ((P_sz_max + cap_granularity - 1) / cap_granularity) * cap_granularity;
         }
     }
 
@@ -656,13 +669,26 @@ void GPU_SACA<T_sym_>::partition()
             }
 
             setup_staging_config();
+            util::file::raise_open_files_limit(SPILL_ROLE_C * p_ + 64); // Spill-files of all partitions at once, plus slack for the rest of the process.
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, host_budget, fixed_budget(), p_);
+            backend_ = std::make_unique<Partition_Backend>(P_cap, chunk_cap_, *spill_, host_budget, fixed_budget(), p_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->spilled_suf(p_id)});
         }
+
+
+        // Pin the slab pool in the background, overlapped with the scatter.
+        slab_pinner_ = std::thread(
+            [this]
+            {
+                PROFILE_SCOPE("setup_staging");
+                const auto t_0 = timer::now();
+                setup_staging();
+                slab_pin_time_ = timer::duration(timer::now() - t_0);
+            }
+        );
 
 
         // Add suffix indices to their corresponding partitions (through the buffers).
@@ -693,6 +719,8 @@ void GPU_SACA<T_sym_>::partition()
         }
 #endif
     }
+
+    backend_->raise_cap(Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_));  // The scatter buffers' space now goes to the backend's RAM-tier.
 }
 
 
@@ -921,7 +949,7 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
 {
     ctx_ = ctx;
-    backend_->open_generation(gen);
+    backend_->open_generation(gen, Active_sz);
 
     cohort_sz.push_back(active_set_size());
 }
@@ -1384,12 +1412,21 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 #ifdef TESTS
                         {
                             idx_t read_msg = 0;
+                            uint64_t read_sum = 0;  // Order-independent checksum of the messages read.
                             for(auto* s : p_assembly->slab)
-                                read_msg += s->inbox_sz();
+                                read_msg += s->inbox_sz(),
+                                read_sum += test::message_checksum(s->msg_target(), s->msg_rank(), s->inbox_sz());
 
                             if(read_msg != backend_->inbox_size(p_id))
                             {
                                 std::cerr << "Read inbox size at current generation does not equal to written inbox size at previous generation. Aborting.\n";
+                                std::exit(EXIT_FAILURE);
+                            }
+
+                            // The size-check above is by construction, as the slabs' inbox sizes derive from `inbox_size`; this one is not.
+                            if(read_sum != backend_->inbox_checksum(p_id))
+                            {
+                                std::cerr << "Read inbox messages at current generation differ from the ones written at previous generation. Aborting.\n";
                                 std::exit(EXIT_FAILURE);
                             }
                         }
@@ -1743,13 +1780,6 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 template <typename T_sym_>
 void GPU_SACA<T_sym_>::exponentiate_prefix()
 {
-    // Open the inboxes that initial-ranking didn't need to write to.
-    {
-        PROFILE_SCOPE("open_deferred_inboxes");
-        backend_->open_deferred_inboxes();
-    }
-
-
     idx_t gen = 1;
     for(idx_t k = ell; k < n_; k *= 2, ++gen)
     {
@@ -1761,6 +1791,12 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             const idx_t active = active_set_size();
             std::cerr <<    "Total inbox-size for generation " << gen << ": " << msg_count << "; number of recipients: " << active_set_size() <<
                             ". Amplification: " << (static_cast<double>(msg_count) / active) << "x.\n";
+
+            // A line of its own, as the split between the tiers depends on timing, unlike the rest.
+            const idx_t disk_count = backend_->disk_mass_last_gen();
+            const auto& budget = backend_->budget();
+            std::cerr <<    "Inbox-tiers for generation " << gen << ": " << (msg_count - disk_count) << " messages in RAM, " << disk_count << " on disk."
+                            " RAM-tier: " << (budget.used() / (1024.0 * 1024.0 * 1024.0)) << "GBs charged, of " << (budget.cap() / (1024.0 * 1024.0 * 1024.0)) << "GBs cap.\n";
         }
 #endif
 
@@ -2027,6 +2063,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
                         {
                             INSTRUMENT_TIMER(probe::P().me().io_ns);
                             INSTRUMENT(probe::P().me().bytes += s->size() * sizeof(idx_t));
+                            INSTRUMENT(probe::P().me().disk_bytes += (dump ? s->size() * sizeof(idx_t) : 0));
 
                             // Drain the slab's suffixes.
                             if(dump)

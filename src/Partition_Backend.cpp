@@ -3,6 +3,7 @@
 #include "utility.hpp"
 #include "utility.cuh"
 #include "Pipeline_Probe.hpp"
+#include "tests.hpp"
 
 #include <cstring>
 #include <mutex>
@@ -13,11 +14,14 @@
 namespace gpu_saca
 {
 
-Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const std::size_t budget, const std::size_t fixed_bytes, const p_id_t p):
+Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_t chunk_cap, Spill_Store& spill, const std::size_t budget, const std::size_t fixed_bytes, const p_id_t p):
       p_(p)
     , plan_(P_cap, budget, fixed_bytes)
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
+    , budget_(budget - fixed_bytes - plan_.data_resident(), plan_.force_spill())
+    , msg_chunk_cap_(chunk_cap / MSG_CHUNKS_PER_SLAB)
+    , pool_(std::make_unique<Message_Pool>(msg_chunk_cap_, budget_.pinned() ? 0 : budget))
     , msg_off_(nullptr)
     , inbox_write_parity_(write_parity(0))
     , inbox_read_parity_(read_parity(0))
@@ -29,8 +33,15 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, Spill_Stor
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
 
     for(idx_t parity = 0; parity < 2; ++parity)
+    {
+        ram_inbox_[parity] = std::vector<util::Padded<RAM_Inbox>>(p_);
+        for(p_id_t p_id = 0; p_id < p_; ++p_id) // An inbox holds at most one message per suffix of its partition.
+            ram_inbox_[parity][p_id].unwrap().chunk.assign((P_cap[p_id] + msg_chunk_cap_ - 1) / msg_chunk_cap_, Message_Pool::NIL);
+
         msg_count_[parity] = std::vector<std::atomic<p_sz_t>>(p_),
-        msg_written_[parity] = std::vector<std::atomic<p_sz_t>>(p_);
+        msg_written_[parity] = std::vector<std::atomic<p_sz_t>>(p_),
+        msg_sum_[parity] = std::vector<std::atomic<uint64_t>>(p_);
+    }
 
     for(idx_t p_id = 0; p_id < p_; ++p_id)
         ov_tgt_[p_id] = util::aligned_allocate<idx_t>(OV_CAP, Direct_File::DISK_BLOCK),
@@ -53,9 +64,18 @@ std::size_t Partition_Backend::fixed_budget(const p_id_t p)
 }
 
 
-void Partition_Backend::open_deferred_inboxes()
+void Partition_Backend::retire_messages()
 {
-    disk_.open_deferred_inboxes();
+    // No inbox is read or written onward: return the RAM-parts' memory, and the disk-parts' scratch-space.
+    for(std::size_t parity = 0; parity < 2; ++parity)
+        for(auto& in : ram_inbox_[parity])
+            release_inbox(in.unwrap());
+
+    const auto pool_bytes = std::size_t(pool_->carved()) * pool_->chunk_bytes();  // All free, and charged.
+    budget_.unpool(pool_bytes), budget_.uncharge(pool_bytes);
+    pool_.reset();
+
+    disk_.retire_inboxes();
 }
 
 
@@ -76,6 +96,7 @@ void Partition_Backend::read_suffixes(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * sizeof(idx_t));
+    INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * sizeof(idx_t)));
 
     read_suf_chunk(s.p_id(), s.off(), s.size(), s.suf());
 }
@@ -89,6 +110,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
     {
         INSTRUMENT_TIMER(probe::P().me().io_ns);
         INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
+        INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * (sizeof(idx_t) + sizeof(p_sz_t))));
         read_chunk(s.p_id(), s.off(), s.size(), suf, key);
     }
 }
@@ -108,12 +130,34 @@ void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx
 }
 
 
-void Partition_Backend::read_messages(Staging_Slab& s) const
+void Partition_Backend::read_messages(Staging_Slab& s)
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.inbox_sz() * MESSAGE_BYTES);
 
-    disk_.read_messages(s.p_id(), s.inbox_off(), s.inbox_sz(), s.msg_target(), s.msg_rank());
+    const auto p_id = s.p_id();
+    auto& in = ram_inbox_[inbox_read_parity_][p_id].unwrap();
+    const p_sz_t lo = s.inbox_off(), hi = lo + s.inbox_sz(), n_r = in.count; // This slab holds the inbox's range `[lo, hi)`.
+
+    // The RAM-portion `[lo, min(hi, n_r))`: whole message-chunks, as `lo` is a multiple of the slab-capacity; only this slab spans them.
+    for(p_sz_t from = lo; from < std::min(hi, n_r); from += msg_chunk_cap_)
+    {
+        const auto c = in.chunk[from / msg_chunk_cap_];
+        const auto len = std::min<p_sz_t>(std::min(hi, n_r) - from, msg_chunk_cap_);
+        std::memcpy(s.msg_target() + (from - lo), pool_->tgt(c), len * sizeof(idx_t));
+        std::memcpy(s.msg_rank() + (from - lo), pool_->rank(c), len * sizeof(msg_rank_t));
+
+        release_msg_chunk(c), in.chunk[from / msg_chunk_cap_] = Message_Pool::NIL;
+    }
+
+    // The disk-portion `[max(lo, n_r), hi)`. Its file-offset `from - n_r` and slab-offset `from - lo` are both `MSG_ALIGN`-aligned, as
+    // is `lo`, and as is `n_r` whenever the disk-part exists. The disk-read's block-rounding spills past `hi`, never over the RAM-portion.
+    if(hi > n_r)
+    {
+        const auto from = std::max(lo, n_r);
+        INSTRUMENT(probe::P().me().disk_bytes += (hi - from) * MESSAGE_BYTES);
+        disk_.read_messages(p_id, from - n_r, hi - from, s.msg_target() + (from - lo), s.msg_rank() + (from - lo));
+    }
 }
 
 
@@ -121,6 +165,7 @@ void Partition_Backend::write(const Staging_Slab& s)
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
+    INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * (sizeof(idx_t) + sizeof(p_sz_t))));
 
     const auto p_id = s.p_id();
     const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
@@ -142,19 +187,130 @@ void Partition_Backend::write_messages(const Staging_Slab& s)
     if(l_slab >= r_slab)
         return;
 
-    for(p_id_t q = 0; q < p_; ++q)
+    // Without a RAM-tier, all messages go to the inbox-files, in destination-order. Otherwise they go to the RAM-parts first, visiting
+    // the destinations from a rotating start, so that the concurrent writers do not contend over them in lockstep.
+    const bool to_ram = (budget_.cap() > 0);
+    auto spare = Message_Pool::NIL; // Message-chunk acquired for this slab's messages, but not installed yet.
+    for(p_id_t i = 0; i < p_; ++i)
     {
+        const p_id_t q = (to_ram ? (p_id + i) % p_ : i);
+
         // `q` is the destination for the slice `[l_q, r_q)` of messages from `p_id`.
         const auto l_q = (q > 0 ? msg_off[q - 1] : 0), r_q = msg_off[q];
         const auto l = std::max(l_slab, l_q), r = std::min(r_slab, r_q); // Intersect the slab's slice with the `q`-destined slice.
         if(l < r)
-            append_messages(q, s, l, r);
+        {
+#ifdef TESTS
+            msg_sum_[inbox_write_parity_][q].fetch_add(test::message_checksum(s.msg_target() + (l - l_slab), s.msg_rank() + (l - l_slab), r - l), std::memory_order_relaxed);
+#endif
+            const p_sz_t in_ram = (to_ram ? append_ram(q, s, l, r, spare) : 0);  // Prefix of the slice appended to the RAM-part.
+            if(l + in_ram < r)
+                append_messages(q, s, l + in_ram, r);
+        }
     }
+
+    if(spare != Message_Pool::NIL)
+        release_msg_chunk(spare);
+}
+
+
+p_sz_t Partition_Backend::append_ram(const p_id_t p_id, const Staging_Slab& s, const p_sz_t l, const p_sz_t r, Message_Pool::chunk_t& spare)
+{
+    auto& in = ram_inbox_[inbox_write_parity_][p_id].unwrap();
+    p_sz_t done = 0;    // Length of the prefix of `[l, r)` appended so far.
+    while(l + done < r)
+    {
+        p_sz_t pos, take;   // Reserve the RAM-part's range `[pos, pos + take)` for the next messages.
+        {
+            const std::lock_guard<util::Spin_Lock> lock(in.lock);
+            if(in.count == in.chunk_c * msg_chunk_cap_ && spare != Message_Pool::NIL && in.chunk_c < in.chunk.size())    // The open chunk is full: install the spare.
+                in.chunk[in.chunk_c++] = spare, spare = Message_Pool::NIL;
+
+            pos = in.count;
+            take = std::min<p_sz_t>(r - (l + done), in.chunk_c * msg_chunk_cap_ - in.count);
+            in.count += take;
+        }
+
+        if(take == 0)   // No room: acquire a spare message-chunk outside the lock, or leave the rest to the disk-part.
+        {
+            if(spare != Message_Pool::NIL)  // All the chunk-slots are installed and full; impossible by the injectivity of the messages.
+            {
+#ifdef TESTS
+                std::cerr << "RAM-part of inbox " << p_id << " overflows its partition's capacity. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+#endif
+                break;
+            }
+
+            if((spare = acquire_msg_chunk()) == Message_Pool::NIL)  // The budget is exhausted.
+                break;
+
+            continue;
+        }
+
+        copy_in(in, pos, s, l + done, take);
+        done += take;
+    }
+
+    return done;
+}
+
+
+void Partition_Backend::copy_in(const RAM_Inbox& in, p_sz_t pos, const Staging_Slab& s, p_sz_t from, p_sz_t sz)
+{
+    // The reserved range's chunks were installed under the lock that reserved it, hence visible here.
+    const auto base = s.outbox_off();   // `s` contains the index-range `[base, base + s.outbox_sz())` of the source-partition's outbox.
+    while(sz > 0)
+    {
+        const auto c = in.chunk[pos / msg_chunk_cap_];
+        const p_sz_t o = pos % msg_chunk_cap_;
+        const auto len = std::min<p_sz_t>(sz, msg_chunk_cap_ - o);
+        std::memcpy(pool_->tgt(c) + o, s.msg_target() + (from - base), len * sizeof(idx_t));
+        std::memcpy(pool_->rank(c) + o, s.msg_rank() + (from - base), len * sizeof(msg_rank_t));
+
+        pos += len, from += len, sz -= len;
+    }
+}
+
+
+Message_Pool::chunk_t Partition_Backend::acquire_msg_chunk()
+{
+    if(const auto c = pool_->take_free(); c != Message_Pool::NIL)  // Free chunks are resident, and charged already.
+        return budget_.unpool(pool_->chunk_bytes()), c;
+
+    if(!budget_.try_charge(pool_->chunk_bytes()))
+        return Message_Pool::NIL;
+
+    const auto c = pool_->take_new();
+    if(c == Message_Pool::NIL)  // The pool's reservation is exhausted; impossible while it covers the cap.
+        budget_.uncharge(pool_->chunk_bytes());
+
+    return c;
+}
+
+
+void Partition_Backend::release_msg_chunk(const Message_Pool::chunk_t c)
+{
+    pool_->give_back(c);
+    budget_.pool(pool_->chunk_bytes());
+}
+
+
+void Partition_Backend::release_inbox(RAM_Inbox& in)
+{
+    for(p_sz_t k = 0; k < in.chunk_c; ++k)
+        if(in.chunk[k] != Message_Pool::NIL)
+            release_msg_chunk(in.chunk[k]), in.chunk[k] = Message_Pool::NIL;
+
+    in.count = 0, in.chunk_c = 0;
 }
 
 
 void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s, const p_sz_t l, const p_sz_t r)
 {
+    INSTRUMENT(probe::P().me().disk_bytes += (r - l) * MESSAGE_BYTES);
+    disk_.ensure_inbox(p_id);   // The only entry for messages to the inbox-files, the degenerate buffering-only case included.
+
     const auto parity = inbox_write_parity_;
     msg_count_[parity][p_id].fetch_add(r - l, std::memory_order_relaxed);
 
@@ -221,7 +377,7 @@ void Partition_Backend::flush_overflow(const p_id_t p_id, const bool final)
 }
 
 
-void Partition_Backend::open_generation(const idx_t gen)
+void Partition_Backend::open_generation(const idx_t gen, const std::vector<idx_t>& Active_sz)
 {
     inbox_write_parity_ = write_parity(gen), inbox_read_parity_ = read_parity(gen);
     disk_.set_generation(gen);
@@ -230,17 +386,50 @@ void Partition_Backend::open_generation(const idx_t gen)
     std::memset(msg_off_, 0, p_ * p_* sizeof(p_sz_t));
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
-        msg_count_[parity][p_id] = 0, msg_written_[parity][p_id] = 0;
+        // This parity was read at the preceding generation: consumed whole by its readers, or released at the generation's start.
+        auto& in = ram_inbox_[parity][p_id].unwrap();
+#ifdef TESTS
+        if(std::any_of(in.chunk.cbegin(), in.chunk.cbegin() + in.chunk_c, [](const auto c){ return c != Message_Pool::NIL; }))
+        {
+            std::cerr << "RAM-part of inbox " << p_id << " was left unread at the preceding generation. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+#endif
+        release_inbox(in);
+        msg_count_[parity][p_id] = 0, msg_written_[parity][p_id] = 0, msg_sum_[parity][p_id] = 0;
         ov_sz_[p_id] = 0;
+
+        if(Active_sz[p_id] == 0)    // The partition is not processed at this generation, so its inbox is never read.
+            release_inbox(ram_inbox_[inbox_read_parity_][p_id].unwrap());
     }
 }
 
 
 void Partition_Backend::close_generation()
 {
+    const auto parity = inbox_write_parity_;
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
     {
+        auto& in = ram_inbox_[parity][p_id].unwrap();
         const std::lock_guard<util::Spin_Lock> lock(ov_lock_[p_id]);
+
+        // With a disk-part present, the RAM-part's trailing `count mod MSG_ALIGN` messages move to the disk-part, through its block-
+        // overflow buffer, so that the disk-part's reads stay aligned. They all lie in the last chunk, as chunks hold whole `MSG_ALIGN`-
+        // groups; and the buffer has room, as it keeps `2 * MSG_ALIGN` free past any addition.
+        const p_sz_t trail = in.count % MSG_ALIGN;
+        if(msg_count_[parity][p_id] > 0 && trail > 0)
+        {
+            const auto from = in.count - trail;
+            const auto c = in.chunk[from / msg_chunk_cap_];
+            const p_sz_t o = from % msg_chunk_cap_;
+            std::memcpy(ov_tgt_[p_id] + ov_sz_[p_id], pool_->tgt(c) + o, trail * sizeof(idx_t));
+            std::memcpy(ov_rank_[p_id] + ov_sz_[p_id], pool_->rank(c) + o, trail * sizeof(msg_rank_t));
+            ov_sz_[p_id] += trail, msg_count_[parity][p_id] += trail, in.count = from;
+
+            if(o == 0)  // The last chunk emptied.
+                release_msg_chunk(c), in.chunk[--in.chunk_c] = Message_Pool::NIL;
+        }
+
         flush_overflow(p_id, true);
     }
 }
@@ -248,16 +437,25 @@ void Partition_Backend::close_generation()
 
 p_sz_t Partition_Backend::inbox_size(const p_id_t p_id) const
 {
-    return msg_count_[inbox_read_parity_][p_id];
+    return ram_inbox_[inbox_read_parity_][p_id].unwrap().count + msg_count_[inbox_read_parity_][p_id];
 }
 
 
 idx_t Partition_Backend::inbox_mass_last_gen() const
 {
-    const auto parity = inbox_write_parity_;
     idx_t sz = 0;
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        sz += msg_count_[parity][p_id];
+        sz += msg_count(p_id);
+
+    return sz;
+}
+
+
+idx_t Partition_Backend::disk_mass_last_gen() const
+{
+    idx_t sz = 0;
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        sz += disk_count(p_id);
 
     return sz;
 }

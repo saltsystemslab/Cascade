@@ -107,7 +107,7 @@ void Pipeline_Probe::report_role(const Role r) const
         const auto& s = *w_[base_[r_i] + i];
         t.io_ns += s.io_ns, t.stage_ns += s.stage_ns, t.device_ns += s.device_ns;
         t.wait_in_ns += s.wait_in_ns, t.wait_slab_ns += s.wait_slab_ns;
-        t.items += s.items, t.bytes += s.bytes;
+        t.items += s.items, t.bytes += s.bytes, t.disk_bytes += s.disk_bytes;
     }
 
     const double denom = static_cast<double>(pipeline_ns_) * n; // The pool's aggregate thread-time.
@@ -115,12 +115,13 @@ void Pipeline_Probe::report_role(const Role r) const
     const double idle = 100.0 - pct(t.busy_ns()) - pct(t.wait_in_ns) - pct(t.wait_slab_ns);
     const double sec = static_cast<double>(pipeline_ns_) / 1e9;
 
-    std::fprintf(stderr, "  %-11s %4zu  %6.1f %6.1f %6.1f  %7.1f %6.1f %7.1f  %11llu %9.1f %7.2f\n",
+    std::fprintf(stderr, "  %-11s %4zu  %6.1f %6.1f %6.1f  %7.1f %6.1f %7.1f  %11llu %9.1f %9.1f %7.2f\n",
                     role_name(r), n,
                     pct(t.io_ns), pct(t.stage_ns), pct(t.device_ns),
                     pct(t.wait_in_ns), pct(t.wait_slab_ns), idle,
                     static_cast<unsigned long long>(t.items),
                     static_cast<double>(t.bytes) / 1e9,
+                    static_cast<double>(t.disk_bytes) / 1e9,
                     sec > 0.0 ? static_cast<double>(t.bytes) / 1e9 / sec : 0.0);
 }
 
@@ -164,8 +165,8 @@ void Pipeline_Probe::report_log() const
                     static_cast<unsigned long long>(active_));
     std::fprintf(stderr, "  drive_pipeline wall  %10.3f s\n\n", double(pipeline_ns_) / 1e9);
 
-    std::fprintf(stderr, "  %-11s %4s  %6s %6s %6s  %7s %6s %7s  %11s %9s %7s\n",
-                    "role", "n", "io%", "stage%", "dev%", "waitIn%", "waitF%", "idle%", "items", "GB", "GB/s");
+    std::fprintf(stderr, "  %-11s %4s  %6s %6s %6s  %7s %6s %7s  %11s %9s %9s %7s\n",
+                    "role", "n", "io%", "stage%", "dev%", "waitIn%", "waitF%", "idle%", "items", "GB", "diskGB", "GB/s");
     for(std::size_t r = 0; r < ROLE_C; ++r)
         report_role(static_cast<Role>(r));
 

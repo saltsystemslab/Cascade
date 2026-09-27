@@ -79,6 +79,7 @@ namespace gpu_saca::util
 
 constexpr std::size_t L1_CACHE_LINE_SIZE = 64;
 constexpr std::size_t PAGE_SIZE = 4096;
+constexpr std::size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;
 
 
 // Wrapper class for a data-element of type `T_` to ensure that in a linear
@@ -202,6 +203,15 @@ void prepage(T_* const ptr, const std::size_t size)
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
 
+// Returns a reservation of `bytes` bytes of address-space, `HUGE_PAGE_SIZE`-
+// aligned and backed by physical memory only when touched; `nullptr` for empty
+// reservations. The reservation opts into transparent huge pages iff the env
+// var `GPU_SACA_MADV_HUGEPAGE` is non-zero.
+void* reserve_memory(std::size_t bytes);
+
+// Releases the reservation `ptr` of `bytes` bytes, made with `reserve_memory`.
+void unreserve_memory(void* ptr, std::size_t bytes);
+
 // Returns from `/proc/self/smaps` (pseudo-file with memory consumption metrics
 // for each memory mapping), for the memory mapping containing the address `p`,
 // `(RSS-bytes, THP-bytes)`. Both are `0` if not found.
@@ -312,6 +322,10 @@ void exit_on_io_failure(const char* op, const std::string& path);
 // `fd`, opened at path `path`. Additionally queues the bytes for writeback, so
 // that dirty pages do not pile up from a long output-stream.
 void write_and_flush(int fd, const std::string& path, const void* buf, std::size_t bytes, std::size_t off);
+
+// Raises the soft limit on the process's open files to the hard limit, if the
+// soft limit falls below `required`. Aborts if the hard limit falls below it.
+void raise_open_files_limit(std::size_t required);
 
 }
 

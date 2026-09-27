@@ -15,8 +15,9 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
 {
     const auto p = P_cap_.size();
     suf_.reserve(p), key_.reserve(p);
-    for(std::size_t parity = 0; parity < 2; ++parity)
-        msg_tgt_[parity].reserve(p), msg_rank_[parity].reserve(p);
+    for(std::size_t parity = 0; parity < 2; ++parity)   // Inbox-files are opened lazily, at their first write.
+        msg_tgt_[parity].resize(p), msg_rank_[parity].resize(p),
+        inbox_open_[parity] = std::make_unique<std::once_flag[]>(p);
 
     for(p_id_t p_id = 0; p_id < p; ++p_id)
     {
@@ -29,40 +30,32 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
             suf_.emplace_back(spill.open(p_id, Spill_Role::suf, Direct_File::Mode::read_write));
             suf_.back().preallocate(P_cap_[p_id] * sizeof(idx_t));
         }
-
-
-        // Open the inbox-files with parity that generation 0 writes to; opening
-        // of the inboxes with the other parity is deferred until prefix-
-        // exponentiation, the first phase writing to them.
-        {
-            constexpr auto parity = write_parity(0);
-            msg_tgt_[parity].emplace_back(spill.open(p_id, msg_tgt_role(parity), Direct_File::Mode::read_write));
-            msg_rank_[parity].emplace_back(spill.open(p_id, msg_rank_role(parity), Direct_File::Mode::read_write));
-
-            const auto cap = P_cap_[p_id] + MSG_ALIGN;
-            msg_tgt_[parity].back().preallocate(cap * sizeof(idx_t));
-            msg_rank_[parity].back().preallocate(cap * sizeof(msg_rank_t));
-
-            msg_tgt_[parity ^ 1].emplace_back(), msg_rank_[parity ^ 1].emplace_back();
-        }
     }
 }
 
 
-void Disk_Backend::open_deferred_inboxes()
+void Disk_Backend::ensure_inbox(const p_id_t p_id)
 {
-    const auto p = P_cap_.size();
-    constexpr auto parity = write_parity(1);
+    const auto parity = write_parity_;
+    std::call_once(inbox_open_[parity][p_id],   // An inbox-file is opened once, and never re-assigned: concurrent writes may be using it.
+        [&]
+        {
+            msg_tgt_[parity][p_id] = spill_->open(p_id, msg_tgt_role(parity), Direct_File::Mode::read_write);
+            msg_rank_[parity][p_id] = spill_->open(p_id, msg_rank_role(parity), Direct_File::Mode::read_write);
 
-    for(p_id_t p_id = 0; p_id < p; ++p_id)
-    {
-        msg_tgt_[parity][p_id] = spill_->open(p_id, msg_tgt_role(parity), Direct_File::Mode::read_write);
-        msg_rank_[parity][p_id] = spill_->open(p_id, msg_rank_role(parity), Direct_File::Mode::read_write);
+            const auto cap = P_cap_[p_id] + MSG_ALIGN;
+            msg_tgt_[parity][p_id].preallocate(cap * sizeof(idx_t));
+            msg_rank_[parity][p_id].preallocate(cap * sizeof(msg_rank_t));
+        }
+    );
+}
 
-        const auto cap = P_cap_[p_id] + MSG_ALIGN;
-        msg_tgt_[parity][p_id].preallocate(cap * sizeof(idx_t));
-        msg_rank_[parity][p_id].preallocate(cap * sizeof(msg_rank_t));
-    }
+
+void Disk_Backend::retire_inboxes()
+{
+    for(std::size_t parity = 0; parity < 2; ++parity)
+        for(std::size_t p_id = 0; p_id < P_cap_.size(); ++p_id)
+            msg_tgt_[parity][p_id].unlink(), msg_rank_[parity][p_id].unlink();  // No-op for inbox-files never opened.
 }
 
 

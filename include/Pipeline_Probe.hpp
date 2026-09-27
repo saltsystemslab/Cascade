@@ -80,12 +80,13 @@ struct alignas(2 * util::L1_CACHE_LINE_SIZE)
     uint64_t wait_slab_ns = 0;  // Time spent by: readers; in: blocking on `F` for free slabs.
     uint64_t items = 0; // Units handled: slabs (for readers, writers, and stagers), and partitions (dispatchers).
     uint64_t bytes = 0; // Bytes moved: backend traffic (for readers and writers), and PCIe traffic (for dispatchers).
+    uint64_t disk_bytes = 0;    // Of `bytes`, those moved to or from the disk: spilled content, the inboxes' disk-parts, and the output.
 
     // Time spent in actual work: in I/O, host-, or device-work.
     uint64_t busy_ns() const { return io_ns + stage_ns + device_ns; }
 
     // Resets the stats.
-    void reset() { io_ns = stage_ns = device_ns = wait_in_ns = wait_slab_ns = items = bytes = 0; }
+    void reset() { io_ns = stage_ns = device_ns = wait_in_ns = wait_slab_ns = items = bytes = disk_bytes = 0; }
 };
 
 

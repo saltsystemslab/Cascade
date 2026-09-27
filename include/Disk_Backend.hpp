@@ -13,6 +13,8 @@
 #include <cstdint>
 #include <cstddef>
 #include <vector>
+#include <memory>
+#include <mutex>
 
 namespace gpu_saca
 {
@@ -30,6 +32,7 @@ private:
 
     std::vector<Direct_File> msg_tgt_[2];   // Message-target files of the partitions' inboxes, per generation-parity.
     std::vector<Direct_File> msg_rank_[2];  // Message-rank files of the partitions' inboxes, per generation-parity.
+    std::unique_ptr<std::once_flag[]> inbox_open_[2];   // Opening-flags of the partitions' inbox-files, per generation-parity.
 
     Spill_Store* const spill_;  // Spill-store to open the deferred files from.
     const std::vector<idx_t> P_cap_;    // Partition capacities.
@@ -44,14 +47,18 @@ public:
 
     // Constructs a disk-backend for partitions with capacities `P_cap`, by
     // opening their spill-files (if required) in `spill`, as per the residency
-    // plan `plan`.
+    // plan `plan`. Inbox-files are opened lazily, at their first write.
     Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const Residency_Plan& plan);
 
     Disk_Backend(const Disk_Backend&) = delete;
     Disk_Backend& operator=(const Disk_Backend&) = delete;
 
-    // Opens the inbox-files of the parity first written at generation 1.
-    void open_deferred_inboxes();
+    // Opens the `p_id`'th partition's inbox-files for the generation-parity
+    // currently being written, unless already open. Thread-safe.
+    void ensure_inbox(p_id_t p_id);
+
+    // Retires the partitions' inbox-files of both the generation-parities.
+    void retire_inboxes();
 
     // Opens the `p_id`'th partition's key-file.
     void open_key(p_id_t p_id);
