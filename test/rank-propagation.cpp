@@ -126,6 +126,7 @@ bool validate_inbox_mass(const Partition_Backend& backend)
     for(p_id_t t = 0; t < p; ++t)
     {
         const auto msg_count = backend.msg_count(t);
+        const auto disk_count = backend.disk_count(t);
         const auto msg_written = backend.msg_written(t);
 
         if(inbox_sz[t] != msg_count)
@@ -134,9 +135,15 @@ bool validate_inbox_mass(const Partition_Backend& backend)
             return false;
         }
 
-        if(msg_written % MSG_ALIGN != 0 || msg_written - msg_count >= MSG_ALIGN)
+        if(msg_written % MSG_ALIGN != 0 || msg_written - disk_count >= MSG_ALIGN)
         {
             std::cerr << "For partition " << t << ", size of written inbox violates disk-block alignment constraints.";
+            return false;
+        }
+
+        if(disk_count > 0 && (msg_count - disk_count) % MSG_ALIGN != 0)   // The disk-part's reads need an aligned RAM-part before it.
+        {
+            std::cerr << "For partition " << t << ", size of its inbox's RAM-part is misaligned against its disk-part.";
             return false;
         }
     }

@@ -670,7 +670,7 @@ void GPU_SACA<T_sym_>::partition()
             setup_staging_config();
             util::file::raise_open_files_limit(SPILL_ROLE_C * p_ + 64); // Spill-files of all partitions at once, plus slack for the rest of the process.
             spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
-            backend_ = std::make_unique<Partition_Backend>(P_cap, *spill_, host_budget, fixed_budget(), p_);
+            backend_ = std::make_unique<Partition_Backend>(P_cap, chunk_cap_, *spill_, host_budget, fixed_budget(), p_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -946,7 +946,7 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::set_context(const idx_t ctx, const idx_t gen)
 {
     ctx_ = ctx;
-    backend_->open_generation(gen);
+    backend_->open_generation(gen, Active_sz);
 
     cohort_sz.push_back(active_set_size());
 }
@@ -1788,6 +1788,10 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             const idx_t active = active_set_size();
             std::cerr <<    "Total inbox-size for generation " << gen << ": " << msg_count << "; number of recipients: " << active_set_size() <<
                             ". Amplification: " << (static_cast<double>(msg_count) / active) << "x.\n";
+
+            // A line of its own, as the split between the tiers depends on timing, unlike the rest.
+            const idx_t disk_count = backend_->disk_mass_last_gen();
+            std::cerr << "Inbox-tiers for generation " << gen << ": " << (msg_count - disk_count) << " messages in RAM, " << disk_count << " on disk.\n";
         }
 #endif
 
