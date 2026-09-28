@@ -1,0 +1,330 @@
+#!/bin/bash
+#
+# Timed runs of query counting on the benchmark node: our engine against
+# infini-gram's, over the workloads of a cross-check (see xcheck.sbatch) and
+# over batches of growing size. Both indexes are first staged onto node-local
+# NVMe. Every batch's counts must match infini-gram's, and our intervals must
+# pass the certificate.
+#
+# Submit from the repo root:
+#
+#   . benchmark/local.env && sbatch benchmark/query/timed.sbatch INDEX IG_INDEX QRY_DIR [OUT_DIR]
+#
+#   INDEX     our query index (a directory with index.meta)
+#   IG_INDEX  infini-gram's index of the same token array (2-byte symbols)
+#   QRY_DIR   the workloads: a directory of .qry files, e.g. qry/ of a cross-check
+#   OUT_DIR   default ${RESULTS_ROOT}/timed-<INDEX's name>-<UTC timestamp>
+#
+# Runs, most important first; TM_RUNS selects:
+#   main      ours in the direct mode and in two phases (stride 32, 2-word keys),
+#             and infini-gram's `_find_thread` from a pool of every core; in
+#             TM_REPLICATES alternating processes of each
+#   batch     both, over present-pattern batches (m = 10) of TM_BATCHES queries;
+#             infini-gram also with a pool no larger than the batch's chunks
+#   ablation  ours over strides, key widths, and batch orders
+#   threads   infini-gram over pool sizes, on the TM_SWEEP workloads
+#   variants  on the TM_SWEEP workloads, infini-gram's own `find`, its
+#             prefetching (on a prefix of 1e5 queries), and its index read into
+#             the heap
+#
+# Results in OUT_DIR: env.txt (provenance), ours/ and ig/ (logs, and the counts
+# of the first main replicate), compare.txt (count files: same or DIFFERENT),
+# and from summarize.py, runs.tsv (a line per timed batch) and summary.md.
+#
+# Environment (all optional):
+#   TM_STAGE        node-local directory to stage the indexes and the batches
+#                   under, kept for later runs; default /tmp/${USER}/query-stage;
+#                   `none` reads the indexes in place
+#   TM_RUNS         default main,batch,ablation,threads,variants
+#   TM_REPS         repetitions per batch; default 6 (infini-gram's driver drops the first)
+#   TM_REPLICATES   processes per engine of the main runs; default 3
+#   TM_BATCHES      default 1000,10000,100000,1000000,10000000,100000000
+#   TM_STRIDES      strides of the ablation; default 8,16,32,64,128,256
+#   TM_THREADS      pool sizes of the thread sweep; default 1,2,4,8,16,32,64,96,128,256
+#   TM_SWEEP        workloads of the thread sweep and the variants; default
+#                   present-m5,present-m10,present-m100,random-m5
+#   TM_ARCH         CUDA architecture of the in-job build; default 120-real
+#   TM_CMAKE_ARGS   extra configure arguments, e.g. FETCHCONTENT_SOURCE_DIR_* offline
+#   INFINIGRAM_DIR  infini-gram checkout at v2.6.0; default ~/infini-gram
+
+#SBATCH --job-name=qtimed
+#SBATCH --exclusive
+#SBATCH --mem=0
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --gres=gpu:1
+#SBATCH --time=03:00:00
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.out
+
+set -uo pipefail    # Not -e: a failed run is data, and the others must still run.
+
+REPO="${REPO:-${SLURM_SUBMIT_DIR:-${PWD}}}"
+if [ ! -r "${REPO}/benchmark/query/timed.sbatch" ]; then
+    echo "FATAL: '${REPO}' does not look like the repository root; submit from it, or export REPO=/path/to/repo"
+    exit 1
+fi
+
+USAGE="usage: timed.sbatch INDEX IG_INDEX QRY_DIR [OUT_DIR]"
+IDX="${1:?${USAGE}}"
+IG="${2:?${USAGE}}"
+QRY="${3:?${USAGE}}"
+
+if [ -r "${REPO}/benchmark/local.env" ]; then
+    set +u
+    # shellcheck source=/dev/null
+    . "${REPO}/benchmark/local.env"
+    set -u
+fi
+
+MODULES="${MODULES:-}"
+if [ -n "${MODULES}" ]; then
+    set +u
+    for i in /usr/share/lmod/lmod/init/bash /etc/profile.d/lmod.sh \
+             /etc/profile.d/modules.sh /usr/share/Modules/init/bash; do
+        [ -r "${i}" ] && . "${i}" && break
+    done
+    # shellcheck disable=SC2086
+    module load ${MODULES} || echo "WARN: module load failed; using the ambient environment"
+    set -u
+fi
+
+OUT="${4:-${RESULTS_ROOT:-${HOME}/gpu-saca-results}/timed-$(basename "${IDX}")-$(date -u +%Y%m%dT%H%M%SZ)}"
+STAGE="${TM_STAGE:-/tmp/${USER}/query-stage}"
+RUNS=",${TM_RUNS:-main,batch,ablation,threads,variants},"
+REPS="${TM_REPS:-6}"
+REPL="${TM_REPLICATES:-3}"
+BATCHES="${TM_BATCHES:-1000,10000,100000,1000000,10000000,100000000}"
+SWEEP="${TM_SWEEP:-present-m5,present-m10,present-m100,random-m5}"
+ARCH="${TM_ARCH:-120-real}"
+T_ALL="$(nproc)"
+B="${REPO}/build-timed-sm${ARCH%%-*}"
+mkdir -p "${OUT}/ours" "${OUT}/ig"
+cp "$0" "${OUT}/timed.sbatch" 2> /dev/null   # The script as submitted.
+
+stamp() { echo "[$(date -u +%FT%TZ)] $*"; }
+want() { [[ "${RUNS}" == *",$1,"* ]]; }
+
+# Our process runs on the GPU's NUMA node; infini-gram's pool spans the machine.
+bdf=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | head -1)
+node=$(cat "/sys/bus/pci/devices/$(echo "0000:${bdf#*:}" | tr 'A-F' 'a-f')/numa_node" 2> /dev/null || echo -1)
+NUMA=()
+if [ "${node}" -ge 0 ] 2> /dev/null && command -v numactl > /dev/null; then
+    NUMA=(numactl --cpunodebind="${node}" --membind="${node}")
+fi
+
+{
+    echo "date=$(date -u +%FT%TZ)"
+    echo "host=$(hostname)"
+    echo "job=${SLURM_JOB_ID:-none}"
+    echo "commit=$(git -C "${REPO}" rev-parse HEAD)$(git -C "${REPO}" diff --quiet HEAD || echo -dirty)"
+    echo "gpu=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+    echo "index=${IDX}"
+    echo "ig_index=${IG}"
+    echo "qry_dir=${QRY}"
+    echo "reps=${REPS}"
+    echo "replicates=${REPL}"
+    echo "threads=${T_ALL}"
+    echo "gpu_numa_node=${node}"
+    echo "ours_numactl=${NUMA[*]:-none}"
+    echo "kernel=$(uname -r)"
+    echo "cpu=$(lscpu | sed -n 's/^Model name: *//p')"
+    echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2> /dev/null || echo n/a)"
+    echo "thp=$(cat /sys/kernel/mm/transparent_hugepage/enabled 2> /dev/null || echo n/a)"
+    echo "memlock=$(ulimit -l)"
+    echo "gpu_apps=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader | wc -l)"
+    echo
+    nvidia-smi --query-gpu=name,pci.bus_id,driver_version,memory.total,persistence_mode,clocks.max.sm,clocks.max.mem,power.limit --format=csv
+    echo
+    numactl -H
+    echo
+    free -g
+    echo
+    ls -l "${QRY}"
+} > "${OUT}/env.txt" 2>&1
+stamp "start: $(hostname), $(sed -n 's/^gpu=//p' "${OUT}/env.txt"), commit $(sed -n 's/^commit=//p' "${OUT}/env.txt" | cut -c1-7), results ${OUT}"
+
+stamp "build"
+# shellcheck disable=SC2086
+{ cmake -S "${REPO}" -B "${B}" -DCMAKE_BUILD_TYPE=Release -DCUDA_ARCH="${ARCH}" -DBENCHMARK=ON \
+        -DFETCHCONTENT_SOURCE_DIR_INFINIGRAM="${INFINIGRAM_DIR:-${HOME}/infini-gram}" ${TM_CMAKE_ARGS:-} \
+    && cmake --build "${B}" -j "${T_ALL}" --target query bench_infinigram_query; } > "${OUT}/build.log" 2>&1 \
+    || { stamp "FATAL: build failed; see ${OUT}/build.log"; exit 1; }
+stamp "build: $(grep -c -i warning "${OUT}/build.log") warnings"
+
+# Copies the files "${@:2}" into the directory $1 in parallel, keeping the
+# copies already there of the same size and time.
+stage_files()
+{
+    local d="$1" f p rc=0 pids=()
+    shift
+    mkdir -p "${d}" || return 1
+    for f in "$@"; do
+        rsync -a --copy-links "${f}" "${d}/" &
+        pids+=($!)
+    done
+    for p in "${pids[@]}"; do
+        wait "${p}" || rc=1
+    done
+    return ${rc}
+}
+
+meta() { sed -n "s/^$1=//p" "${IDX}/index.meta" | head -1; }
+
+SIDX="${IDX}"
+SIG="${IG}"
+BQ="${OUT}/batch-qry"
+if [ "${STAGE}" != none ]; then
+    stamp "stage: ${STAGE}"
+    s_ours="${STAGE}/ours-$(basename "${IDX}")"
+    s_ig="${STAGE}/ig-$(basename "${IG}")"
+    ours_files=("$(meta text)")
+    parts=$(meta sa_part_c)
+    for ((i = 0; i < ${parts:-0}; ++i)); do
+        ours_files+=("$(meta "sa_part_${i}")")
+    done
+    ig_files=()
+    for f in "${IG}"/*; do
+        [ -f "${f}" ] && ig_files+=("${f}")
+    done
+
+    stage_files "${s_ours}" "${ours_files[@]}" &
+    p_ours=$!
+    stage_files "${s_ig}" "${ig_files[@]}" &
+    p_ig=$!
+    ok=1
+    wait "${p_ours}" || ok=0
+    wait "${p_ig}" || ok=0
+    sync
+    if [ "${ok}" -eq 1 ]; then
+        # Our index's metadata, with its files' paths into the staged copies.
+        awk -F= -v d="${s_ours}" 'BEGIN { OFS = "=" } $1 == "text" || $1 ~ /^sa_part_[0-9]+$/ { n = split($2, p, "/"); $2 = d "/" p[n] } { print }' \
+            "${IDX}/index.meta" > "${s_ours}/index.meta"
+        SIDX="${s_ours}"
+        SIG="${s_ig}"
+        BQ="${STAGE}/batch-qry-$(basename "${IDX}")"
+        stamp "stage: done; $(du -shL "${s_ours}" | cut -f1) ours, $(du -shL "${s_ig}" | cut -f1) infini-gram"
+    else
+        stamp "WARN: staging failed; the indexes are read in place"
+    fi
+fi
+{ echo "index_read=${SIDX}"; echo "ig_index_read=${SIG}"; echo "batch_qry=${BQ}"; } >> "${OUT}/env.txt"
+
+# Runs `query find` over the comma-separated query files $2 into the log $1,
+# with the options "${@:3}", every interval certified.
+ours()
+{
+    local log="$1" files="$2"
+    shift 2
+    "${NUMA[@]}" "${B}/src/query" find --index "${SIDX}" --queries "${files}" --text-res device --sa-res device --reps "${REPS}" \
+        --validate "$@" > "${log}" 2>&1
+    local rc=$?
+    stamp "ours ${log#"${OUT}"/}: rc=${rc}"
+}
+
+# Runs infini-gram's driver over the query file $2 into the log $1, with the
+# options "${@:3}".
+ig()
+{
+    local log="$1" f="$2"
+    shift 2
+    "${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${f}" --reps "${REPS}" "$@" > "${log}" 2>&1 \
+        || stamp "infini-gram failed: ${log}"
+}
+
+files=$(ls "${QRY}"/*.qry | paste -sd, -)
+
+# infini-gram's index into the page cache, once for all of its runs: the warm-up, and then a single query.
+if want main || want batch || want threads || want variants; then
+    mkdir -p "${OUT}/ig/prewarm"
+    ig "${OUT}/ig/prewarm/prewarm.log" "${files%%,*}" --mode direct --threads "${T_ALL}" --prewarm 1 --reps 1 --q 1
+    stamp "infini-gram prewarm: $(sed -n 's/^prewarm_bytes=//p' "${OUT}/ig/prewarm/prewarm.log") bytes in $(sed -n 's/^t_prewarm=//p' "${OUT}/ig/prewarm/prewarm.log") s"
+fi
+
+if want main; then
+    for ((r = 1; r <= REPL; ++r)); do
+        d_ours="${OUT}/ours/main-r${r}"
+        d_ig="${OUT}/ig/main-r${r}"
+        mkdir -p "${d_ours}" "${d_ig}"
+        cnt=()
+        [ "${r}" -eq 1 ] && cnt=(--cnt-dir "${d_ours}")
+        ours "${d_ours}/find.log" "${files}" --stride 0,32 --key-words 2 --sort 0 "${cnt[@]}"
+        for f in "${QRY}"/*.qry; do
+            s=$(basename "${f}" .qry)
+            cnt=()
+            [ "${r}" -eq 1 ] && cnt=(--cnt-out "${d_ig}/${s}.cnt")
+            ig "${d_ig}/${s}.log" "${f}" --mode direct --threads "${T_ALL}" --prewarm 0 "${cnt[@]}"
+        done
+        stamp "infini-gram main-r${r}: done"
+    done
+fi
+
+if want batch; then
+    stamp "gen: batches of ${BATCHES}"
+    mkdir -p "${BQ}"
+    for q in ${BATCHES//,/ }; do
+        f="${BQ}/batch-q${q}.qry"
+        [ -s "${f}" ] && continue   # Kept from an earlier run: the same seed, so the same queries.
+        "${B}/src/query" gen --index "${SIDX}" --out "${f}.part" --kind substring --len 10 --q "${q}" --seed "${q}" > /dev/null \
+            && mv "${f}.part" "${f}" || stamp "gen failed: q=${q}"
+    done
+
+    ours "${OUT}/ours/batch.log" "$(for q in ${BATCHES//,/ }; do echo "${BQ}/batch-q${q}.qry"; done | paste -sd, -)" \
+        --stride 0,32 --key-words 2 --sort 0,1
+    mkdir -p "${OUT}/ig/batch"
+    for q in ${BATCHES//,/ }; do
+        f="${BQ}/batch-q${q}.qry"
+        ig "${OUT}/ig/batch/batch-q${q}-t${T_ALL}.log" "${f}" --mode direct --threads "${T_ALL}" --prewarm 0
+        t=$(((q + 255) / 256))  # The driver's pool threads take 256 queries at a time.
+        if [ "${t}" -lt "${T_ALL}" ]; then
+            ig "${OUT}/ig/batch/batch-q${q}-t${t}.log" "${f}" --mode direct --threads "${t}" --prewarm 0
+        fi
+    done
+    stamp "infini-gram batch: done"
+fi
+
+if want ablation; then
+    # A process per stride: a table that does not fit the device fails its stride only.
+    strides="${TM_STRIDES:-8,16,32,64,128,256}"
+    for s in ${strides//,/ }; do
+        ours "${OUT}/ours/ablation-s${s}.log" "${files}" --stride "${s}" --key-words 1,2,4 --sort 0,1
+    done
+fi
+
+if want threads; then
+    mkdir -p "${OUT}/ig/threads"
+    threads="${TM_THREADS:-1,2,4,8,16,32,64,96,128,256}"
+    for w in ${SWEEP//,/ }; do
+        for t in ${threads//,/ }; do
+            ig "${OUT}/ig/threads/${w}-t${t}.log" "${QRY}/${w}.qry" --mode direct --threads "${t}" --prewarm 0 --reps 3
+        done
+    done
+    stamp "infini-gram threads: done"
+fi
+
+if want variants; then
+    mkdir -p "${OUT}/ig/find" "${OUT}/ig/prefetch" "${OUT}/ig/heap"
+    # Prefetching issues about ten `madvise` calls per search step: on a prefix, 3 times.
+    for w in ${SWEEP//,/ }; do
+        f="${QRY}/${w}.qry"
+        ig "${OUT}/ig/find/${w}.log" "${f}" --mode find --threads "${T_ALL}" --prewarm 0
+        ig "${OUT}/ig/prefetch/${w}.log" "${f}" --mode direct --threads "${T_ALL}" --prefetch 1 --prewarm 0 --q 100000 --reps 3
+        ig "${OUT}/ig/heap/${w}.log" "${f}" --mode direct --threads "${T_ALL}" --load ram
+    done
+    stamp "infini-gram variants: done"
+fi
+
+# The first main replicates' count files must be byte-identical; summarize.py
+# checks every batch's counts hash.
+stamp "compare"
+for c in "${OUT}"/ours/main-r1/*.cnt; do
+    [ -e "${c}" ] || continue
+    s=$(basename "${c}" .cnt)
+    if cmp -s "${c}" "${OUT}/ig/main-r1/${s%@*}.cnt"; then echo "${s} same"; else echo "${s} DIFFERENT"; fi
+done > "${OUT}/compare.txt"
+stamp "compare: $(grep -c ' same$' "${OUT}/compare.txt") same, $(grep -c ' DIFFERENT$' "${OUT}/compare.txt") different"
+
+stamp "summarize"
+python3 "${REPO}/benchmark/query/summarize.py" "${OUT}" > "${OUT}/summarize.log" 2>&1 \
+    && cat "${OUT}/summary.md" || stamp "WARN: summarize.py failed; see ${OUT}/summarize.log"
+stamp "done"
