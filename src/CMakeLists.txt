@@ -32,6 +32,10 @@ add_executable(test test.cu)
 # baselines, and building this does not drag in the baselines' network fetches.
 add_executable(bench_gpu_saca bench_gpu_saca.cu)
 
+# Offline structural statistics of a text, from its suffix array and a STATS
+# run's log. Host-only, independent of `core`.
+add_executable(sa_structure sa_structure.cpp)
+
 
 # Set the include directories for the targets.
 
@@ -40,3 +44,4 @@ target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_IN
 target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})
 target_include_directories(bench_gpu_saca PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
+target_include_directories(sa_structure PRIVATE ${INCLUDE_DIR})

@@ -249,6 +249,7 @@ target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 target_compile_options(bench_gpu_saca PRIVATE ${COMPILE_FLAGS})
 target_compile_definitions(bench_gpu_saca PRIVATE ${BENCH_PROVENANCE})
 target_compile_options(bench_gpu_saca PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)   # `nvcc` does not recognize OpenMP directives.
+target_compile_options(sa_structure PRIVATE ${COMPILE_FLAGS})
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
 # `nvcc` does not recognize OpenMP directives.
@@ -275,6 +276,7 @@ target_link_libraries(core PRIVATE tests)
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
 target_link_libraries(bench_gpu_saca PRIVATE core OpenMP::OpenMP_CXX)
+target_link_libraries(sa_structure PRIVATE OpenMP::OpenMP_CXX)
 
 # Link the tester.
 target_link_libraries(test PRIVATE core)
