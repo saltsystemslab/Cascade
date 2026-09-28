@@ -5,6 +5,7 @@
 
 #include "CPU_Reference.hpp"
 #include "Index_Meta.hpp"
+#include "Packed_Prefix.hpp"
 #include "Query_Engine.hpp"
 #include "Suffix_Index.hpp"
 #include "query-file.hpp"
@@ -511,8 +512,9 @@ unsigned long long device_certify(const Query_Engine<T_sym_>& eng, const std::ve
 
 // Checks the device engine against the oracle on the fixture text `T` of the
 // symbols `alpha`, in every device-accessible placement, with the suffix array
-// in `parts` parts; and that the device certificate accepts its intervals and
-// rejects perturbed ones.
+// in `parts` parts: in the direct mode, and in two phases over every stride of
+// `{1, 2, 3, 16, 64, n + 5}`, key width, and batch order. Checks also that the
+// device certificate accepts the intervals and rejects perturbed ones.
 template <typename T_sym_>
 bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const idx_t parts,
                        const char* const what)
@@ -531,17 +533,29 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
     for(idx_t i = 0; i < q; ++i)
         want[i] = ref::find_one(T.data(), n, SA.data(), sym.data() + off[i], off[i + 1] - off[i]);
 
+    struct Mode { idx_t stride; uint32_t key_words; bool sort; };
+    std::vector<Mode> modes = {{0, 0, false}};
+    for(const idx_t stride : {idx_t(1), idx_t(2), idx_t(3), idx_t(16), idx_t(64), n + 5})
+        for(const uint32_t key_words : {1u, 2u, 4u})
+            for(const bool sort : {false, true})
+                modes.push_back({stride, key_words, sort});
+
     for(const auto text_res : {Residency::device, Residency::pinned})
         for(const auto sa_res : {Residency::device, Residency::pinned})
         {
             const std::string where = std::string(what) + " (text " + residency_name(text_res) + ", suffix array " + residency_name(sa_res) + ")";
             Query_Engine<T_sym_> eng;
-            CHECK(eng.load(dir.string(), Query_Options{text_res, sa_res, 100000}, err), "%s: %s", where.c_str(), err.c_str());
-            std::fill(got.begin(), got.end(), SA_Interval{~uint64_t(0), ~uint64_t(0)});
-            eng.find(off.data(), sym.data(), q, got.data());
-            for(idx_t i = 0; i < q; ++i)
-                CHECK(same(got[i], want[i]), "%s: query %" PRIu64 ": device [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")",
-                      where.c_str(), i, got[i].lo, got[i].hi, want[i].lo, want[i].hi);
+            CHECK(eng.load(dir.string(), Query_Options{text_res, sa_res, 100000, 0}, err), "%s: %s", where.c_str(), err.c_str());
+            for(const auto& md : modes)
+            {
+                CHECK(eng.configure(md.stride, md.key_words, md.sort, err), "%s: %s", where.c_str(), err.c_str());
+                std::fill(got.begin(), got.end(), SA_Interval{~uint64_t(0), ~uint64_t(0)});
+                eng.find(off.data(), sym.data(), q, got.data());
+                for(idx_t i = 0; i < q; ++i)
+                    CHECK(same(got[i], want[i]), "%s, stride %" PRIu64 ", key words %u, sort %d: query %" PRIu64 " (m = %" PRIu64 "): device [%" PRIu64
+                          ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")", where.c_str(), md.stride, md.key_words, md.sort, i, off[i + 1] - off[i],
+                          got[i].lo, got[i].hi, want[i].lo, want[i].hi);
+            }
 
             CHECK(device_certify(eng, off, sym, got) == 0, "%s: the device certificate rejects correct intervals", where.c_str());
             auto wrong = got;
@@ -551,6 +565,37 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
                     ++I.hi, ++perturbed;
             CHECK(device_certify(eng, off, sym, wrong) == perturbed, "%s: the device certificate accepts perturbed intervals", where.c_str());
         }
+
+    return true;
+}
+
+
+// Checks that the sample table the engine builds for the fixture text `T` holds
+// the zero-padded packed prefixes of every `stride`-th suffix, for keys of `W_`
+// words.
+template <typename T_sym_, idx_t W_>
+bool check_sample_table(const std::vector<T_sym_>& T, const idx_t stride, const char* const what)
+{
+    const auto dir = scratch_dir("table");
+    const auto SA = test::build_sa40(T);
+    std::string err;
+    CHECK(write_index(dir, T, SA, 1, err), "%s: %s", what, err.c_str());
+
+    Query_Engine<T_sym_> eng;
+    CHECK(eng.load(dir.string(), Query_Options{Residency::device, Residency::device, 0, stride, static_cast<uint32_t>(W_)}, err),
+          "%s: %s", what, err.c_str());
+    const auto& tab = eng.table();
+    const idx_t n = T.size(), J = (n + stride - 1) / stride;
+    CHECK(tab.size() == J && tab.stride() == stride && tab.key_words() == W_ && tab.key_symbols() == W_ * 8 / sizeof(T_sym_),
+          "%s: unexpected table shape", what);
+
+    std::vector<Packed_Prefix<W_>> got(J);
+    CUDA_CHECK(cudaMemcpy(got.data(), tab.template keys<W_>(), J * sizeof(Packed_Prefix<W_>), cudaMemcpyDeviceToHost));
+    std::vector<T_sym_> padded(T);
+    padded.resize(n + W_ * 8 / sizeof(T_sym_), 0);
+    for(idx_t j = 0; j < J; ++j)
+        CHECK(got[j] == Packed_Prefix<W_>::pack_prefix(padded.data() + sa40::load(SA.data(), j * stride)),
+              "%s: key %" PRIu64 " of stride %" PRIu64 " differs from the host's", what, j, stride);
 
     return true;
 }
@@ -590,6 +635,30 @@ bool test_gpu_find()
         T.push_back(static_cast<uint16_t>(i % 2 ? 7 : 3));
 
     return check_gpu_fixture(T, {3, 7}, 13, 2, "u16 periodic (ab)^k");
+}
+
+
+bool test_sample_table()
+{
+    std::mt19937_64 rng(11);
+    const std::vector<uint8_t> a8 = {0, 1, 2, 0x7F, 0x80, 0xFF};
+    const std::vector<uint16_t> a16 = {0, 1, 0x00FF, 0x0100, 0xFFFE, 0xFFFF};
+    const std::vector<uint32_t> a32 = {0, 1, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu};
+    for(const idx_t n : {1, 5, 1000})
+    {
+        const auto T8 = random_text<uint8_t>(n, a8, 0xFF, 30, rng);
+        const auto T16 = random_text<uint16_t>(n, a16, 0xFFFF, 30, rng);
+        const auto T32 = random_text<uint32_t>(n, a32, 0xFFFFFFFFu, 30, rng);
+        for(const idx_t stride : {idx_t(1), idx_t(3), idx_t(64)})
+            if(!check_sample_table<uint8_t, 1>(T8, stride, "u8 W=1") || !check_sample_table<uint8_t, 2>(T8, stride, "u8 W=2")
+                || !check_sample_table<uint8_t, 4>(T8, stride, "u8 W=4") || !check_sample_table<uint16_t, 1>(T16, stride, "u16 W=1")
+                || !check_sample_table<uint16_t, 2>(T16, stride, "u16 W=2") || !check_sample_table<uint16_t, 4>(T16, stride, "u16 W=4")
+                || !check_sample_table<uint32_t, 1>(T32, stride, "u32 W=1") || !check_sample_table<uint32_t, 2>(T32, stride, "u32 W=2")
+                || !check_sample_table<uint32_t, 4>(T32, stride, "u32 W=4"))
+                return false;
+    }
+
+    return true;
 }
 
 
@@ -686,6 +755,7 @@ int main()
         {"edge cases",              test_edge_cases,            false},
         {"order spot-check",        test_spot_check,            false},
         {"index load, host tiers",  test_index_host_tiers,      false},
+        {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
         {"device load rejects",     test_gpu_rejects,           true},
     };
