@@ -34,14 +34,20 @@ R"(Usage:
   query info --index DIR
       Prints the index's metadata and whether it fits the device.
   query find --index DIR --queries Q1.qry[,Q2.qry,...] [--q N] [--text-res R] [--sa-res R]
-             [--spot N] [--reps K] [--itv-out F] [--cnt-out F] [--cnt-dir D] [--validate]
+             [--spot N] [--stride S,...] [--key-words W,...] [--sort 0|1,...] [--reps K]
+             [--itv-out F] [--cnt-out F] [--cnt-dir D] [--validate]
       Loads the index once, and finds the SA-intervals of the first N (default:
       all) queries of every query file, K times (default 3); reports the load,
       transfer, and search times and the counts' hash. R is `device` (default)
       or `pinned`; --spot sets the suffix-array order spot-checks at load
-      (default 100000). --validate checks every interval with the O(m)
-      certificate on the device. The counts of a single query file go to
-      --cnt-out, or those of each to D/<stem>.cnt.
+      (default 100000). The search runs in two phases over a sample table of
+      stride S (default 32; 0 selects the direct mode) with keys of W words (1,
+      2, or 4; default 2, or 4 for 4-byte symbols), with every batch sorted by
+      its packed prefixes if --sort 1; lists run every combination as a mode,
+      on the index loaded once. --validate checks every interval with the O(m)
+      certificate on the device. The counts of a single query file and mode go
+      to --cnt-out, or those of each to D/<stem>.cnt, or D/<stem>@s<S>w<W>o<sort>.cnt
+      for several modes.
   query gen --index DIR --out Q.qry --kind K [--q N --len L1[,L2,...]] [--source F]
             [--vocab V] [--seed S]
       Writes N queries of lengths drawn from L1, L2, ...: K = substring (default)
@@ -112,6 +118,37 @@ bool get_u64(const Args& a, const std::string& k, uint64_t& v, std::string& err)
     catch(const std::exception&) {}
 
     err = "option --" + k + " expects an unsigned integer";
+    return false;
+}
+
+
+// Parses the comma-separated unsigned integers of the option `k` of `a` into
+// `v`, keeping `v` if absent. Returns `false` with a reason in `err` if
+// malformed.
+bool get_u64_list(const Args& a, const std::string& k, std::vector<uint64_t>& v, std::string& err)
+{
+    if(!a.has(k))
+        return true;
+
+    v.clear();
+    const std::string l = a.get(k);
+    try
+    {
+        for(std::size_t b = 0; b <= l.size(); )
+        {
+            const auto e = std::min(l.find(',', b), l.size());
+            std::size_t used = 0;
+            v.push_back(std::stoull(l.substr(b, e - b), &used));
+            if(used != e - b)
+                throw std::invalid_argument(k);
+            b = e + 1;
+        }
+
+        return !v.empty();
+    }
+    catch(const std::exception&) {}
+
+    err = "option --" + k + " expects comma-separated unsigned integers";
     return false;
 }
 
@@ -260,14 +297,28 @@ template <typename T_sym_>
 int run_find(const Args& a)
 {
     std::string err;
-    uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3;
     Query_Options opt;
+    uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3;
+    std::vector<uint64_t> strides = {opt.stride}, key_words = {0}, sorts = {0};
     if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
+        || !get_u64_list(a, "stride", strides, err) || !get_u64_list(a, "key-words", key_words, err) || !get_u64_list(a, "sort", sorts, err)
         || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
     {
         std::fprintf(stderr, "error: %s\n", err.empty() ? "unknown residency" : err.c_str());
         return 2;
     }
+
+    // Every combination of the listed strides, key widths, and orders is a mode; the direct mode ignores the key width.
+    struct Mode { idx_t stride; uint32_t key_words; bool sort; };
+    std::vector<Mode> modes;
+    for(const auto st : strides)
+        for(const auto w : (st == 0 ? std::vector<uint64_t>{0} : key_words))
+            for(const auto so : sorts)
+                modes.push_back({st, static_cast<uint32_t>(w), so != 0});
+
+    opt.stride = modes.front().stride;
+    opt.key_words = modes.front().key_words;
+    opt.sort = modes.front().sort;
 
     std::vector<std::string> files;
     const std::string list = a.get("queries");
@@ -279,9 +330,9 @@ int run_find(const Args& a)
         b = e + 1;
     }
 
-    if(files.empty() || (files.size() > 1 && (a.has("cnt-out") || a.has("itv-out"))))
+    if(files.empty() || ((files.size() > 1 || modes.size() > 1) && (a.has("cnt-out") || a.has("itv-out"))))
     {
-        std::fprintf(stderr, "error: %s\n", files.empty() ? "no query file" : "--cnt-out and --itv-out take a single query file; use --cnt-dir");
+        std::fprintf(stderr, "error: %s\n", files.empty() ? "no query file" : "--cnt-out and --itv-out take a single query file and mode; use --cnt-dir");
         return 2;
     }
 
@@ -301,13 +352,28 @@ int run_find(const Args& a)
                 a.get("index").c_str(), idx.n(), idx.sym_bytes(), residency_name(idx.text_residency()), residency_name(idx.sa_residency()),
                 st.t_text, st.t_sa, st.spot_pairs, st.t_spot);
 
-    // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`.
+    // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`; to `<stem>@<mode>.cnt` if several modes.
     int rc = 0;
-    for(const auto& f : files)
+    for(std::size_t k = 0; k < modes.size(); ++k)
     {
-        const std::string cnt = a.has("cnt-dir") ? (std::filesystem::path(a.get("cnt-dir")) / std::filesystem::path(f).stem()).string() + ".cnt"
-                                                 : a.get("cnt-out");
-        rc |= find_batch(eng, f, q_max, reps, a.has("validate"), a.get("itv-out"), cnt);
+        const auto& md = modes[k];
+        if(k > 0 && !eng.configure(md.stride, md.key_words, md.sort, err))
+        {
+            std::fprintf(stderr, "error: %s\n", err.c_str());
+            return 1;
+        }
+
+        const auto& tab = eng.table();
+        std::printf("stride=%" PRIu64 "\nkey_words=%u\nkey_symbols=%" PRIu64 "\nsort=%d\ntable_bytes=%zu\nt_table=%.3f\n",
+                    tab.stride(), tab.key_words(), tab.key_symbols(), eng.options().sort, tab.bytes(), tab.t_build());
+        const std::string tag = (modes.size() > 1 ? "@s" + std::to_string(tab.stride()) + "w" + std::to_string(tab.key_words())
+                                                    + "o" + std::to_string(eng.options().sort) : "");
+        for(const auto& f : files)
+        {
+            const std::string cnt = a.has("cnt-dir") ? (std::filesystem::path(a.get("cnt-dir")) / std::filesystem::path(f).stem()).string() + tag + ".cnt"
+                                                     : a.get("cnt-out");
+            rc |= find_batch(eng, f, q_max, reps, a.has("validate"), a.get("itv-out"), cnt);
+        }
     }
 
     return rc;
