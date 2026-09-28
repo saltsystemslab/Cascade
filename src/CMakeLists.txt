@@ -32,7 +32,7 @@ add_executable(test test.cu)
 add_executable(bench_gpu_saca bench_gpu_saca.cu)
 
 # Query engine.
-add_library(query_core STATIC Suffix_Index.cu Query_Engine.cu)
+add_library(query_core STATIC Suffix_Index.cu Sample_Table.cu Query_Engine.cu)
 add_executable(query query.cu)
 add_executable(test_query test_query.cu)
 
