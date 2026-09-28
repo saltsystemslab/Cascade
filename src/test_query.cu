@@ -433,6 +433,14 @@ bool test_spot_check()
     sa40::store(oob.data(), 7, n + 3);
     CHECK(!ref::spot_check_sa_order(T.data(), n, at(oob), n, n, 1, err), "an out-of-range entry must be rejected");
 
+    // A repeated entry of a suffix longer than the comparison limit: undecidable by comparison.
+    auto rep = SA;
+    idx_t r = 0;
+    while(sa40::load(SA.data(), r) > n - 2000)
+        ++r;
+    sa40::store(rep.data(), r + 1, sa40::load(SA.data(), r));
+    CHECK(!ref::spot_check_sa_order(T.data(), n, at(rep), n, 1000, 1, err), "a repeated entry must be rejected");
+
     return true;
 }
 
@@ -607,6 +615,11 @@ bool test_gpu_rejects()
     sa40::store(swapped.data(), 101, x);
     CHECK(write_index(dir, T, swapped, 2, err), "%s", err.c_str());
     CHECK(!eng.load(dir.string(), Query_Options{Residency::pinned, Residency::device, 100000}, err), "a swapped pair must be rejected at load");
+
+    auto zeros = SA;   // All entries 0: every pair repeats a suffix longer than the comparison limit.
+    std::fill(zeros.begin(), zeros.end(), 0);
+    CHECK(write_index(dir, T, zeros, 1, err), "%s", err.c_str());
+    CHECK(!eng.load(dir.string(), Query_Options{}, err), "a suffix array of repeated entries must be rejected at load");
 
     CHECK(write_index(dir, T, SA, 1, err), "%s", err.c_str());
     CHECK(eng.load(dir.string(), Query_Options{}, err), "%s", err.c_str());

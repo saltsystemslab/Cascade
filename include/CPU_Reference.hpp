@@ -150,6 +150,12 @@ bool spot_check_sa_order(const T_sym_* const T, const idx_t n, F_sa_ sa, const i
             return false;
         }
 
+        if(i == j)  // Undecidable within `max_cmp` symbols if long, so checked apart.
+        {
+            err = "suffix-array entry " + std::to_string(i) + " repeats at ranks " + std::to_string(r) + " and " + std::to_string(r + 1);
+            return false;
+        }
+
         if(cmp_suffixes(T, n, i, j, max_cmp) > 0)
         {
             err = "suffix-array order violated between ranks " + std::to_string(r) + " and " + std::to_string(r + 1)

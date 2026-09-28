@@ -86,12 +86,16 @@ bool map_host(const std::size_t bytes, void*& base, std::string& err)
 
 
 // Registers the host memory `[base, base + bytes)` with the device, mapped, in
-// `REGISTER_CHUNK`-sized pieces, counting the bytes registered in `registered`.
-// Returns `false` with a reason in `err` on failure.
-bool register_host(void* const base, const std::size_t bytes, std::size_t& registered, std::string& err)
+// `REGISTER_CHUNK`-sized pieces, counting the bytes registered in `registered`;
+// read-only for the device if `read_only` and the device supports it. The pages
+// must have been written before: a read-only registration of untouched
+// anonymous pages can pin the shared zero page, which later writes then
+// copy-on-write away from, out of the device's sight. Returns `false` with a
+// reason in `err` on failure.
+bool register_host(void* const base, const std::size_t bytes, const bool read_only, std::size_t& registered, std::string& err)
 {
     int ro = 0;
-    if(!cuda_ok(cudaDeviceGetAttribute(&ro, cudaDevAttrHostRegisterReadOnlySupported, 0), "querying read-only registration", err))
+    if(read_only && !cuda_ok(cudaDeviceGetAttribute(&ro, cudaDevAttrHostRegisterReadOnlySupported, 0), "querying read-only registration", err))
         return false;
 
     const unsigned flags = cudaHostRegisterMapped | (ro ? cudaHostRegisterReadOnly : 0);
@@ -130,7 +134,7 @@ __global__ void spot_check_kernel(const T_sym_* const T, const idx_t n, const ui
     {
         const idx_t r = (exhaustive ? k : (k == 0 ? 0 : (k == 1 ? n - 2 : mix(seed ^ k) % (n - 1))));
         const idx_t i = sa40::load(SA, r), j = sa40::load(SA, r + 1);
-        if(i >= n || j >= n || ref::cmp_suffixes(T, n, i, j, SPOT_MAX_CMP) > 0)
+        if(i >= n || j >= n || i == j || ref::cmp_suffixes(T, n, i, j, SPOT_MAX_CMP) > 0)
             atomicMin(bad, static_cast<unsigned long long>(r));
     }
 }
@@ -302,24 +306,28 @@ bool Suffix_Index::load(const std::string& dir, const Residency text_res, const 
         return false;
     }
 
-    // Pinned staging buffers for the device-bound reads.
+    // Pinned staging buffers for the device-bound reads, no larger than the arrays need.
     uint8_t* stage[2] = {nullptr, nullptr};
     void* stage_base = nullptr;
     std::size_t stage_registered = 0;
     const bool staged = (text_res == Residency::device || sa_res == Residency::device);
+    const std::size_t stage_bytes = std::min(STAGE_BYTES, round_up(std::max(meta_.n * meta_.sym_bytes, meta_.sa_bytes()), IO_ALIGN));
     bool ok = true;
     if(staged)
     {
-        ok = map_host(2 * STAGE_BYTES, stage_base, err) && register_host(stage_base, 2 * STAGE_BYTES, stage_registered, err);
+        ok = map_host(2 * stage_bytes, stage_base, err);
+        if(ok)
+            std::memset(stage_base, 0, 2 * stage_bytes);   // Fault the pages in before pinning them; see `register_host`.
+        ok = ok && register_host(stage_base, 2 * stage_bytes, false, stage_registered, err);
         stage[0] = static_cast<uint8_t*>(stage_base);
-        stage[1] = stage[0] + STAGE_BYTES;
+        stage[1] = stage[0] + stage_bytes;
     }
 
     if(ok)
     {
         const auto t0 = std::chrono::steady_clock::now();
         const std::size_t text_bytes = meta_.n * meta_.sym_bytes;
-        ok = place(text_, text_res, {Source{meta_.text, 0, text_bytes}}, text_bytes, TEXT_PAD_BYTES, stage, err);
+        ok = place(text_, text_res, {Source{meta_.text, 0, text_bytes}}, text_bytes, TEXT_PAD_BYTES, stage, stage_bytes, err);
         stats_.t_text = seconds_since(t0);
     }
 
@@ -329,7 +337,7 @@ bool Suffix_Index::load(const std::string& dir, const Residency text_res, const 
         std::vector<Source> src;
         for(std::size_t i = 0; i < meta_.sa_part.size(); ++i)
             src.push_back(Source{meta_.sa_part[i], meta_.sa_part_off[i], meta_.part_bytes(i)});
-        ok = place(sa_, sa_res, src, meta_.sa_bytes(), SA_PAD_BYTES, stage, err);
+        ok = place(sa_, sa_res, src, meta_.sa_bytes(), SA_PAD_BYTES, stage, stage_bytes, err);
         stats_.t_sa = seconds_since(t0);
     }
 
@@ -338,7 +346,7 @@ bool Suffix_Index::load(const std::string& dir, const Residency text_res, const 
         for(std::size_t off = 0; off < stage_registered; off += REGISTER_CHUNK)
             cudaHostUnregister(static_cast<uint8_t*>(stage_base) + off);
         if(stage_base != nullptr)
-            ::munmap(stage_base, 2 * STAGE_BYTES);
+            ::munmap(stage_base, 2 * stage_bytes);
     }
 
     if(ok && spot > 0)
@@ -352,7 +360,7 @@ bool Suffix_Index::load(const std::string& dir, const Residency text_res, const 
 
 
 bool Suffix_Index::place(Array& a, const Residency res, const std::vector<Source>& src, const std::size_t bytes, const std::size_t pad,
-                         uint8_t* const (&stage)[2], std::string& err)
+                         uint8_t* const (&stage)[2], const std::size_t stage_bytes, std::string& err)
 {
     a.res = res;
     if(res == Residency::device)
@@ -382,9 +390,9 @@ bool Suffix_Index::place(Array& a, const Residency res, const std::vector<Source
 
         std::size_t k = 0;
         for(std::size_t f = 0; ok && f < src.size(); ++f)
-            for(std::size_t pos = 0; ok && pos < src[f].bytes; pos += STAGE_BYTES, ++k)
+            for(std::size_t pos = 0; ok && pos < src[f].bytes; pos += stage_bytes, ++k)
             {
-                const std::size_t b = k & 1, sz = std::min(STAGE_BYTES, src[f].bytes - pos);
+                const std::size_t b = k & 1, sz = std::min(stage_bytes, src[f].bytes - pos);
                 ok = cuda_ok(cudaEventSynchronize(copied[b]), "staging", err)
                   && index_io::read_range(src[f].path, pos, sz, stage[b], err)
                   && cuda_ok(cudaMemcpyAsync(dst + src[f].off + pos, stage[b], sz, cudaMemcpyHostToDevice, s), "cudaMemcpyAsync", err)
@@ -418,7 +426,7 @@ bool Suffix_Index::place(Array& a, const Residency res, const std::vector<Source
 
     int host_ptr = 0;
     if(!cuda_ok(cudaDeviceGetAttribute(&host_ptr, cudaDevAttrCanUseHostPointerForRegisteredMem, 0), "querying host-pointer use", err)
-        || !register_host(a.base, a.alloc_bytes, a.registered_bytes, err))
+        || !register_host(a.base, a.alloc_bytes, true, a.registered_bytes, err))
         return false;
 
     if(host_ptr)

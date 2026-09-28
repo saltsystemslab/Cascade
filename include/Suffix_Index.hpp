@@ -143,10 +143,11 @@ private:
 
     // Allocates an array of `bytes` bytes plus `pad` zero bytes in the tier
     // `res` into `a`, and reads its content from the files `src`, staging
-    // device-bound reads through `stage`. Returns `false` with a reason in `err`
-    // on failure, leaving `a` for `free_array`.
+    // device-bound reads through the two `stage_bytes`-sized buffers `stage`.
+    // Returns `false` with a reason in `err` on failure, leaving `a` for
+    // `free_array`.
     static bool place(Array& a, Residency res, const std::vector<Source>& src, std::size_t bytes, std::size_t pad,
-                      uint8_t* const (&stage)[2], std::string& err);
+                      uint8_t* const (&stage)[2], std::size_t stage_bytes, std::string& err);
 
     // Spot-checks the order of `spot` random adjacent pairs of the suffix array.
     // Returns `false` with a reason in `err` on a violation.
