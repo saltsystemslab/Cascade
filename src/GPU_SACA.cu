@@ -652,6 +652,13 @@ void GPU_SACA<T_sym_>::partition()
     {
         PROFILE_SCOPE("compute_partition_IDs");
         compute_partition_IDs();
+
+        // Partitioning sweeps need only the partition-sizes.
+        if(env::get_u64("GPU_SACA_PARTITION_ONLY").value_or(0))
+        {
+            std::cerr << "Partition-IDs computed; stopping, as `GPU_SACA_PARTITION_ONLY` is set.\n";
+            std::exit(partition_sizes_fit() ? EXIT_SUCCESS : EXIT_FAILURE);
+        }
     }
 
     // Move the suffixes to their corresponding partitions.
