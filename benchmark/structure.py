@@ -204,8 +204,11 @@ def partitioning(r, corpus, label):
     """
     name, n = r["name"], r["n"]
     k = re.fullmatch(r"k(\d+)", label)
-    if r["abort"] and not r["pivots"]:
-        return ({"corpus": corpus, "label": label, "feasible": 0, "K": int(k.group(1)) if k else NAN}, [], [])
+    if r["abort"] and not r["pivots"]:  # Keeps the size bound, printed before the abort, that the run failed.
+        row = {"corpus": corpus, "label": label, "feasible": 0, "K": int(k.group(1)) if k else NAN}
+        if r["bound"]:
+            row.update(dict(zip(("B", "p_min", "floor"), r["bound"])), n=n)
+        return row, [], []
     if r["bound"] is None and r["pivots"] is None and not r["sizes"]:
         return None, [], []
 
