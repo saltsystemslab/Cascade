@@ -11,6 +11,7 @@
 #include <type_traits>
 #include <limits>
 #include <utility>
+#include <string>
 #include <vector>
 #include <filesystem>
 #include <fstream>
@@ -308,6 +309,19 @@ struct Collection_Stats
         return Collection_Stats{n, total, min, max, mean, median, std_dev, imbalance};
     }
 };
+
+
+// Returns a string with the elements of the collection `C`, separated by single
+// spaces.
+template <typename T_>
+std::string join(const std::vector<T_>& C)
+{
+    std::string s;
+    for(std::size_t i = 0; i < C.size(); ++i)
+        s += (i > 0 ? " " : "") + std::to_string(C[i]);
+
+    return s;
+}
 
 }
 

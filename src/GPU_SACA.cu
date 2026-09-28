@@ -317,6 +317,11 @@ void GPU_SACA<T_sym_>::select_pivots()
             std::exit(EXIT_FAILURE);
         }
     }
+
+#ifdef STATS
+    std::cerr   << "Pivots selection: " << p_ << " partitions from " << s << " samples of " << K << "-symbol prefixes;"
+                << " initial sort-keys of " << ell << " symbols.\n";
+#endif
 }
 
 
@@ -370,7 +375,7 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
         if(const auto p_target = env::get_u64("GPU_SACA_P_TARGET"); p_target)
         {
             if(*p_target < p_min_from_budget)
-                std::cerr << "The provided required minimum partition-count falls below device-budget minimum. Discarding it.";
+                std::cerr << "The provided required minimum partition-count falls below device-budget minimum. Discarding it.\n";
             else
                 p_min = *p_target;
         }
@@ -385,6 +390,11 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     }
 
     const auto p_sz_bound = (n_ + p_min - 1) / p_min;   // Maximum supported size of a partition based on the minimum partition-count.
+
+#ifdef STATS
+    std::cerr   << "Partition-size bound: " << p_sz_bound << " suffixes, from minimum partition-count " << p_min
+                << " (device-budget floor: " << p_min_from_budget << ").\n";
+#endif
 
     return p_sz_bound;
 }
@@ -925,6 +935,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 #ifdef STATS
         std::cerr << "Partition-size stats:\n";
         util::Collection_Stats::get_collection_stat(P_cap).print();
+        std::cerr << "Partition sizes: " << util::join(P_cap) << "\n";
 #endif
     }
 
