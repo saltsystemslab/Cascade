@@ -47,9 +47,13 @@ public:
     // into `dst`.
     void read_key(p_id_t p_id, idx_t off, idx_t sz, p_sz_t* dst) const;
 
-    // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
-    // offset `off`, from `suf` and `key`.
-    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
+    // Writes `sz`-many suffixes of the `p_id`'th partition, at its offset
+    // `off`, from `src`.
+    void write_suf(p_id_t p_id, idx_t off, idx_t sz, const idx_t* src);
+
+    // Writes `sz`-many keys of the `p_id`'th partition, at its offset `off`,
+    // from `src`.
+    void write_key(p_id_t p_id, idx_t off, idx_t sz, const p_sz_t* src);
 
     // Releases the `p_id`'th partition's suffixes and keys.
     void retire_data(p_id_t p_id);

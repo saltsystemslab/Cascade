@@ -78,10 +78,15 @@ void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz
 }
 
 
-void Disk_Backend::write(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const suf, const p_sz_t* const key)
+void Disk_Backend::write_suf(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const src)
 {
-    suf_[p_id].write_at(suf, sz * sizeof(idx_t), off * sizeof(idx_t));
-    key_[p_id].write_at(key, sz * sizeof(p_sz_t), off * sizeof(p_sz_t));
+    suf_[p_id].write_at(src, sz * sizeof(idx_t), off * sizeof(idx_t));
+}
+
+
+void Disk_Backend::write_key(const p_id_t p_id, const idx_t off, const idx_t sz, const p_sz_t* const src)
+{
+    key_[p_id].write_at(src, sz * sizeof(p_sz_t), off * sizeof(p_sz_t));
 }
 
 

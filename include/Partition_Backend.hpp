@@ -35,6 +35,23 @@ private:
     RAM_Backend ram_;   // Storage for the resident partition-units.
     Disk_Backend disk_; // Storage for the spilled partition-units.
 
+    // Per-chunk residency of the partitions' content. A partition's `c`'th chunk
+    // is its range `[c * chunk_cap_, (c + 1) * chunk_cap_)`, i.e. its `c`'th
+    // staging-slab's; each field of each chunk resides in its own tier.
+    // {
+        // Fields of a partition's content.
+        enum class Field : std::size_t { suf = 0, key, field_c, };
+
+        static constexpr std::size_t FIELD_C = static_cast<std::size_t>(Field::field_c);
+
+        // Residency tiers of a chunk's field.
+        enum class Tier : uint8_t { disk = 0, ram, };
+
+        const idx_t chunk_cap_; // Elements per content-chunk: a staging-slab's capacity.
+        std::vector<idx_t> chunk_base_; // Index of each partition's first chunk, in the partitions' flattened chunk-sequence; `p + 1` entries.
+        std::unique_ptr<std::atomic<uint8_t>[]> tier_;  // Tier of each chunk's each field, field-major: `FIELD_C x chunk_base_[p]` entries.
+    // }
+
     Host_Budget budget_;    // Host-memory budget of the elastic RAM-tier.
     const p_sz_t msg_chunk_cap_;    // Messages per RAM message-chunk: a slab's inbox-range spans `MSG_CHUNKS_PER_SLAB` of them.
     std::unique_ptr<Message_Pool> pool_;    // Pool of the RAM message-chunks.
@@ -75,6 +92,9 @@ private:
     // }
 
 
+    // Returns the width, in bytes, of a content-element's field `f`.
+    static constexpr std::size_t width(const Field f) { return f == Field::suf ? sizeof(idx_t) : sizeof(p_sz_t); }
+
     // Flushes the `p_id`'th inbox's block-overflow buffer. `final` denotes
     // whether this is the last flush invoked on the buffer or not.
     void flush_overflow(p_id_t p_id, bool final);
@@ -106,6 +126,19 @@ private:
 
     // Returns the RAM-part `in`'s message-chunks to the pool, and empties it.
     void release_inbox(RAM_Inbox& in);
+
+    // Returns the tier of field `f` of the `p_id`'th partition's `c`'th chunk.
+    Tier tier(Field f, p_id_t p_id, idx_t c) const;
+
+    // Applies `f(c, from, len)` to each piece `[from, from + len)` of a
+    // partition's range `[off, off + sz)` that lies in the partition's `c`'th
+    // chunk, in the range's order. An empty range touches no chunk.
+    template <typename F_>
+    void for_each_chunk(idx_t off, idx_t sz, F_ f) const;
+
+    // Returns the bytes of field `f` in the `p_id`'th partition's range
+    // `[off, off + sz)` that reside in disk.
+    std::size_t disk_bytes(Field f, p_id_t p_id, idx_t off, idx_t sz) const;
 
 
 public:
@@ -168,9 +201,6 @@ public:
     // Returns the `p_id`'th partition's resident keys, if any.
     auto* resident_key(const p_id_t p_id) { return plan_.data(p_id) ? ram_.key(p_id) : nullptr; }
 
-    // Returns the `p_id`'th partition's spilled suffixes' file, if any.
-    auto* spilled_suf(const p_id_t p_id) { return plan_.data(p_id) ? nullptr : &disk_.suf(p_id); }
-
     // Reads the staging slab `s`'s chunk of suffixes from the backend into it.
     void read_suffixes(Staging_Slab& s) const;
 
@@ -185,6 +215,12 @@ public:
     // Reads `sz` suffixes and their corresponding ranks of the `p_id`'th
     // partition, from its offset `off`, into `suf` and `key` respectively.
     void read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, p_sz_t* key) const;
+
+    // Writes `sz` suffixes of the `p_id`'th partition, at its offset `off`, from
+    // `suf`. The disk-resident pieces round up to whole disk-blocks: `suf` must
+    // have that capacity, and the write must end at a disk-block or at the
+    // partition's end. Thread-safe for disjoint ranges.
+    void write_suffixes(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf);
 
     // Reads into the staging slab `s` its chunk of its partition's inbox
     // messages for the current generation. The RAM message-chunks read are
@@ -222,6 +258,12 @@ public:
     // generation.
     idx_t disk_mass_last_gen() const;
 };
+
+
+inline Partition_Backend::Tier Partition_Backend::tier(const Field f, const p_id_t p_id, const idx_t c) const
+{
+    return static_cast<Tier>(tier_[static_cast<std::size_t>(f) * chunk_base_[p_] + chunk_base_[p_id] + c].load(std::memory_order_relaxed));
+}
 
 }
 

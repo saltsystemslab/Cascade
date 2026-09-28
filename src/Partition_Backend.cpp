@@ -19,6 +19,8 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , plan_(P_cap, budget, fixed_bytes)
     , ram_(P_cap, plan_)
     , disk_(P_cap, spill, plan_)
+    , chunk_cap_(chunk_cap)
+    , chunk_base_(p_ + 1, 0)
     , budget_(budget - fixed_bytes - plan_.data_resident(), plan_.force_spill())
     , msg_chunk_cap_(chunk_cap / MSG_CHUNKS_PER_SLAB)
     , pool_(std::make_unique<Message_Pool>(msg_chunk_cap_, budget_.pinned() ? 0 : budget))
@@ -31,6 +33,17 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , ov_lock_(p_)
 {
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
+
+    // The chunks' tiers follow the residency-plan: a partition's content resides whole in RAM or in disk.
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        chunk_base_[p_id + 1] = chunk_base_[p_id] + (P_cap[p_id] + chunk_cap_ - 1) / chunk_cap_;
+
+    tier_ = std::make_unique<std::atomic<uint8_t>[]>(FIELD_C * chunk_base_[p_]);
+    for(std::size_t f = 0; f < FIELD_C; ++f)
+        for(p_id_t p_id = 0; p_id < p_; ++p_id)
+            for(idx_t c = chunk_base_[p_id]; c < chunk_base_[p_id + 1]; ++c)
+                tier_[f * chunk_base_[p_] + c].store(
+                    static_cast<uint8_t>(plan_.data(p_id) ? Tier::ram : Tier::disk), std::memory_order_relaxed);
 
     for(idx_t parity = 0; parity < 2; ++parity)
     {
@@ -92,11 +105,33 @@ void Partition_Backend::retire_partition(const p_id_t p_id)
 }
 
 
+template <typename F_>
+void Partition_Backend::for_each_chunk(const idx_t off, const idx_t sz, F_ f) const
+{
+    for(idx_t from = off; from < off + sz;)
+    {
+        const auto c = from / chunk_cap_;
+        const auto to = std::min(off + sz, (c + 1) * chunk_cap_);
+        f(c, from, to - from);
+        from = to;
+    }
+}
+
+
+std::size_t Partition_Backend::disk_bytes(const Field f, const p_id_t p_id, const idx_t off, const idx_t sz) const
+{
+    std::size_t bytes = 0;
+    for_each_chunk(off, sz, [&](const idx_t c, idx_t, const idx_t len){ bytes += (tier(f, p_id, c) == Tier::disk ? len * width(f) : 0); });
+
+    return bytes;
+}
+
+
 void Partition_Backend::read_suffixes(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * sizeof(idx_t));
-    INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * sizeof(idx_t)));
+    INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()));
 
     read_suf_chunk(s.p_id(), s.off(), s.size(), s.suf());
 }
@@ -110,7 +145,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
     {
         INSTRUMENT_TIMER(probe::P().me().io_ns);
         INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
-        INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * (sizeof(idx_t) + sizeof(p_sz_t))));
+        INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()) + disk_bytes(Field::key, s.p_id(), s.off(), s.size()));
         read_chunk(s.p_id(), s.off(), s.size(), suf, key);
     }
 }
@@ -118,15 +153,27 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 
 void Partition_Backend::read_suf_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf) const
 {
-    plan_.data(p_id) ?  ram_.read_suf(p_id, off, sz, suf) :
-                        disk_.read_suf(p_id, off, sz, suf);
+    // The pieces go in the range's order, so that a disk-piece's block-rounding spills only over the pieces yet to be read.
+    for_each_chunk(off, sz,
+        [&](const idx_t c, const idx_t from, const idx_t len)
+        {
+            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.read_suf(p_id, from, len, suf + (from - off)) :
+                                                        disk_.read_suf(p_id, from, len, suf + (from - off));
+        });
 }
 
 
 void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, p_sz_t* const key) const
 {
-    plan_.data(p_id) ?  (ram_.read_suf(p_id, off, sz, suf), ram_.read_key(p_id, off, sz, key)) :
-                        (disk_.read_suf(p_id, off, sz, suf), disk_.read_key(p_id, off, sz, key));
+    // The pieces go in the range's order, so that a disk-piece's block-rounding spills only over the pieces yet to be read.
+    for_each_chunk(off, sz,
+        [&](const idx_t c, const idx_t from, const idx_t len)
+        {
+            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.read_suf(p_id, from, len, suf + (from - off)) :
+                                                        disk_.read_suf(p_id, from, len, suf + (from - off));
+            tier(Field::key, p_id, c) == Tier::ram ?    ram_.read_key(p_id, from, len, key + (from - off)) :
+                                                        disk_.read_key(p_id, from, len, key + (from - off));
+        });
 }
 
 
@@ -165,12 +212,31 @@ void Partition_Backend::write(const Staging_Slab& s)
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
-    INSTRUMENT(probe::P().me().disk_bytes += (plan_.data(s.p_id()) ? 0 : s.size() * (sizeof(idx_t) + sizeof(p_sz_t))));
+    INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()) + disk_bytes(Field::key, s.p_id(), s.off(), s.size()));
 
     const auto p_id = s.p_id();
+    const auto off = s.off();
+    const auto* const suf = s.suf();
     const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
-    plan_.data(p_id) ?  ram_.write(p_id, s.off(), s.size(), s.suf(), key) :
-                        disk_.write(p_id, s.off(), s.size(), s.suf(), key);
+    for_each_chunk(off, s.size(),
+        [&](const idx_t c, const idx_t from, const idx_t len)
+        {
+            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.write_suf(p_id, from, len, suf + (from - off)) :
+                                                        disk_.write_suf(p_id, from, len, suf + (from - off));
+            tier(Field::key, p_id, c) == Tier::ram ?    ram_.write_key(p_id, from, len, key + (from - off)) :
+                                                        disk_.write_key(p_id, from, len, key + (from - off));
+        });
+}
+
+
+void Partition_Backend::write_suffixes(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const suf)
+{
+    for_each_chunk(off, sz,
+        [&](const idx_t c, const idx_t from, const idx_t len)
+        {
+            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.write_suf(p_id, from, len, suf + (from - off)) :
+                                                        disk_.write_suf(p_id, from, len, suf + (from - off));
+        });
 }
 
 

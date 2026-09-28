@@ -18,7 +18,10 @@
 namespace gpu_saca
 {
 
-// A buffer of suffixes, backed by direct-files.
+class Partition_Backend;
+
+
+// A buffer of suffixes, backed by a partition's storage in the backend.
 class Suffix_Buffer
 {
 private:
@@ -27,8 +30,8 @@ private:
 
     static_assert((w_buf_cap * sizeof(idx_t)) % Direct_File::DISK_BLOCK == 0);
 
-    idx_t* suf_mem_;    // Resident sink for the suffixes.
-    Direct_File* suf_file_; // Spill-file sink for the suffixes.
+    Partition_Backend* backend_;    // Backend sinking the suffixes.
+    p_id_t p_id_;   // ID of the partition the suffixes belong to.
 
     idx_t* w_suf_base_; // Flattened collection of worker-local suffix buffers.
     std::vector<util::Padded<idx_t>> w_fill_;   // Fill count of the worker-local buffers.
@@ -44,10 +47,9 @@ private:
 
 public:
 
-    // Constructs a buffer that overflows suffixes to the partition's sink: the
-    // resident allocation `suf_mem` when non-null, the spill-file `suf_file`
-    // otherwise.
-    Suffix_Buffer(idx_t* suf_mem, Direct_File* suf_file);
+    // Constructs a buffer that overflows suffixes to the `p_id`'th partition's
+    // storage in the backend `backend`.
+    Suffix_Buffer(Partition_Backend& backend, p_id_t p_id);
 
     Suffix_Buffer(const Suffix_Buffer&) = delete;
     Suffix_Buffer& operator=(const Suffix_Buffer&) = delete;

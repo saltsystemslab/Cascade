@@ -563,17 +563,30 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         // narrowest persisted element type (`p_sz_t`) governs it.
         static_assert(sizeof(p_sz_t) <= sizeof(idx_t) && sizeof(p_sz_t) <= sizeof(Prefix_Key), "`p_sz_t` must be the narrowest persisted element type.");
 
+        // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
+        constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
+        constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
+        static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
+        static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
+
         if(P_sz_max >= CHUNK_CAP)
             chunk_cap_ = CHUNK_CAP;
         else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
-        {
-            // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
-            constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
-            constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
-            static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
-            static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
             chunk_cap_ = ((P_sz_max + cap_granularity - 1) / cap_granularity) * cap_granularity;
+
+#ifdef TESTS
+        // Small slabs make even small inputs span many content-chunks per partition.
+        if(const auto cap = env::get_u64("GPU_SACA_CHUNK_CAP"); cap)
+        {
+            if(*cap == 0 || *cap % cap_granularity != 0)
+            {
+                std::cerr << "`GPU_SACA_CHUNK_CAP` must be a positive multiple of " << cap_granularity << ". Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+
+            chunk_cap_ = *cap;
         }
+#endif
     }
 
     // Set the reader- and writer-pool sizes.
@@ -692,7 +705,7 @@ void GPU_SACA<T_sym_>::partition()
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->spilled_suf(p_id)});
+                P_buf.emplace_back(Suffix_Buffer{*backend_, p_id});
         }
 
 

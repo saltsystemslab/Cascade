@@ -63,9 +63,6 @@ public:
     // Opens the `p_id`'th partition's key-file.
     void open_key(p_id_t p_id);
 
-    // Returns the `p_id`'th partition's suffix-file.
-    auto& suf(const p_id_t p_id) { return suf_[p_id]; }
-
     // Returns the `p_id`'th partition's inbox message-target file for the
     // generation-parity currently being written.
     auto& msg_tgt(const p_id_t p_id) { return msg_tgt_[write_parity_][p_id]; }
@@ -89,9 +86,13 @@ public:
     // current generation, from its offset `off`, into `tgt` and `rank`.
     void read_messages(p_id_t p_id, p_sz_t off, p_sz_t sz, idx_t* tgt, msg_rank_t* rank) const;
 
-    // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
-    // offset `off`, from `suf` and `key`.
-    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
+    // Writes `sz`-many suffixes of the `p_id`'th partition, at its offset
+    // `off`, from `src`.
+    void write_suf(p_id_t p_id, idx_t off, idx_t sz, const idx_t* src);
+
+    // Writes `sz`-many keys of the `p_id`'th partition, at its offset `off`,
+    // from `src`.
+    void write_key(p_id_t p_id, idx_t off, idx_t sz, const p_sz_t* src);
 
     // Retires the `p_id`'th partition's suffix- and key-files.
     void retire_data(p_id_t p_id);
