@@ -11,7 +11,8 @@ Deliberately no means: at three processes they are not meaningful.
 
 Every batch's counts hash must equal infini-gram's for the same queries (its
 workload, and as many of them); summary.md lists the batches whose hash differs,
-and the count of our batches failing the certificate.
+and the counts of our batches failing the certificate, and of those whose
+intervals through the pipeline differ from those found from device memory.
 """
 import math
 import pathlib
@@ -84,7 +85,11 @@ def load(d):
         q, med, best = num(b, "q"), num(b, "t_find_median"), num(b, "t_find_min")
         b["qps_median"] = q / med if med > 0 else NAN
         b["qps_best"] = q / best if best > 0 else NAN
-        if b["engine"] == "ours":
+        if b["engine"] == "ours" and "t_e2e_median" in b:  # Through the pipeline, from pinned memory, and from pageable.
+            e2e, pageable = num(b, "t_e2e_median"), num(b, "t_e2e_pageable_median")
+            b["qps_e2e"] = q / e2e if e2e > 0 else NAN
+            b["qps_e2e_pageable"] = q / pageable if pageable > 0 else NAN
+        elif b["engine"] == "ours":    # From before the pipeline: the transfers and the search, unoverlapped, from pageable memory.
             t = num(b, "t_h2d") + med + num(b, "t_d2h")
             b["qps_e2e"] = q / t if t > 0 else NAN
     return bs, bad
@@ -164,10 +169,14 @@ def agreement(bs, d):
            f"{unchecked} without a reference.",
            f"- Certificate: {cert.count('pass')} of our batches pass, {cert.count('FAIL')} fail."]
     out += [f"  - differs: {x}" for x in differ]
+    piped = [b["e2e_check"] for b in bs if b["engine"] == "ours" and "e2e_check" in b]
+    if piped:
+        out.append(f"- Pipeline: {piped.count('pass')} of our batches' intervals equal those from device memory, "
+                   f"{piped.count('FAIL')} differ.")
     return out
 
 
-def main_rows(bs, t_all, ig_load):
+def main_rows(bs, t_all, ig_load, piped):
     ig_cfg = f"direct-t{t_all}-p0-{ig_load}"
     rows, speedups = [], []
     for w in sorted({b["workload"] for b in bs if is_main(b["run"])}, key=order):
@@ -175,8 +184,9 @@ def main_rows(bs, t_all, ig_load):
         tp, e2e = sel(bs, "ours", is_main, "s32w2o0", w), sel(bs, "ours", is_main, "s32w2o0", w, "qps_e2e")
         q = next(b["q"] for b in bs if b["workload"] == w and is_main(b["run"]))
         speedups.append((median(tp) / median(ig) if ig else NAN, median(e2e) / median(ig) if ig else NAN))
-        rows.append([w, f"{int(q):,}", spread(ig), spread(sel(bs, "ours", is_main, "s0w0o0", w)), spread(tp), spread(e2e),
-                     times(median(tp), median(ig)), times(median(e2e), median(ig))])
+        pageable = [spread(sel(bs, "ours", is_main, "s32w2o0", w, "qps_e2e_pageable"))] if piped else []
+        rows.append([w, f"{int(q):,}", spread(ig), spread(sel(bs, "ours", is_main, "s0w0o0", w)), spread(tp), spread(e2e)] + pageable
+                    + [times(median(tp), median(ig)), times(median(e2e), median(ig))])
     return rows, speedups
 
 
@@ -188,9 +198,10 @@ def batch_rows(bs, t_all, ig_load):
         ig = [median(sel(bs, "ig", "batch", f"direct-t{x}-p0-{ig_load}", w)) for x in sorted({t_all, t})]
         ig_best = max((x for x in ig if not math.isnan(x)), default=NAN)
         tp = median(sel(bs, "ours", "batch", "s32w2o0", w))
+        e2e = [median(sel(bs, "ours", "batch", c, w, "qps_e2e")) for c in ("s0w0o0", "s32w2o0")]
         rows.append([f"{q:,}", mq(ig[-1]), mq(ig[0]) if t < t_all else "-", mq(median(sel(bs, "ours", "batch", "s0w0o0", w))),
-                     mq(tp), mq(median(sel(bs, "ours", "batch", "s32w2o1", w))),
-                     mq(median(sel(bs, "ours", "batch", "s32w2o0", w, "qps_e2e"))), times(tp, ig_best)])
+                     mq(tp), mq(median(sel(bs, "ours", "batch", "s32w2o1", w))), mq(e2e[0]), mq(e2e[1]), times(tp, ig_best),
+                     times(max((x for x in e2e if not math.isnan(x)), default=NAN), ig_best)])
     return rows
 
 
@@ -266,7 +277,8 @@ def main(argv):
     bs, bad = load(d)
 
     cols = ("engine", "run", "config", "workload", "q", "sym_c", "reps", "t_h2d", "t_find_min", "t_find_median", "t_d2h",
-            "qps_best", "qps_median", "qps_e2e", "counts_hash", "validate", "hits", "occurrences")
+            "qps_best", "qps_median", "t_e2e_median", "qps_e2e", "t_e2e_pageable_median", "qps_e2e_pageable", "e2e_check",
+            "counts_hash", "validate", "hits", "occurrences")
     with open(d / "runs.tsv", "w", encoding="utf-8") as f:
         f.write("\t".join(cols) + "\n")
         for b in bs:
@@ -280,28 +292,33 @@ def main(argv):
           "## Correctness", ""] + agreement(bs, d) + [f"- Logs without results or with errors: {len(bad)}."] \
         + [f"  - {x}" for x in bad]
 
-    rows, speedups = main_rows(bs, t_all, ig_load)
+    # End to end: through the pipeline if the results have it; from before it, the transfers and the search added up.
+    piped = any("t_e2e_median" in b for b in bs)
+    e2e = "end to end" if piped else "with transfers"
+    rows, speedups = main_rows(bs, t_all, ig_load, piped)
     if rows:
         md += ["", "## Main: infini-gram's `_find_thread` against ours", "",
-               "Median over processes (min-max). Ours without transfers: the search on device-resident queries; with "
-               "transfers: plus the batch's copy to the device and the intervals' copy back, unoverlapped, from pageable "
-               "memory.", ""]
-        md += table(["workload", "q", f"infini-gram, {PLACED[ig_load]}", "ours, direct", "ours, two-phase", "two-phase with transfers",
-                     "speedup", "with transfers"], rows, ["---", "--:", "--:", "--:", "--:", "--:", "--:", "--:"])
+               "Median over processes (min-max). Ours from device memory: the search on device-resident queries. "
+               + ("End to end: from the batch in host memory to its intervals in host memory, through the pipeline of chunks "
+                  "over streams; from pinned memory, and from pageable memory in its own column." if piped else
+                  "With transfers: plus the batch's copy to the device and the intervals' copy back, unoverlapped, from pageable "
+                  "memory."), ""]
+        md += table(["workload", "q", f"infini-gram, {PLACED[ig_load]}", "ours, direct", "ours, two-phase", f"two-phase, {e2e}"]
+                    + (["end to end, pageable"] if piped else []) + ["speedup", e2e], rows, ["---"] + ["--:"] * (7 + piped))
         sp = [x for x, _ in speedups if not math.isnan(x)]
         sp_e2e = [y for _, y in speedups if not math.isnan(y)]
         if sp and sp_e2e:
             md += ["", f"Two-phase over infini-gram: {times(min(sp), 1)} to {times(max(sp), 1)} across workloads, median "
-                       f"{times(statistics.median(sp), 1)}; with transfers {times(min(sp_e2e), 1)} to {times(max(sp_e2e), 1)}, "
+                       f"{times(statistics.median(sp), 1)}; {e2e} {times(min(sp_e2e), 1)} to {times(max(sp_e2e), 1)}, "
                        f"median {times(statistics.median(sp_e2e), 1)}."]
 
     rows = batch_rows(bs, t_all, ig_load)
     if rows:
         md += ["", "## Batch size: present patterns, m = 10", "",
-               "infini-gram with every core, and with a pool no larger than the batch's 256-query chunks; the speedup is "
-               "two-phase's over the better of the two.", ""]
-        md += table(["q", "infini-gram", "infini-gram, small pool", "ours, direct", "two-phase", "two-phase, sorted",
-                     "two-phase with transfers", "speedup"], rows, ["--:"] * 8)
+               "infini-gram with every core, and with a pool no larger than the batch's 256-query chunks. The speedups are over "
+               f"the better of the two: two-phase's from device memory, and our better mode's {e2e}.", ""]
+        md += table(["q", "infini-gram", "infini-gram, small pool", "ours, direct", "two-phase", "two-phase, sorted", f"direct, {e2e}",
+                     f"two-phase, {e2e}", "speedup", e2e], rows, ["--:"] * 10)
 
     rows = ablation_rows(bs)
     if rows:

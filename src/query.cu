@@ -11,9 +11,11 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <map>
@@ -35,10 +37,15 @@ R"(Usage:
       Prints the index's metadata and whether it fits the device.
   query find --index DIR --queries Q1.qry[,Q2.qry,...] [--q N] [--text-res R] [--sa-res R]
              [--spot N] [--stride S,...] [--key-words W,...] [--sort 0|1,...] [--reps K]
-             [--itv-out F] [--cnt-out F] [--cnt-dir D] [--validate]
+             [--chunk-queries C] [--chunk-symbols Y] [--itv-out F] [--cnt-out F] [--cnt-dir D]
+             [--validate]
       Loads the index once, and finds the SA-intervals of the first N (default:
-      all) queries of every query file, K times (default 3); reports the load,
-      transfer, and search times and the counts' hash. R is `device` (default)
+      all) queries of every query file, K times (default 3) each way: from
+      device memory, and end to end, from host memory through the pipeline, both
+      pinned and pageable. Reports the load, transfer, search, and end-to-end
+      times, and the counts' hash. The pipeline streams chunks of up to C
+      queries (default 2^18) of up to Y symbols (default 2^24) in all; its
+      intervals must equal those from device memory. R is `device` (default)
       or `pinned`; --spot sets the suffix-array order spot-checks at load
       (default 100000). The search runs in two phases over a sample table of
       stride S (default 32; 0 selects the direct mode) with keys of W words (1,
@@ -244,15 +251,59 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
 
     auto sorted = t_find;
     std::sort(sorted.begin(), sorted.end());
+
+    // End to end: from the batch in host memory to its intervals in host memory, through the pipeline; from pinned memory, and pageable.
+    uint64_t* off_p = nullptr;
+    T_sym_* sym_p = nullptr;
+    SA_Interval* out_p = nullptr;
+    CUDA_CHECK(pinned_allocate_host(off_p, q + 1));
+    CUDA_CHECK(pinned_allocate_host(sym_p, std::max<idx_t>(off[q], 1)));
+    CUDA_CHECK(pinned_allocate_host(out_p, std::max<idx_t>(q, 1)));
+    std::memcpy(off_p, off.data(), (q + 1) * sizeof(uint64_t));
+    if(off[q] > 0)
+        std::memcpy(sym_p, sym.data(), off[q] * sizeof(T_sym_));
+
+    const auto time_find = [&](const uint64_t* const o, const T_sym_* const y, SA_Interval* const r)
+    {
+        std::vector<double> t;
+        for(uint64_t k = 0; k < reps; ++k)
+        {
+            const auto t0 = std::chrono::steady_clock::now();
+            eng.find(o, y, q, r);
+            t.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+        }
+
+        std::sort(t.begin(), t.end());
+        return t;
+    };
+
+    std::vector<SA_Interval> out_pg(q);
+    const auto t_e2e = time_find(off_p, sym_p, out_p);
+    const auto t_e2e_pg = time_find(off.data(), sym.data(), out_pg.data());
+    const bool e2e_same = (q == 0 || (std::memcmp(out_p, out.data(), q * sizeof(SA_Interval)) == 0
+                                      && std::memcmp(out_pg.data(), out.data(), q * sizeof(SA_Interval)) == 0));
+    CUDA_CHECK(deallocate_host(off_p));
+    CUDA_CHECK(deallocate_host(sym_p));
+    CUDA_CHECK(deallocate_host(out_p));
+
     idx_t hits = 0, occ = 0;
     for(const auto& I : out)
         hits += (I.hi > I.lo), occ += I.hi - I.lo;
 
-    std::printf("reps=%" PRIu64 "\nt_h2d=%.6f\nt_find_min=%.6f\nt_find_median=%.6f\nt_d2h=%.6f\nqps=%.0f\nhits=%" PRIu64 "\noccurrences=%" PRIu64
-                "\ncounts_hash=0x%016" PRIx64 "\n",
-                reps, t_h2d, sorted.front(), sorted[sorted.size() / 2], t_d2h, q / sorted.front(), hits, occ, query_file::counts_hash(out.data(), q));
+    std::printf("reps=%" PRIu64 "\nt_h2d=%.6f\nt_find_min=%.6f\nt_find_median=%.6f\nt_d2h=%.6f\nqps=%.0f\nt_e2e_min=%.6f\nt_e2e_median=%.6f"
+                "\nqps_e2e=%.0f\nt_e2e_pageable_min=%.6f\nt_e2e_pageable_median=%.6f\nqps_e2e_pageable=%.0f\ne2e_check=%s\nhits=%" PRIu64
+                "\noccurrences=%" PRIu64 "\ncounts_hash=0x%016" PRIx64 "\n",
+                reps, t_h2d, sorted.front(), sorted[sorted.size() / 2], t_d2h, q / sorted.front(), t_e2e.front(), t_e2e[t_e2e.size() / 2],
+                q / t_e2e.front(), t_e2e_pg.front(), t_e2e_pg[t_e2e_pg.size() / 2], q / t_e2e_pg.front(), e2e_same ? "pass" : "FAIL", hits, occ,
+                query_file::counts_hash(out.data(), q));
 
     int rc = 0;
+    if(!e2e_same)
+    {
+        std::fprintf(stderr, "error: %s: the pipeline's intervals differ from those found from device memory\n", path.c_str());
+        rc = 1;
+    }
+
     if(validate)
     {
         unsigned long long* flags_d = nullptr;
@@ -301,6 +352,7 @@ int run_find(const Args& a)
     uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3;
     std::vector<uint64_t> strides = {opt.stride}, key_words = {0}, sorts = {0};
     if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
+        || !get_u64(a, "chunk-queries", opt.chunk_queries, err) || !get_u64(a, "chunk-symbols", opt.chunk_symbols, err)
         || !get_u64_list(a, "stride", strides, err) || !get_u64_list(a, "key-words", key_words, err) || !get_u64_list(a, "sort", sorts, err)
         || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
     {
@@ -351,6 +403,8 @@ int run_find(const Args& a)
     std::printf("index=%s\nn=%" PRIu64 "\nsym_bytes=%u\ntext_res=%s\nsa_res=%s\nt_load_text=%.3f\nt_load_sa=%.3f\nspot_pairs=%" PRIu64 "\nt_spot=%.3f\n",
                 a.get("index").c_str(), idx.n(), idx.sym_bytes(), residency_name(idx.text_residency()), residency_name(idx.sa_residency()),
                 st.t_text, st.t_sa, st.spot_pairs, st.t_spot);
+    std::printf("streams=%zu\nchunk_queries=%" PRIu64 "\nchunk_symbols=%" PRIu64 "\n", eng.streams(), eng.options().chunk_queries,
+                eng.options().chunk_symbols);
 
     // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`; to `<stem>@<mode>.cnt` if several modes.
     int rc = 0;
