@@ -64,6 +64,49 @@ struct Index_Load_Stats
 // zero bytes, and the suffix array by `SA_PAD_BYTES` zero bytes.
 class Suffix_Index
 {
+private:
+
+    // A loaded array.
+    struct Array
+    {
+        void* base = nullptr;   // Base of the allocation.
+        std::size_t alloc_bytes = 0;    // Bytes allocated.
+        Residency res = Residency::device;
+        void* dev = nullptr;    // Device address of the content, if device-accessible.
+        void* host = nullptr;   // Host address of the content, if host-accessible.
+        std::size_t registered_bytes = 0;   // Bytes registered with the device, for `pinned`.
+    };
+
+    // A file contributing the bytes `[off, off + bytes)` of an array.
+    struct Source
+    {
+        std::string path;
+        std::size_t off;
+        std::size_t bytes;
+    };
+
+    Index_Meta meta_;   // Metadata of the index.
+    Array text_;    // The padded text.
+    Array sa_;  // The padded suffix array.
+    Index_Load_Stats stats_;    // Timings and counts of the load.
+
+
+    // Allocates an array of `bytes` bytes plus `pad` zero bytes in the tier
+    // `res` into `a`, and reads its content from the files `src`, staging
+    // device-bound reads through the two `stage_bytes`-sized buffers `stage`.
+    // Returns `false` with a reason in `err` on failure, leaving `a` for
+    // `free_array`.
+    static bool place(Array& a, Residency res, const std::vector<Source>& src, std::size_t bytes, std::size_t pad,
+                      uint8_t* const (&stage)[2], std::size_t stage_bytes, std::string& err);
+
+    // Spot-checks the order of `spot` random adjacent pairs of the suffix array.
+    // Returns `false` with a reason in `err` on a violation.
+    bool spot_check(idx_t spot, std::string& err);
+
+    // Frees the array `a`.
+    static void free_array(Array& a);
+
+
 public:
 
     Suffix_Index() = default;
@@ -113,48 +156,6 @@ public:
 
     // Returns the host address of the padded suffix array; `nullptr` if `device`.
     const uint8_t* host_sa() const { return static_cast<const uint8_t*>(sa_.host); }
-
-
-private:
-
-    // A loaded array.
-    struct Array
-    {
-        void* base = nullptr;   // Base of the allocation.
-        std::size_t alloc_bytes = 0;    // Bytes allocated.
-        Residency res = Residency::device;
-        void* dev = nullptr;    // Device address of the content, if device-accessible.
-        void* host = nullptr;   // Host address of the content, if host-accessible.
-        std::size_t registered_bytes = 0;   // Bytes registered with the device, for `pinned`.
-    };
-
-    // A file contributing the bytes `[off, off + bytes)` of an array.
-    struct Source
-    {
-        std::string path;
-        std::size_t off;
-        std::size_t bytes;
-    };
-
-    Index_Meta meta_;
-    Array text_;
-    Array sa_;
-    Index_Load_Stats stats_;
-
-    // Allocates an array of `bytes` bytes plus `pad` zero bytes in the tier
-    // `res` into `a`, and reads its content from the files `src`, staging
-    // device-bound reads through the two `stage_bytes`-sized buffers `stage`.
-    // Returns `false` with a reason in `err` on failure, leaving `a` for
-    // `free_array`.
-    static bool place(Array& a, Residency res, const std::vector<Source>& src, std::size_t bytes, std::size_t pad,
-                      uint8_t* const (&stage)[2], std::size_t stage_bytes, std::string& err);
-
-    // Spot-checks the order of `spot` random adjacent pairs of the suffix array.
-    // Returns `false` with a reason in `err` on a violation.
-    bool spot_check(idx_t spot, std::string& err);
-
-    // Frees the array `a`.
-    static void free_array(Array& a);
 };
 
 }
