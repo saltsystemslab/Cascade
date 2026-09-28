@@ -26,6 +26,7 @@
 #include <functional>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 
@@ -510,11 +511,98 @@ unsigned long long device_certify(const Query_Engine<T_sym_>& eng, const std::ve
 }
 
 
+// Returns the intervals of the batch `off`, `sym` that the engine finds from
+// device memory, through `find_async`.
+template <typename T_sym_>
+std::vector<SA_Interval> device_find(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t>& off, const std::vector<T_sym_>& sym)
+{
+    const idx_t q = off.size() - 1;
+    uint64_t* off_d = nullptr;
+    T_sym_* sym_d = nullptr;
+    SA_Interval* I_d = nullptr;
+    CUDA_CHECK(cudaMalloc(&off_d, off.size() * sizeof(uint64_t)));
+    CUDA_CHECK(cudaMalloc(&sym_d, std::max<std::size_t>(sym.size(), 1) * sizeof(T_sym_)));
+    CUDA_CHECK(cudaMalloc(&I_d, std::max<idx_t>(q, 1) * sizeof(SA_Interval)));
+    CUDA_CHECK(cudaMemcpy(off_d, off.data(), off.size() * sizeof(uint64_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(sym_d, sym.data(), sym.size() * sizeof(T_sym_), cudaMemcpyHostToDevice));
+
+    eng.find_async(off_d, sym_d, q, I_d, 0);
+    std::vector<SA_Interval> I(q);
+    CUDA_CHECK(cudaMemcpy(I.data(), I_d, q * sizeof(SA_Interval), cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaFree(off_d));
+    CUDA_CHECK(cudaFree(sym_d));
+    CUDA_CHECK(cudaFree(I_d));
+    return I;
+}
+
+
+// Pinned host copies of a batch and room for its intervals, for the pipeline's
+// zero-copy path.
+template <typename T_sym_>
+struct Pinned_Batch
+{
+    uint64_t* off = nullptr;
+    T_sym_* sym = nullptr;
+    SA_Interval* out = nullptr;
+
+    Pinned_Batch(const std::vector<uint64_t>& o, const std::vector<T_sym_>& y)
+    {
+        CUDA_CHECK(pinned_allocate_host(off, o.size()));
+        CUDA_CHECK(pinned_allocate_host(sym, std::max<std::size_t>(y.size(), 1)));
+        CUDA_CHECK(pinned_allocate_host(out, std::max<std::size_t>(o.size() - 1, 1)));
+        std::copy(o.begin(), o.end(), off);
+        std::copy(y.begin(), y.end(), sym);
+    }
+
+    ~Pinned_Batch()
+    {
+        CUDA_CHECK(deallocate_host(off));
+        CUDA_CHECK(deallocate_host(sym));
+        CUDA_CHECK(deallocate_host(out));
+    }
+
+    Pinned_Batch(const Pinned_Batch&) = delete;
+    Pinned_Batch& operator=(const Pinned_Batch&) = delete;
+};
+
+
+// Checks that the engine finds the intervals `want` of the batch `off`, `sym`
+// every way: through the pipeline from pageable memory and from pinned memory,
+// and from device memory.
+template <typename T_sym_>
+bool check_every_way(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t>& off, const std::vector<T_sym_>& sym,
+                     const std::vector<SA_Interval>& want, const std::string& what)
+{
+    const idx_t q = off.size() - 1;
+    std::vector<SA_Interval> got(q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
+    eng.find(off.data(), sym.data(), q, got.data());
+    Pinned_Batch<T_sym_> pb(off, sym);
+    std::fill(pb.out, pb.out + q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
+    eng.find(pb.off, pb.sym, q, pb.out);
+    const auto dev = device_find(eng, off, sym);
+
+    for(idx_t i = 0; i < q; ++i)
+    {
+        CHECK(same(got[i], want[i]), "%s: query %" PRIu64 " (m = %" PRIu64 "): pageable [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")",
+              what.c_str(), i, off[i + 1] - off[i], got[i].lo, got[i].hi, want[i].lo, want[i].hi);
+        CHECK(same(pb.out[i], want[i]), "%s: query %" PRIu64 " (m = %" PRIu64 "): pinned [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")",
+              what.c_str(), i, off[i + 1] - off[i], pb.out[i].lo, pb.out[i].hi, want[i].lo, want[i].hi);
+        CHECK(same(dev[i], want[i]), "%s: query %" PRIu64 " (m = %" PRIu64 "): device [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")",
+              what.c_str(), i, off[i + 1] - off[i], dev[i].lo, dev[i].hi, want[i].lo, want[i].hi);
+    }
+
+    return true;
+}
+
+
 // Checks the device engine against the oracle on the fixture text `T` of the
 // symbols `alpha`, in every device-accessible placement, with the suffix array
 // in `parts` parts: in the direct mode, and in two phases over every stride of
-// `{1, 2, 3, 16, 64, n + 5}`, key width, and batch order. Checks also that the
-// device certificate accepts the intervals and rejects perturbed ones.
+// `{1, 2, 3, 16, 64, n + 5}`, key width, and batch order; every way the engine
+// finds, with chunks of a few queries, so that the pipeline crosses chunks and
+// keeps long queries alone. Checks also that the device certificate accepts
+// the intervals and rejects perturbed ones.
 template <typename T_sym_>
 bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const idx_t parts,
                        const char* const what)
@@ -545,17 +633,20 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
         {
             const std::string where = std::string(what) + " (text " + residency_name(text_res) + ", suffix array " + residency_name(sa_res) + ")";
             Query_Engine<T_sym_> eng;
-            CHECK(eng.load(dir.string(), Query_Options{text_res, sa_res, 100000, 0}, err), "%s: %s", where.c_str(), err.c_str());
+            Query_Options opt{text_res, sa_res, 100000, 0};
+            opt.chunk_queries = 7;
+            opt.chunk_symbols = 23;
+            CHECK(eng.load(dir.string(), opt, err), "%s: %s", where.c_str(), err.c_str());
             for(const auto& md : modes)
             {
                 CHECK(eng.configure(md.stride, md.key_words, md.sort, err), "%s: %s", where.c_str(), err.c_str());
-                std::fill(got.begin(), got.end(), SA_Interval{~uint64_t(0), ~uint64_t(0)});
-                eng.find(off.data(), sym.data(), q, got.data());
-                for(idx_t i = 0; i < q; ++i)
-                    CHECK(same(got[i], want[i]), "%s, stride %" PRIu64 ", key words %u, sort %d: query %" PRIu64 " (m = %" PRIu64 "): device [%" PRIu64
-                          ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")", where.c_str(), md.stride, md.key_words, md.sort, i, off[i + 1] - off[i],
-                          got[i].lo, got[i].hi, want[i].lo, want[i].hi);
+                const std::string mode = where + ", stride " + std::to_string(md.stride) + ", key words " + std::to_string(md.key_words)
+                                         + ", sort " + std::to_string(md.sort);
+                if(!check_every_way(eng, off, sym, want, mode))
+                    return false;
             }
+
+            eng.find(off.data(), sym.data(), q, got.data());
 
             CHECK(device_certify(eng, off, sym, got) == 0, "%s: the device certificate rejects correct intervals", where.c_str());
             auto wrong = got;
@@ -635,6 +726,82 @@ bool test_gpu_find()
         T.push_back(static_cast<uint16_t>(i % 2 ? 7 : 3));
 
     return check_gpu_fixture(T, {3, 7}, 13, 2, "u16 periodic (ab)^k");
+}
+
+
+// Checks the pipeline on batches of many chunks, in the direct mode and in two
+// phases, sorted and not: chunks bounded by their queries and by their
+// symbols, queries longer than a chunk, empty queries, offsets that start past
+// the symbols' first, an empty batch, and concurrent calls.
+bool test_pipeline()
+{
+    std::mt19937_64 rng(17);
+    const std::vector<uint16_t> alpha = {1, 2, 3, 4, 0xFFFE};
+    const auto T = random_text<uint16_t>(50000, alpha, 0xFFFF, 200, rng);
+    const idx_t n = T.size();
+    const auto SA = test::build_sa40(T);
+    const auto dir = scratch_dir("pipeline");
+    std::string err;
+    CHECK(write_index(dir, T, SA, 1, err), "%s", err.c_str());
+
+    std::vector<uint64_t> off;
+    std::vector<uint16_t> sym;
+    fixture_queries(T, alpha, rng, 30000, off, sym);
+    for(const idx_t m : {idx_t(6000), idx_t(3000)})    // Longer than some chunks, and than a whole chunk's symbols.
+    {
+        const idx_t pos = rng() % (n - m);
+        sym.insert(sym.end(), T.begin() + pos, T.begin() + pos + m);
+        off.push_back(sym.size());
+    }
+
+    const auto oracle = [&](const std::vector<uint64_t>& o, const std::vector<uint16_t>& y)
+    {
+        std::vector<SA_Interval> I(o.size() - 1);
+        for(idx_t i = 0; i < I.size(); ++i)
+            I[i] = ref::find_one(T.data(), n, SA.data(), y.data() + o[i], o[i + 1] - o[i]);
+        return I;
+    };
+
+    const auto want = oracle(off, sym);
+    std::vector<uint64_t> off5(off);    // The same queries, after 5 other symbols.
+    for(auto& x : off5)
+        x += 5;
+    std::vector<uint16_t> sym5(5, 3);
+    sym5.insert(sym5.end(), sym.begin(), sym.end());
+    const std::vector<uint64_t> off_e(1001, 0); // Empty queries.
+    const std::vector<SA_Interval> want_e(1000, SA_Interval{0, n});
+
+    struct Chunk { idx_t queries, symbols; };
+    struct Mode { idx_t stride; uint32_t key_words; bool sort; };
+    for(const Chunk ch : {Chunk{Query_Options().chunk_queries, Query_Options().chunk_symbols}, Chunk{1000, 5000}, Chunk{3, 2}})
+    {
+        Query_Options opt;
+        opt.chunk_queries = ch.queries;
+        opt.chunk_symbols = ch.symbols;
+        Query_Engine<uint16_t> eng;
+        CHECK(eng.load(dir.string(), opt, err), "%s", err.c_str());
+        for(const Mode md : {Mode{0, 0, false}, Mode{16, 2, false}, Mode{16, 2, true}})
+        {
+            CHECK(eng.configure(md.stride, md.key_words, md.sort, err), "%s", err.c_str());
+            const std::string what = "chunks of " + std::to_string(ch.queries) + " queries and " + std::to_string(ch.symbols) + " symbols, stride "
+                                     + std::to_string(md.stride) + ", sort " + std::to_string(md.sort);
+            if(!check_every_way(eng, off, sym, want, what) || !check_every_way(eng, off5, sym5, want, what + ", offsets from 5")
+                || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries"))
+                return false;
+
+            eng.find(off.data(), sym.data(), 0, nullptr);   // No queries: nothing to touch.
+
+            // Concurrent calls take their turns.
+            std::vector<SA_Interval> got_a(want.size()), got_b(want.size());
+            std::thread other([&] { eng.find(off5.data(), sym5.data(), want.size(), got_b.data()); });
+            eng.find(off.data(), sym.data(), want.size(), got_a.data());
+            other.join();
+            for(idx_t i = 0; i < want.size(); ++i)
+                CHECK(same(got_a[i], want[i]) && same(got_b[i], want[i]), "%s: concurrent calls: query %" PRIu64 " differs", what.c_str(), i);
+        }
+    }
+
+    return true;
 }
 
 
@@ -757,6 +924,7 @@ int main()
         {"index load, host tiers",  test_index_host_tiers,      false},
         {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
+        {"pipeline",                test_pipeline,              true},
         {"device load rejects",     test_gpu_rejects,           true},
     };
 
