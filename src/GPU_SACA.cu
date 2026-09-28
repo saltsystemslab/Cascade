@@ -998,6 +998,7 @@ void GPU_SACA<T_sym_>::initial_rank()
 
         std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
+        std::cerr << "Per-partition active-set sizes by context-size " << ell << ": " << util::join(Active_sz) << "\n";
     }
 #endif
 
@@ -1874,6 +1875,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
 #ifdef STATS
             std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << ". Time taken in iteration: " << gpu_saca::timer::duration(t_1 - t_0) << "s."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
+            std::cerr << "Per-partition active-set sizes by context-size " << (k * 2) << ": " << util::join(Active_sz) << "\n";
 #endif
 
             INSTRUMENT(probe::P().report_log());
