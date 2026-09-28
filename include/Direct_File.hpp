@@ -5,6 +5,8 @@
 
 
 
+#include "utility.hpp"
+
 #include <cstddef>
 #include <string>
 
@@ -25,7 +27,7 @@ public:
     static constexpr std::size_t DISK_BLOCK = 4096;
 
     // Returns `sz` rounded up to the closest multiple of `DISK_BLOCK`.
-    static std::size_t block_up(const std::size_t sz) { return (sz + DISK_BLOCK - 1) & ~(DISK_BLOCK - 1); }
+    static std::size_t block_up(const std::size_t sz) { return util::math::block_up<DISK_BLOCK>(sz); }
 
     // Returns `true` iff the address `ptr` is disk-block aligned.
     static bool is_block_aligned(const void* ptr);

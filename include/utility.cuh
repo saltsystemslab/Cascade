@@ -4,8 +4,11 @@
 
 
 
+#include "utility.hpp"
+
 #include <cuda_runtime.h>
 
+#include <cstdint>
 #include <iostream>
 #include <cstdlib>
 
@@ -35,6 +38,21 @@ namespace gpu_saca  // TODO: why are all the following in the parent namespace?
     auto pinned_allocate_host(T_*& ptr, const std::size_t sz)
     {
         return cudaHostAlloc(reinterpret_cast<void**>(&ptr), sz * sizeof(T_), cudaHostAllocDefault);
+    }
+
+    // Allocates space for `n` elements into `buf`, disk-block aligned for
+    // `O_DIRECT`, out of the pinned allocation `alloc` it makes with a disk-
+    // block of slack.
+    template <typename T_>
+    void pinned_allocate_aligned_host(T_*& buf, void*& alloc, const std::size_t n)
+    {
+        constexpr std::size_t DISK_BLOCK = 4096;
+
+        char* raw;
+        CUDA_CHECK(pinned_allocate_host(raw, util::math::block_up<DISK_BLOCK>(n * sizeof(T_)) + DISK_BLOCK));
+
+        alloc = raw;
+        buf = reinterpret_cast<T_*>((reinterpret_cast<std::uintptr_t>(raw) + DISK_BLOCK - 1) & ~(DISK_BLOCK - 1));
     }
 
     // Deallocates the pointer `ptr`, allocated with `pinned_allocate_host`.

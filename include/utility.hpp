@@ -119,6 +119,15 @@ namespace math
     {
         return x <= 1 ? 0 : 64 - __builtin_clzll(x - 1);
     }
+
+    // Returns `sz` rounded up to the closest multiple of `BLK`, which needs to
+    // be a power of 2.
+    template <uint64_t BLK>
+    inline uint64_t block_up(const uint64_t sz)
+    {
+        static_assert(BLK > 0 && (BLK & (BLK - 1)) == 0, "BLK must be a power of 2!");
+        return (sz + BLK - 1) & ~(BLK - 1);
+    }
 }
 
 

@@ -26,6 +26,7 @@ private:
     beta_t* beta_;  // Backward routing tags.
     idx_t* msg_target_; // Target recipients of the rank-propagation messages.
     msg_rank_t* msg_rank_;  // Ranks carried within the rank-propagation messages.
+    void* alloc_[5];    // Pinned allocations holding the buffers above, in order, each disk-block aligned within its allocation.
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
     idx_t off_; // Offset of the content of this slab within the corresponding partition.
     p_sz_t inbox_off_;  // Offset of this slab's chunk into its partition's inbox.
