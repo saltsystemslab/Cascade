@@ -24,6 +24,7 @@ MODE_KEYS = ("stride", "key_words", "key_symbols", "sort", "table_bytes", "t_tab
 KINDS = ("present", "mutated", "random", "heldout", "unigram", "batch")
 SHOWN = ("present-m1", "present-m10", "random-m5", "present-m100", "present-m1000")
 NAN = math.nan
+PLACED = {"mmap": "mapped", "ram": "in the heap"}
 
 
 def pairs(path):
@@ -33,8 +34,9 @@ def pairs(path):
             yield m.group(1), m.group(2)
 
 
-def ours_batches(path, run):
-    """The batches of a `query find` log, each with its load's and its mode's keys."""
+def batches(path, engine, run):
+    """The batches of a log of `query find` or of infini-gram's driver, each with
+    its load's keys, and ours with its mode's."""
     load, mode, cur, out = {}, {}, None, []
     for k, v in pairs(path):
         if k in ("stride", "queries"):
@@ -52,16 +54,10 @@ def ours_batches(path, run):
     if cur is not None:
         out.append(cur)
     for b in out:
-        b.update(engine="ours", run=run, config=f"s{b.get('stride')}w{b.get('key_words')}o{b.get('sort')}")
-    return out
-
-
-def ig_batch(path, run):
-    b = dict(pairs(path))
-    if "qps" not in b:
-        return []
-    b.update(engine="ig", run=run, config=f"{b.get('mode')}-t{b.get('threads')}-p{b.get('prefetch')}-{b.get('load')}")
-    return [b]
+        b.update(engine=engine, run=run, log=str(path))
+        b["config"] = (f"s{b.get('stride')}w{b.get('key_words')}o{b.get('sort')}" if engine == "ours"
+                       else f"{b.get('mode')}-t{b.get('threads')}-p{b.get('prefetch')}-{b.get('load')}")
+    return [b for b in out if "qps" in b]
 
 
 def num(b, k):
@@ -74,11 +70,11 @@ def num(b, k):
 def load(d):
     """The batches of every log under `d`, and the logs that hold none or report errors."""
     bs, bad = [], []
-    logs = [(p, p.parent.name if p.name == "find.log" else p.stem, ours_batches)
+    logs = [(p, "ours", p.parent.name if p.name == "find.log" else p.stem)
             for p in sorted((d / "ours").glob("*.log")) + sorted((d / "ours").glob("*/find.log"))]
-    logs += [(p, p.parent.name, ig_batch) for p in sorted((d / "ig").glob("*/*.log"))]
-    for p, run, parse in logs:
-        got = parse(p, run)
+    logs += [(p, "ig", p.parent.name) for p in sorted((d / "ig").glob("*/*.log"))]
+    for p, engine, run in logs:
+        got = batches(p, engine, run)
         errors = [line for line in p.read_text(encoding="utf-8", errors="replace").splitlines() if line.startswith("error")]
         if not got or errors:
             bad.append(f"{p.relative_to(d)}: {errors[0] if errors else 'no results'}")
@@ -171,8 +167,8 @@ def agreement(bs, d):
     return out
 
 
-def main_rows(bs, t_all):
-    ig_cfg = f"direct-t{t_all}-p0-mmap"
+def main_rows(bs, t_all, ig_load):
+    ig_cfg = f"direct-t{t_all}-p0-{ig_load}"
     rows, speedups = [], []
     for w in sorted({b["workload"] for b in bs if is_main(b["run"])}, key=order):
         ig = sel(bs, "ig", is_main, ig_cfg, w)
@@ -184,12 +180,12 @@ def main_rows(bs, t_all):
     return rows, speedups
 
 
-def batch_rows(bs, t_all):
+def batch_rows(bs, t_all, ig_load):
     rows = []
     for w in sorted({b["workload"] for b in bs if b["run"] == "batch"}, key=order):
         q = int(re.sub(r"\D", "", w))
         t = min(t_all, (q + 255) // 256)
-        ig = [median(sel(bs, "ig", "batch", f"direct-t{x}-p0-mmap", w)) for x in sorted({t_all, t})]
+        ig = [median(sel(bs, "ig", "batch", f"direct-t{x}-p0-{ig_load}", w)) for x in sorted({t_all, t})]
         ig_best = max((x for x in ig if not math.isnan(x)), default=NAN)
         tp = median(sel(bs, "ours", "batch", "s32w2o0", w))
         rows.append([f"{q:,}", mq(ig[-1]), mq(ig[0]) if t < t_all else "-", mq(median(sel(bs, "ours", "batch", "s0w0o0", w))),
@@ -215,22 +211,24 @@ def ablation_rows(bs):
     return rows
 
 
-def thread_rows(bs):
+def thread_rows(bs, ig_load):
     th = [b for b in bs if b["engine"] == "ig" and b["run"] == "threads"]
     ws = sorted({b["workload"] for b in th}, key=order)
-    rows = [[str(t)] + [mq(median(sel(th, "ig", "threads", f"direct-t{t}-p0-mmap", w))) for w in ws]
+    rows = [[str(t)] + [mq(median(sel(th, "ig", "threads", f"direct-t{t}-p0-{ig_load}", w))) for w in ws]
             for t in sorted({int(b["threads"]) for b in th})]
     return ws, rows
 
 
-def variant_rows(bs, t_all):
-    ws = sorted({b["workload"] for b in bs if b["engine"] == "ig" and b["run"] in ("find", "prefetch", "heap")}, key=order)
+def variant_rows(bs, t_all, ig_load, other):
+    placement = lambda r: r in ("placement", "heap")  # `heap`: its name in results of before the placement was chosen.
+    ws = sorted({b["workload"] for b in bs if b["engine"] == "ig" and (b["run"] in ("find", "prefetch") or placement(b["run"]))},
+                key=order)
     rows = []
     for w in ws:
-        direct = median(sel(bs, "ig", is_main, f"direct-t{t_all}-p0-mmap", w))
-        find = median(sel(bs, "ig", "find", f"find-t{t_all}-p0-mmap", w))
+        direct = median(sel(bs, "ig", is_main, f"direct-t{t_all}-p0-{ig_load}", w))
+        find = median(sel(bs, "ig", "find", f"find-t{t_all}-p0-{ig_load}", w))
         rows.append([w, mq(direct), mq(find), mq(median(sel(bs, "ig", "prefetch", f"direct-t{t_all}-p1-mmap", w))),
-                     mq(median(sel(bs, "ig", "heap", f"direct-t{t_all}-p0-ram", w))), times(find, direct)])
+                     mq(median(sel(bs, "ig", placement, f"direct-t{t_all}-p0-{other}", w))), times(find, direct)])
     return rows
 
 
@@ -243,7 +241,7 @@ def setup_lines(bs):
     ours = [(num(b, "t_load_text"), num(b, "t_load_sa"), num(b, "t_spot")) for b in procs.values()]
     tab = [num(b, "t_table") for b in bs if b["engine"] == "ours" and is_main(b["run"]) and b["config"] == "s32w2o0"]
     warm = [num(b, "t_prewarm") for b in bs if b["engine"] == "ig" and num(b, "prewarm_bytes") > 0]
-    heap = [num(b, "t_load") for b in bs if b["engine"] == "ig" and b["run"] == "heap"]
+    heap = list({b["log"]: num(b, "t_load") for b in bs if b["engine"] == "ig" and b.get("load") == "ram"}.values())
     out = []
     if ours:
         out.append(f"- Ours, per process (median of {len(ours)}): text {median([x[0] for x in ours]):.1f} s, "
@@ -263,6 +261,8 @@ def main(argv):
     d = pathlib.Path(argv[1])
     env = dict(pairs(d / "env.txt")) if (d / "env.txt").exists() else {}
     t_all = int(env.get("threads", "0") or 0)
+    ig_load = env.get("ig_load", "mmap")    # Absent from results of before the placement was chosen.
+    other = "mmap" if ig_load == "ram" else "ram"
     bs, bad = load(d)
 
     cols = ("engine", "run", "config", "workload", "q", "sym_c", "reps", "t_h2d", "t_find_min", "t_find_median", "t_d2h",
@@ -274,18 +274,19 @@ def main(argv):
 
     md = [f"# Timed query runs: {env.get('host', '?')}, {env.get('gpu', '?')}", "",
           f"Commit {env.get('commit', '?')}, job {env.get('job', '?')}, {env.get('date', '?')}. "
-          f"{env.get('reps', '?')} repetitions per batch; infini-gram's pool {t_all} threads, its first repetition dropped; "
+          f"{env.get('reps', '?')} repetitions per batch; infini-gram's pool {t_all} threads, its index {PLACED[ig_load]}, "
+          f"its first repetition dropped; "
           f"ours bound with `{env.get('ours_numactl', 'none')}`. Throughput in millions of queries per second.", "",
           "## Correctness", ""] + agreement(bs, d) + [f"- Logs without results or with errors: {len(bad)}."] \
         + [f"  - {x}" for x in bad]
 
-    rows, speedups = main_rows(bs, t_all)
+    rows, speedups = main_rows(bs, t_all, ig_load)
     if rows:
         md += ["", "## Main: infini-gram's `_find_thread` against ours", "",
                "Median over processes (min-max). Ours without transfers: the search on device-resident queries; with "
                "transfers: plus the batch's copy to the device and the intervals' copy back, unoverlapped, from pageable "
                "memory.", ""]
-        md += table(["workload", "q", "infini-gram", "ours, direct", "ours, two-phase", "two-phase with transfers",
+        md += table(["workload", "q", f"infini-gram, {PLACED[ig_load]}", "ours, direct", "ours, two-phase", "two-phase with transfers",
                      "speedup", "with transfers"], rows, ["---", "--:", "--:", "--:", "--:", "--:", "--:", "--:"])
         sp = [x for x, _ in speedups if not math.isnan(x)]
         sp_e2e = [y for _, y in speedups if not math.isnan(y)]
@@ -294,7 +295,7 @@ def main(argv):
                        f"{times(statistics.median(sp), 1)}; with transfers {times(min(sp_e2e), 1)} to {times(max(sp_e2e), 1)}, "
                        f"median {times(statistics.median(sp_e2e), 1)}."]
 
-    rows = batch_rows(bs, t_all)
+    rows = batch_rows(bs, t_all, ig_load)
     if rows:
         md += ["", "## Batch size: present patterns, m = 10", "",
                "infini-gram with every core, and with a pool no larger than the batch's 256-query chunks; the speedup is "
@@ -308,17 +309,18 @@ def main(argv):
                "Relative: the median over workloads of the throughput relative to the default mode's, s32w2o0.", ""]
         md += table(["mode", "table GB", "build s", "relative"] + list(SHOWN), rows, ["---"] + ["--:"] * (3 + len(SHOWN)))
 
-    ws, rows = thread_rows(bs)
+    ws, rows = thread_rows(bs, ig_load)
     if rows:
         md += ["", "## infini-gram's pool size", ""] + table(["threads"] + ws, rows, ["--:"] * (1 + len(ws)))
 
-    rows = variant_rows(bs, t_all)
+    rows = variant_rows(bs, t_all, ig_load, other)
     if rows:
         md += ["", "## infini-gram's variants", "",
-               "`_find_thread` is the main runs'; `find` is the engine's API, which starts a thread per shard for every "
-               "query; prefetching at the engine's default depths; the index read into the heap instead of mapped.", ""]
-        md += table(["workload", "`_find_thread`", "`find`", "prefetching", "index in heap", "`find` / `_find_thread`"], rows,
-                    ["---"] + ["--:"] * 5)
+               f"`_find_thread` with the index {PLACED[ig_load]} is the main runs'; `find` is the engine's API, which starts a "
+               "thread per shard for every query; prefetching is at the engine's default depths, with the index mapped, on the "
+               f"first 1e5 queries; the last `_find_thread` has the index {PLACED[other]}.", ""]
+        md += table(["workload", f"`_find_thread`, {PLACED[ig_load]}", "`find`", "prefetching", f"`_find_thread`, {PLACED[other]}",
+                     "`find` / `_find_thread`"], rows, ["---"] + ["--:"] * 5)
 
     lines = setup_lines(bs)
     if lines:

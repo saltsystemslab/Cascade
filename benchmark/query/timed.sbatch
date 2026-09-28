@@ -17,15 +17,16 @@
 #
 # Runs, most important first; TM_RUNS selects:
 #   main      ours in the direct mode and in two phases (stride 32, 2-word keys),
-#             and infini-gram's `_find_thread` from a pool of every core; in
-#             TM_REPLICATES alternating processes of each
+#             and infini-gram's `_find_thread` from a pool of every core, its
+#             index placed as TM_IG_LOAD says; in TM_REPLICATES alternating
+#             processes of each
 #   batch     both, over present-pattern batches (m = 10) of TM_BATCHES queries;
 #             infini-gram also with a pool no larger than the batch's chunks
 #   ablation  ours over strides, key widths, and batch orders
 #   threads   infini-gram over pool sizes, on the TM_SWEEP workloads
 #   variants  on the TM_SWEEP workloads, infini-gram's own `find`, its
-#             prefetching (on a prefix of 1e5 queries), and its index read into
-#             the heap
+#             prefetching (on a prefix of 1e5 queries, the index mapped), and
+#             its index in the other placement
 #
 # Results in OUT_DIR: env.txt (provenance), ours/ and ig/ (logs, and the counts
 # of the first main replicate), compare.txt (count files: same or DIFFERENT),
@@ -36,6 +37,9 @@
 #                   under, kept for later runs; default /tmp/${USER}/query-stage;
 #                   `none` reads the indexes in place
 #   TM_RUNS         default main,batch,ablation,threads,variants
+#   TM_IG_LOAD      infini-gram's index in the main, batch, and thread runs: mmap,
+#                   mapped as its engine defaults to (default), or ram, read into
+#                   the heap
 #   TM_REPS         repetitions per batch; default 6 (infini-gram's driver drops the first)
 #   TM_REPLICATES   processes per engine of the main runs; default 3
 #   TM_BATCHES      default 1000,10000,100000,1000000,10000000,100000000
@@ -96,6 +100,11 @@ REPS="${TM_REPS:-6}"
 REPL="${TM_REPLICATES:-3}"
 BATCHES="${TM_BATCHES:-1000,10000,100000,1000000,10000000,100000000}"
 SWEEP="${TM_SWEEP:-present-m5,present-m10,present-m100,random-m5}"
+IG_LOAD="${TM_IG_LOAD:-mmap}"
+if [ "${IG_LOAD}" != mmap ] && [ "${IG_LOAD}" != ram ]; then
+    echo "FATAL: TM_IG_LOAD must be mmap or ram, not '${IG_LOAD}'"
+    exit 1
+fi
 ARCH="${TM_ARCH:-120-real}"
 T_ALL="$(nproc)"
 B="${REPO}/build-timed-sm${ARCH%%-*}"
@@ -125,6 +134,7 @@ fi
     echo "reps=${REPS}"
     echo "replicates=${REPL}"
     echo "threads=${T_ALL}"
+    echo "ig_load=${IG_LOAD}"
     echo "gpu_numa_node=${node}"
     echo "ours_numactl=${NUMA[*]:-none}"
     echo "kernel=$(uname -r)"
@@ -142,6 +152,7 @@ fi
     echo
     ls -l "${QRY}"
 } > "${OUT}/env.txt" 2>&1
+git -C "${REPO}" diff --quiet HEAD || git -C "${REPO}" diff HEAD > "${OUT}/uncommitted.diff"
 stamp "start: $(hostname), $(sed -n 's/^gpu=//p' "${OUT}/env.txt"), commit $(sed -n 's/^commit=//p' "${OUT}/env.txt" | cut -c1-7), results ${OUT}"
 
 stamp "build"
@@ -222,17 +233,18 @@ ours()
     stamp "ours ${log#"${OUT}"/}: rc=${rc}"
 }
 
-# Runs infini-gram's driver over the query file $2 into the log $1, with the
-# options "${@:3}".
+# Runs infini-gram's driver over the comma-separated query files $2 into the
+# log $1, with the options "${@:3}": a process, loading the index once.
 ig()
 {
-    local log="$1" f="$2"
+    local log="$1" files="$2"
     shift 2
-    "${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${f}" --reps "${REPS}" "$@" > "${log}" 2>&1 \
+    "${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${files}" --reps "${REPS}" "$@" > "${log}" 2>&1 \
         || stamp "infini-gram failed: ${log}"
 }
 
 files=$(ls "${QRY}"/*.qry | paste -sd, -)
+sweep_files=$(for w in ${SWEEP//,/ }; do echo "${QRY}/${w}.qry"; done | paste -sd, -)
 
 # infini-gram's index into the page cache, once for all of its runs: the warm-up, and then a single query.
 if want main || want batch || want threads || want variants; then
@@ -249,12 +261,9 @@ if want main; then
         cnt=()
         [ "${r}" -eq 1 ] && cnt=(--cnt-dir "${d_ours}")
         ours "${d_ours}/find.log" "${files}" --stride 0,32 --key-words 2 --sort 0 "${cnt[@]}"
-        for f in "${QRY}"/*.qry; do
-            s=$(basename "${f}" .qry)
-            cnt=()
-            [ "${r}" -eq 1 ] && cnt=(--cnt-out "${d_ig}/${s}.cnt")
-            ig "${d_ig}/${s}.log" "${f}" --mode direct --threads "${T_ALL}" --prewarm 0 "${cnt[@]}"
-        done
+        cnt=()
+        [ "${r}" -eq 1 ] && cnt=(--cnt-dir "${d_ig}")
+        ig "${d_ig}/${IG_LOAD}.log" "${files}" --mode direct --threads "${T_ALL}" --load "${IG_LOAD}" --prewarm 0 "${cnt[@]}"
         stamp "infini-gram main-r${r}: done"
     done
 fi
@@ -269,15 +278,14 @@ if want batch; then
             && mv "${f}.part" "${f}" || stamp "gen failed: q=${q}"
     done
 
-    ours "${OUT}/ours/batch.log" "$(for q in ${BATCHES//,/ }; do echo "${BQ}/batch-q${q}.qry"; done | paste -sd, -)" \
-        --stride 0,32 --key-words 2 --sort 0,1
+    bfiles=$(for q in ${BATCHES//,/ }; do echo "${BQ}/batch-q${q}.qry"; done | paste -sd, -)
+    ours "${OUT}/ours/batch.log" "${bfiles}" --stride 0,32 --key-words 2 --sort 0,1
     mkdir -p "${OUT}/ig/batch"
+    ig "${OUT}/ig/batch/t${T_ALL}.log" "${bfiles}" --mode direct --threads "${T_ALL}" --load "${IG_LOAD}" --prewarm 0
     for q in ${BATCHES//,/ }; do
-        f="${BQ}/batch-q${q}.qry"
-        ig "${OUT}/ig/batch/batch-q${q}-t${T_ALL}.log" "${f}" --mode direct --threads "${T_ALL}" --prewarm 0
         t=$(((q + 255) / 256))  # The driver's pool threads take 256 queries at a time.
         if [ "${t}" -lt "${T_ALL}" ]; then
-            ig "${OUT}/ig/batch/batch-q${q}-t${t}.log" "${f}" --mode direct --threads "${t}" --prewarm 0
+            ig "${OUT}/ig/batch/batch-q${q}-t${t}.log" "${BQ}/batch-q${q}.qry" --mode direct --threads "${t}" --load "${IG_LOAD}" --prewarm 0
         fi
     done
     stamp "infini-gram batch: done"
@@ -294,23 +302,20 @@ fi
 if want threads; then
     mkdir -p "${OUT}/ig/threads"
     threads="${TM_THREADS:-1,2,4,8,16,32,64,96,128,256}"
-    for w in ${SWEEP//,/ }; do
-        for t in ${threads//,/ }; do
-            ig "${OUT}/ig/threads/${w}-t${t}.log" "${QRY}/${w}.qry" --mode direct --threads "${t}" --prewarm 0 --reps 3
-        done
+    for t in ${threads//,/ }; do
+        ig "${OUT}/ig/threads/t${t}.log" "${sweep_files}" --mode direct --threads "${t}" --load "${IG_LOAD}" --prewarm 0 --reps 3
     done
     stamp "infini-gram threads: done"
 fi
 
 if want variants; then
-    mkdir -p "${OUT}/ig/find" "${OUT}/ig/prefetch" "${OUT}/ig/heap"
+    mkdir -p "${OUT}/ig/find" "${OUT}/ig/prefetch" "${OUT}/ig/placement"
+    other=$([ "${IG_LOAD}" = ram ] && echo mmap || echo ram)
+    ig "${OUT}/ig/find/${IG_LOAD}.log" "${sweep_files}" --mode find --threads "${T_ALL}" --load "${IG_LOAD}" --prewarm 0
     # Prefetching issues about ten `madvise` calls per search step: on a prefix, 3 times.
-    for w in ${SWEEP//,/ }; do
-        f="${QRY}/${w}.qry"
-        ig "${OUT}/ig/find/${w}.log" "${f}" --mode find --threads "${T_ALL}" --prewarm 0
-        ig "${OUT}/ig/prefetch/${w}.log" "${f}" --mode direct --threads "${T_ALL}" --prefetch 1 --prewarm 0 --q 100000 --reps 3
-        ig "${OUT}/ig/heap/${w}.log" "${f}" --mode direct --threads "${T_ALL}" --load ram
-    done
+    ig "${OUT}/ig/prefetch/mmap.log" "${sweep_files}" --mode direct --threads "${T_ALL}" --load mmap --prefetch 1 --prewarm 0 \
+        --q 100000 --reps 3
+    ig "${OUT}/ig/placement/${other}.log" "${sweep_files}" --mode direct --threads "${T_ALL}" --load "${other}" --prewarm 0
     stamp "infini-gram variants: done"
 fi
 
