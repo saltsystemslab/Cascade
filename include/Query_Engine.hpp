@@ -7,6 +7,7 @@
 #include "types.hpp"
 #include "query-file.hpp"
 #include "Suffix_Index.hpp"
+#include "Sample_Table.hpp"
 
 #include <cuda_runtime.h>
 
@@ -15,19 +16,25 @@
 
 
 // Batched exact-match queries over a query index: `find` returns the SA-interval
-// of every pattern of a batch. This engine binary-searches the whole suffix
-// array for every pattern (the direct mode): correct for any placement the
-// device can access, and the table-free baseline of the two-phase search.
+// of every pattern of a batch. The two-phase search ranks each pattern's packed
+// prefix among the keys of a sample table, which brackets the interval's
+// boundaries within a stride of ranks, and then binary-searches the suffix
+// array within the brackets. Without a table, the direct mode binary-searches
+// the whole suffix array: the table-free baseline, correct for any placement
+// the device can access.
 
 namespace gpu_saca
 {
 
-// Placement and load-time checks of an engine's index.
+// Placement, load-time checks, and search mode of an engine.
 struct Query_Options
 {
     Residency text_res = Residency::device; // Tier of the text.
     Residency sa_res = Residency::device;   // Tier of the suffix array.
     idx_t spot = 100000;    // Random adjacent pairs of the suffix array spot-checked for order at load; `0` skips.
+    idx_t stride = 32;  // Sample-table stride; `0` selects the direct mode.
+    uint32_t key_words = 0; // 64-bit words per table key: 1, 2, or 4; `0` picks 2, or 4 for 4-byte symbols.
+    bool sort = false;  // Whether to sort every batch by its packed prefixes before searching.
 };
 
 
@@ -35,12 +42,24 @@ struct Query_Options
 template <typename T_sym_>
 class Query_Engine
 {
+private:
+
+    Suffix_Index idx_;  // The loaded index.
+    Sample_Table tab_;  // Its sample table.
+    Query_Options opt_; // The options of the load.
+
 public:
 
     // Loads the index-directory `dir` as `opt` places it. The index must be of
     // symbols of `T_sym_`, placed device-accessibly. Returns `false` with a
     // reason in `err` on failure.
     bool load(const std::string& dir, const Query_Options& opt, std::string& err);
+
+    // Switches the loaded engine's search mode to the `stride`, `key_words`, and
+    // `sort` settings of `Query_Options`, rebuilding the sample table; the
+    // index stays loaded. Returns `false` with a reason in `err` on failure,
+    // leaving the engine in the direct mode.
+    bool configure(idx_t stride, uint32_t key_words, bool sort, std::string& err);
 
     // Finds the SA-intervals of the queries `sym[off[i], off[i + 1])`, `i < q`,
     // into `out[0, q)`; all device-side arrays, asynchronously on the stream `s`.
@@ -60,10 +79,11 @@ public:
     // Returns the loaded index.
     const Suffix_Index& index() const { return idx_; }
 
+    // Returns the sample table; empty in the direct mode.
+    const Sample_Table& table() const { return tab_; }
 
-private:
-
-    Suffix_Index idx_;  // The loaded index.
+    // Returns the options the engine was loaded with.
+    const Query_Options& options() const { return opt_; }
 };
 
 }
