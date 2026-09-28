@@ -27,6 +27,25 @@ SCHEMA = 6
 #    24-78%  the 2026-09-19 campaign's degraded runs     +36% to +124%
 THP_REFUSED_MAX = 0.10
 
+# A refusal rate over the bar means one of two different things, and they call
+# for opposite responses, so the report must not conflate them:
+#
+#   inherited  the node was already fragmented when the run started. The number
+#              is invalid and re-running on a clean node will fix it.
+#   intrinsic  the working set is close enough to the node's supply of 2 MiB
+#              blocks that the run exhausts it as it allocates. Every honest
+#              measurement of this corpus on this machine will look like this,
+#              and re-running will not help.
+#
+# `buddy_free_huge` at run start against the run's own `peak_rss` separates them.
+# Below 1.0 the shortfall is arithmetic -- the blocks to serve the working set
+# were never there. github sits at 1.01-1.21x and refuses 41-45%; the tightest
+# clean run on record is arxiv at 2.2x, refusing nothing. So the boundary lies
+# somewhere in (1.21, 2.2) and 1.25 is deliberately near the bottom of it: the
+# conservative error is to call a dirty node "intrinsic" and excuse a number
+# that deserved a re-run.
+INTRINSIC_HEADROOM_MAX = 1.25
+
 # Accessed unconditionally below, so a record missing any of them would take the
 # whole summary down rather than reporting itself as the one bad record.
 REQUIRED = ("run_id", "method", "corpus", "alphabet", "n_tokens", "threads",
@@ -96,18 +115,41 @@ def inconsistencies(rs):
     return out
 
 
+def refused_fraction(r):
+    """Share of this run's huge-page requests the kernel turned down, or None
+    where nothing was measured (pre-schema-5, or not Linux)."""
+    alloc, fb = r.get("thp_alloc", -1), r.get("thp_fallback", -1)
+    if alloc < 0 or fb < 0 or alloc + fb == 0:
+        return None
+    return fb / (alloc + fb)
+
+
 def fragmentation(rs):
-    """Runs that began on a fragmented node. Unlike `inconsistencies` this is not
-    a harness fault: it is the machine reporting that it could not give this run
-    the huge pages it gave the others."""
+    """Runs that could not get the huge pages the clean runs got. Unlike
+    `inconsistencies` this is not a harness fault: it is the machine reporting
+    its own state. Each entry says whether a re-run would help."""
     out = []
     for r in rs:
-        alloc, fb = r.get("thp_alloc", -1), r.get("thp_fallback", -1)
-        if alloc < 0 or fb < 0 or alloc + fb == 0:
-            continue    # Pre-schema-5, or not Linux: nothing was measured.
-        frac = fb / (alloc + fb)
-        if frac > THP_REFUSED_MAX:
-            out.append(f"{r['run_id']} refused {frac:.1%}")
+        # An OOM never ran the algorithm -- it failed in the allocator -- so its
+        # refusal rate describes the node, not a result. Same reason `B/tok` is
+        # suppressed for OOMs.
+        if r.get("status") != "ok":
+            continue
+        frac = refused_fraction(r)
+        if frac is None or frac <= THP_REFUSED_MAX:
+            continue
+
+        huge, rss = r.get("buddy_free_huge", -1), r.get("peak_rss", 0)
+        if huge < 0 or rss <= 0:
+            why = "headroom unknown (pre-schema-6 record)"
+        else:
+            head = huge / rss
+            why = (f"huge@start {huge / GiB:.0f}G vs peak_rss {rss / GiB:.0f}G "
+                   f"= {head:.2f}x headroom: "
+                   + ("intrinsic to this corpus on this node, a re-run will not help"
+                      if head <= INTRINSIC_HEADROOM_MAX else
+                      "the node was already fragmented, so re-run on a clean one"))
+        out.append(f"{r['run_id']} refused {frac:.1%} ({why})")
     return out
 
 
@@ -194,9 +236,8 @@ def main(argv):
         # The worst replicate, not the median: this is a health check, and a group
         # with one degraded run is a group holding one number that cannot be
         # pooled with the rest.
-        ratios = [r["thp_fallback"] / (r["thp_alloc"] + r["thp_fallback"]) for r in rs
-                  if r.get("thp_alloc", -1) >= 0 and r.get("thp_fallback", -1) >= 0
-                  and r["thp_alloc"] + r["thp_fallback"] > 0]
+        ratios = [f for f in (refused_fraction(r) for r in rs if r.get("status") == "ok")
+                  if f is not None]
         refused = max(ratios) if ratios else None
 
         # The replicate that started with the least huge-page-capable memory,
@@ -206,7 +247,8 @@ def main(argv):
         # remedies. This is the state the run inherited -- `thp_refused` is what
         # that state then cost it.
         starts = [(r["buddy_free_huge"], r["buddy_free"]) for r in rs
-                  if r.get("buddy_free_huge", -1) >= 0 and r.get("buddy_free", -1) >= 0]
+                  if r.get("buddy_free_huge", -1) >= 0 and r.get("buddy_free", -1) >= 0
+                  and r.get("status") == "ok"]
         huge0, free0 = min(starts) if starts else (None, None)
 
         mem.append([
