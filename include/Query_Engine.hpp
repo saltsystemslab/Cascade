@@ -24,12 +24,23 @@
 // boundaries within a stride of ranks, and then binary-searches the suffix
 // array within the brackets. Without a table, the direct mode binary-searches
 // the whole suffix array: the table-free baseline, correct for any placement
-// the device can access. A host-side batch streams through the device in
-// chunks, over several streams: the transfers of some chunks overlap the
-// searches of others.
+// the device can access. With the suffix array in pinned host memory, the
+// search gathers the brackets' entries into device memory first, in whole
+// words: a transfer per query, rather than one per probe. A host-side batch
+// streams through the device in chunks, over several streams: the transfers of
+// some chunks overlap the searches of others.
 
 namespace gpu_saca
 {
+
+// Where the two-phase search reads the suffix-array entries of its brackets.
+enum class Gather
+{
+    automatic,  // As `always` if the suffix array is in pinned host memory, else as `never`.
+    never,  // From the suffix array, a probe at a time.
+    always, // From copies in device memory, gathered per batch.
+};
+
 
 // Placement, load-time checks, search mode, and chunking of an engine.
 struct Query_Options
@@ -40,6 +51,8 @@ struct Query_Options
     idx_t stride = 32;  // Sample-table stride; `0` selects the direct mode.
     uint32_t key_words = 0; // 64-bit words per table key: 1, 2, or 4; `0` picks 2, or 4 for 4-byte symbols.
     bool sort = false;  // Whether to sort every batch by its packed prefixes before searching.
+    Gather gather = Gather::automatic;  // Where the two-phase search reads its brackets' suffix-array entries.
+    idx_t gather_queries = idx_t(1) << 18;  // Queries whose brackets are gathered at a time, bounding the copies' device memory.
     idx_t chunk_queries = idx_t(1) << 18;   // Queries per chunk of a host-side batch, at most.
     idx_t chunk_symbols = idx_t(1) << 24;   // Symbols per chunk of a host-side batch, at most; a longer query is a chunk of its own.
     idx_t min_chunk_queries = idx_t(1) << 16;   // Least queries of a chunk's share of a host-side batch, which splits into two chunks per stream.
@@ -92,6 +105,7 @@ private:
     Suffix_Index idx_;  // The loaded index.
     Sample_Table tab_;  // Its sample table.
     Query_Options opt_; // The options of the load.
+    idx_t window_bytes_ = 0;    // Bytes of a bracket's slot of gathered suffix-array entries; `0` unless gathering.
     int device_ = 0;    // The device of the load.
     std::array<Lane, STREAM_C> lane_;   // The streams of `find`.
     mutable std::mutex find_lock_;  // Held by `find`, which owns the lanes.
@@ -107,7 +121,8 @@ private:
 
     // Searches the device-side queries `sym[off[i] - off0, off[i + 1] - off0)`,
     // `i < q`, into `out[0, q)`, with the two-phase search's buffers `space` of
-    // room for `q` queries; asynchronously on the stream `s`.
+    // room for `q` queries, and the gathered brackets in scratch from the pool;
+    // asynchronously on the stream `s`.
     void search(const uint64_t* off, const T_sym_* sym, uint64_t off0, idx_t q, SA_Interval* out, const Search_Buffers& space,
                 cudaStream_t s) const;
 
@@ -132,11 +147,11 @@ public:
     // reason in `err` on failure.
     bool load(const std::string& dir, const Query_Options& opt, std::string& err);
 
-    // Switches the loaded engine's search mode to the `stride`, `key_words`, and
-    // `sort` settings of `Query_Options`, rebuilding the sample table; the
-    // index stays loaded. Returns `false` with a reason in `err` on failure,
-    // leaving the engine in the direct mode.
-    bool configure(idx_t stride, uint32_t key_words, bool sort, std::string& err);
+    // Switches the loaded engine's search mode to the `stride`, `key_words`,
+    // `sort`, and `gather` settings of `Query_Options`, rebuilding the sample
+    // table; the index stays loaded. Returns `false` with a reason in `err` on
+    // failure, leaving the engine in the direct mode.
+    bool configure(idx_t stride, uint32_t key_words, bool sort, Gather gather, std::string& err);
 
     // Finds the SA-intervals of the queries `sym[off[i], off[i + 1])`, `i < q`,
     // into `out[0, q)`; all device-side arrays, asynchronously on the stream `s`.

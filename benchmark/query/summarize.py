@@ -21,7 +21,7 @@ import statistics
 import sys
 
 KEY = re.compile(r"([a-z][a-z0-9_]*)=(.*)")
-MODE_KEYS = ("stride", "key_words", "key_symbols", "sort", "table_bytes", "t_table")
+MODE_KEYS = ("stride", "key_words", "key_symbols", "sort", "gather", "table_bytes", "t_table")
 KINDS = ("present", "mutated", "random", "heldout", "unigram", "batch")
 SHOWN = ("present-m1", "present-m10", "random-m5", "present-m100", "present-m1000")
 NAN = math.nan
@@ -56,7 +56,8 @@ def batches(path, engine, run):
         out.append(cur)
     for b in out:
         b.update(engine=engine, run=run, log=str(path))
-        b["config"] = (f"s{b.get('stride')}w{b.get('key_words')}o{b.get('sort')}" if engine == "ours"
+        b["config"] = (f"s{b.get('stride')}w{b.get('key_words')}o{b.get('sort')}" + (f"g{b['gather']}" if "gather" in b else "")
+                       if engine == "ours"
                        else f"{b.get('mode')}-t{b.get('threads')}-p{b.get('prefetch')}-{b.get('load')}")
     return [b for b in out if "qps" in b]
 

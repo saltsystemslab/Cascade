@@ -603,10 +603,11 @@ bool check_every_way(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t
 // Checks the device engine against the oracle on the fixture text `T` of the
 // symbols `alpha`, in every device-accessible placement, with the suffix array
 // in `parts` parts: in the direct mode, and in two phases over every stride of
-// `{1, 2, 3, 16, 64, n + 5}`, key width, and batch order; every way the engine
-// finds, with chunks of a few queries, so that the pipeline crosses chunks and
-// keeps long queries alone. Checks also that the device certificate accepts
-// the intervals and rejects perturbed ones.
+// `{1, 2, 3, 16, 64, n + 5}`, key width, batch order, and bracket source; every
+// way the engine finds, with chunks of a few queries, so that the pipeline
+// crosses chunks and keeps long queries alone, and gathers of fewer still.
+// Checks also that the placement picks the bracket source, and that the device
+// certificate accepts the intervals and rejects perturbed ones.
 template <typename T_sym_>
 bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const idx_t parts,
                        const char* const what)
@@ -625,12 +626,13 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
     for(idx_t i = 0; i < q; ++i)
         want[i] = ref::find_one(T.data(), n, SA.data(), sym.data() + off[i], off[i + 1] - off[i]);
 
-    struct Mode { idx_t stride; uint32_t key_words; bool sort; };
-    std::vector<Mode> modes = {{0, 0, false}};
+    struct Mode { idx_t stride; uint32_t key_words; bool sort; Gather gather; };
+    std::vector<Mode> modes = {{0, 0, false, Gather::automatic}};
     for(const idx_t stride : {idx_t(1), idx_t(2), idx_t(3), idx_t(16), idx_t(64), n + 5})
         for(const uint32_t key_words : {1u, 2u, 4u})
             for(const bool sort : {false, true})
-                modes.push_back({stride, key_words, sort});
+                for(const Gather gather : {Gather::never, Gather::always})
+                    modes.push_back({stride, key_words, sort, gather});
 
     for(const auto text_res : {Residency::device, Residency::pinned})
         for(const auto sa_res : {Residency::device, Residency::pinned})
@@ -640,12 +642,15 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
             Query_Options opt{text_res, sa_res, 100000, 0};
             opt.chunk_queries = 7;
             opt.chunk_symbols = 23;
+            opt.gather_queries = 5;
             CHECK(eng.load(dir.string(), opt, err), "%s: %s", where.c_str(), err.c_str());
+            CHECK(eng.options().gather == (sa_res == Residency::pinned ? Gather::always : Gather::never),
+                  "%s: the placement must pick the bracket source", where.c_str());
             for(const auto& md : modes)
             {
-                CHECK(eng.configure(md.stride, md.key_words, md.sort, err), "%s: %s", where.c_str(), err.c_str());
+                CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s: %s", where.c_str(), err.c_str());
                 const std::string mode = where + ", stride " + std::to_string(md.stride) + ", key words " + std::to_string(md.key_words)
-                                         + ", sort " + std::to_string(md.sort);
+                                         + ", sort " + std::to_string(md.sort) + ", gather " + std::to_string(md.gather == Gather::always);
                 if(!check_every_way(eng, off, sym, want, mode))
                     return false;
             }
@@ -734,10 +739,11 @@ bool test_gpu_find()
 
 
 // Checks the pipeline on batches of many chunks, in the direct mode and in two
-// phases, sorted and not: chunks bounded by their queries and by their
-// symbols, as the most for a chunk and as its share of a batch split across
-// the streams; queries longer than a chunk, empty queries, offsets that start
-// past the symbols' first, an empty batch, and concurrent calls.
+// phases, sorted and not, and gathered in tiles that cross chunks: chunks
+// bounded by their queries and by their symbols, as the most for a chunk and as
+// its share of a batch split across the streams; queries longer than a chunk,
+// empty queries, offsets that start past the symbols' first, an empty batch,
+// and concurrent calls.
 bool test_pipeline()
 {
     std::mt19937_64 rng(17);
@@ -783,7 +789,7 @@ bool test_pipeline()
 
     // The most for a chunk, and the least of its share of a batch.
     struct Chunk { idx_t queries, symbols, min_queries, min_symbols; };
-    struct Mode { idx_t stride; uint32_t key_words; bool sort; };
+    struct Mode { idx_t stride; uint32_t key_words; bool sort; Gather gather; };
     const Query_Options dflt;
     for(const Chunk ch : {Chunk{dflt.chunk_queries, dflt.chunk_symbols, dflt.min_chunk_queries, dflt.min_chunk_symbols}, Chunk{1000, 5000, 1000, 5000},
                           Chunk{3, 2, 3, 2}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1000, 5000}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1, 1},
@@ -794,14 +800,16 @@ bool test_pipeline()
         opt.chunk_symbols = ch.symbols;
         opt.min_chunk_queries = ch.min_queries;
         opt.min_chunk_symbols = ch.min_symbols;
+        opt.gather_queries = 777;
         Query_Engine<uint16_t> eng;
         CHECK(eng.load(dir.string(), opt, err), "%s", err.c_str());
-        for(const Mode md : {Mode{0, 0, false}, Mode{16, 2, false}, Mode{16, 2, true}})
+        for(const Mode md : {Mode{0, 0, false, Gather::never}, Mode{16, 2, false, Gather::never}, Mode{16, 2, true, Gather::never},
+                             Mode{16, 2, true, Gather::always}})
         {
-            CHECK(eng.configure(md.stride, md.key_words, md.sort, err), "%s", err.c_str());
+            CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s", err.c_str());
             const std::string what = "chunks of up to " + std::to_string(ch.queries) + " queries and " + std::to_string(ch.symbols) + " symbols, of at least "
                                      + std::to_string(ch.min_queries) + " and " + std::to_string(ch.min_symbols) + ", stride " + std::to_string(md.stride)
-                                     + ", sort " + std::to_string(md.sort);
+                                     + ", sort " + std::to_string(md.sort) + ", gather " + std::to_string(md.gather == Gather::always);
             if(!check_every_way(eng, off, sym, want, what) || !check_every_way(eng, off5, sym5, want, what + ", offsets from 5")
                 || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries")
                 || (ch.min_queries == dflt.min_chunk_queries && !check_every_way(eng, off_l, sym_l, want_l, what + ", 200000 queries")))
@@ -885,6 +893,12 @@ bool test_gpu_rejects()
         Query_Options opt;
         (k == 0 ? opt.chunk_queries : (k == 1 ? opt.chunk_symbols : (k == 2 ? opt.min_chunk_queries : opt.min_chunk_symbols))) = 0;
         CHECK(!eng.load(dir.string(), opt, err), "a chunking option of 0 must be rejected");
+    }
+
+    {
+        Query_Options opt;
+        opt.gather_queries = 0;
+        CHECK(!eng.load(dir.string(), opt, err), "gathers of 0 queries must be rejected");
     }
 
     std::filesystem::resize_file(dir / "sa.u40.part0", SA_WIDTH * T.size() - 1);

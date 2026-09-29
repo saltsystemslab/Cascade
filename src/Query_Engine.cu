@@ -25,6 +25,9 @@ namespace
 {
 
 constexpr int BLOCK = 256;
+constexpr idx_t WINDOW_MAX_BYTES = 1024;    // Bytes of a bracket's slot of gathered suffix-array entries, at most.
+constexpr idx_t WINDOW_PAD_BYTES = 16;  // Bytes past the last slot: the decoding of an entry reads the word past its last byte.
+constexpr idx_t NO_SLOT = ~idx_t(0);
 
 
 // The ranks `[first, last]` that contain a boundary of an SA-interval.
@@ -33,6 +36,35 @@ struct Rank_Range
     idx_t first;
     idx_t last;
 };
+
+
+// Gathered suffix-array bytes of a bracket: the bytes `[b0, b1)` of the suffix
+// array, at byte `dst` of its tile's windows; `dst` is `NO_SLOT` for a bracket
+// searched in place.
+struct Window
+{
+    idx_t b0;
+    idx_t b1;
+    idx_t dst;
+};
+
+
+// Returns the window of the bracket `r` of the query at position `g` of a tile,
+// its upper one if `upper`, whose other bracket is `o`. A bracket's search
+// probes the entries at ranks `[r.first, r.last)`, which the window holds in
+// whole 16-byte words: in the query's pair of `wb`-byte slots, shared by its two
+// brackets, if their union fits in the pair; else in the bracket's own slot if
+// it fits in that; else in none.
+__device__ inline Window window_of(const Rank_Range r, const Rank_Range o, const bool upper, const idx_t g, const idx_t wb)
+{
+    const idx_t u0 = (SA_WIDTH * (r.first < o.first ? r.first : o.first)) & ~idx_t(15);
+    const idx_t u1 = (SA_WIDTH * (r.last > o.last ? r.last : o.last) + 15) & ~idx_t(15);
+    if(u1 - u0 <= 2 * wb)
+        return Window{u0, u1, 2 * wb * g};
+
+    const idx_t b0 = (SA_WIDTH * r.first) & ~idx_t(15), b1 = (SA_WIDTH * r.last + 15) & ~idx_t(15);
+    return (b1 - b0 <= wb ? Window{b0, b1, 2 * wb * g + (upper ? wb : 0)} : Window{0, 0, NO_SLOT});
+}
 
 
 // Writes into `keys[i]` the first `min(m, K)` symbols of the query
@@ -145,24 +177,50 @@ __global__ void table_kernel(const Packed_Prefix<W_>* const tab, const idx_t J, 
 }
 
 
+// Gathers into the windows `win` of a tile the suffix-array bytes that the
+// searches of its brackets `br[0, 2q)` probe, from the suffix array `SA`: each
+// bracket's as `window_of` places it, in slots of `wb` bytes. A warp gathers a
+// query's two brackets, 16 bytes a lane: all of it their union, or half of it
+// each bracket.
+__global__ void gather_kernel(const uint8_t* const SA, const Rank_Range* const br, const idx_t q, const idx_t wb, uint8_t* const win)
+{
+    const idx_t g = (idx_t(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
+    const unsigned lane = threadIdx.x & 31;
+    if(g >= q)
+        return;
+
+    const Rank_Range lo = br[2 * g], hi = br[2 * g + 1];
+    const Window w_lo = window_of(lo, hi, false, g, wb), w_hi = window_of(hi, lo, true, g, wb);
+    const bool whole = (w_lo.dst == w_hi.dst);  // The union's slots, or no slot.
+    const Window& w = (whole || lane < 16 ? w_lo : w_hi);
+    const idx_t first = 16 * (whole ? lane : lane & 15), step = (whole ? 32 * 16 : 16 * 16);
+    if(w.dst != NO_SLOT)
+        for(idx_t b = w.b0 + first; b < w.b1; b += step)
+            *reinterpret_cast<uint4*>(win + w.dst + (b - w.b0)) = *reinterpret_cast<const uint4*>(SA + b);
+}
+
+
 // Searches the suffix array `SA` over the text `T[0, n)` for the queries
-// `sym[off[i] - off0, off[i + 1] - off0)` of a batch, into `out`. Position `g`
-// of the batch is the query `ids[g]`, or `g` if `ids` is null. Adjacent threads
-// pair up on a query: thread `2g` finds its interval's `lo`, the first rank
-// whose truncated suffix is not smaller than the pattern, and thread `2g + 1`
-// its `hi`, the first rank whose truncated suffix is greater. A thread searches
-// the ranks `br[2g + lane]` if `br` is not null, and all of `[0, n]` otherwise;
-// the pair's searches then share their early path.
+// `sym[off[i] - off0, off[i + 1] - off0)` at the positions `[g0, g0 + q)` of a
+// batch, into `out`. Position `g` of the batch is the query `ids[g]`, or `g` if
+// `ids` is null. Adjacent threads pair up on a query: thread `2(g - g0)` finds
+// its interval's `lo`, the first rank whose truncated suffix is not smaller
+// than the pattern, and thread `2(g - g0) + 1` its `hi`, the first rank whose
+// truncated suffix is greater. A thread searches the ranks `br[2g + lane]` if
+// `br` is not null, and all of `[0, n]` otherwise; the pair's searches then
+// share their early path. If `win` is not null, it holds the positions'
+// gathered brackets, in slots of `wb` bytes, which the searches read instead of
+// the suffix array.
 template <typename T_sym_>
 __global__ void search_kernel(const T_sym_* const T, const idx_t n, const uint8_t* const SA, const uint64_t* const off,
                               const T_sym_* const sym, const uint64_t off0, const uint32_t* const ids, const Rank_Range* const br,
-                              const idx_t q, SA_Interval* const out)
+                              const idx_t g0, const idx_t q, const uint8_t* const win, const idx_t wb, SA_Interval* const out)
 {
     const idx_t t = idx_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if(t >= 2 * q)
         return;
 
-    const idx_t g = t >> 1;
+    const idx_t g = g0 + (t >> 1);
     const bool upper = t & 1;
     const idx_t i = (ids != nullptr ? ids[g] : g);
     const T_sym_* const P = sym + (off[i] - off0);
@@ -170,13 +228,24 @@ __global__ void search_kernel(const T_sym_* const T, const idx_t n, const uint8_
 
     // The answer is in `[low, low + len]`: the ranks before `low` go right, those from `low + len` do not.
     idx_t low = 0, len = n;
+    const uint8_t* src = SA;    // The probed bytes, holding the suffix array's from its byte `b0`.
+    idx_t b0 = 0;
     if(br != nullptr)
-        low = br[t].first, len = br[t].last - br[t].first;
+    {
+        const Rank_Range r = br[2 * g + upper];
+        low = r.first, len = r.last - r.first;
+        if(win != nullptr)
+        {
+            const Window w = window_of(r, br[2 * g + !upper], upper, t >> 1, wb);
+            if(w.dst != NO_SLOT)
+                src = win + w.dst, b0 = w.b0;
+        }
+    }
 
     while(len > 0)
     {
         const idx_t half = len >> 1, mid = low + half;
-        const int c = ref::cmp_suffix_pattern(T, n, sa40::load(SA, mid), P, m);
+        const int c = ref::cmp_suffix_pattern(T, n, sa40::load_at(src, SA_WIDTH * mid - b0), P, m);
         if(upper ? c <= 0 : c < 0)
         {
             low = mid + 1;
@@ -262,10 +331,13 @@ void release(Search_Buffers& sb, const bool pooled, const cudaStream_t s)
 // Finds the SA-intervals of the device-side batch `sym[off[i] - off0, off[i + 1]
 // - off0)`, `i < q`, over the index `idx` in two phases, with the sample table
 // `tab` of keys of `W_` words, and the buffers `sb`; sorting the batch by its
-// packed prefixes first if `sort`. Asynchronous on the stream `s`.
+// packed prefixes first if `sort`. If `win` is not null, the brackets of every
+// `tile` positions of the batch are gathered into it, in slots of `wb` bytes,
+// and searched there. Asynchronous on the stream `s`.
 template <typename T_sym_, idx_t W_>
 void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool sort, const uint64_t* const off, const T_sym_* const sym,
-                    const uint64_t off0, const idx_t q, SA_Interval* const out, const Search_Buffers& sb, const cudaStream_t s)
+                    const uint64_t off0, const idx_t q, SA_Interval* const out, const Search_Buffers& sb, uint8_t* const win,
+                    const idx_t tile, const idx_t wb, const cudaStream_t s)
 {
     if(q > sb.cap || q > INT_MAX)
     {
@@ -301,8 +373,22 @@ void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool
     const auto grid_2q = static_cast<unsigned>((2 * q + BLOCK - 1) / BLOCK);
     table_kernel<T_sym_, W_><<<grid_2q, BLOCK, 0, s>>>(tab.keys<W_>(), tab.size(), tab.stride(), idx.n(), off, sym, off0, k, id, q, br);
     CUDA_CHECK(cudaGetLastError());
-    search_kernel<<<grid_2q, BLOCK, 0, s>>>(idx.text<T_sym_>(), idx.n(), idx.sa(), off, sym, off0, id, br, q, out);
-    CUDA_CHECK(cudaGetLastError());
+
+    // A tile at a time: in the order of the batch, which sorted is that of the suffix array.
+    const idx_t tile_q = (win != nullptr ? tile : q);
+    for(idx_t g0 = 0; g0 < q; g0 += tile_q)
+    {
+        const idx_t tq = std::min(tile_q, q - g0);
+        if(win != nullptr)
+        {
+            gather_kernel<<<static_cast<unsigned>((32 * tq + BLOCK - 1) / BLOCK), BLOCK, 0, s>>>(idx.sa(), br + 2 * g0, tq, wb, win);
+            CUDA_CHECK(cudaGetLastError());
+        }
+
+        search_kernel<<<static_cast<unsigned>((2 * tq + BLOCK - 1) / BLOCK), BLOCK, 0, s>>>(idx.text<T_sym_>(), idx.n(), idx.sa(), off, sym,
+                                                                                          off0, id, br, g0, tq, win, wb, out);
+        CUDA_CHECK(cudaGetLastError());
+    }
 }
 
 
@@ -355,6 +441,12 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
         return false;
     }
 
+    if(opt.gather_queries == 0)
+    {
+        err = "a gather needs room for a query";
+        return false;
+    }
+
     Index_Meta m;
     if(!index_meta::read(dir, m, err))
         return false;
@@ -371,7 +463,7 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
         return false;
 
     opt_ = opt;
-    if(!configure(opt.stride, opt.key_words, opt.sort, err) || !allocate_lanes(err))
+    if(!configure(opt.stride, opt.key_words, opt.sort, opt.gather, err) || !allocate_lanes(err))
     {
         release_lanes();
         tab_.release();
@@ -384,12 +476,14 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
 
 
 template <typename T_sym_>
-bool Query_Engine<T_sym_>::configure(const idx_t stride, const uint32_t key_words, const bool sort, std::string& err)
+bool Query_Engine<T_sym_>::configure(const idx_t stride, const uint32_t key_words, const bool sort, const Gather gather, std::string& err)
 {
     tab_.release();
     opt_.stride = 0;
     opt_.key_words = 0;
     opt_.sort = sort;
+    opt_.gather = (gather != Gather::automatic ? gather : (idx_.sa_residency() == Residency::pinned ? Gather::always : Gather::never));
+    window_bytes_ = 0;
     if(pool_ != nullptr)    // The pool keeps its memory; the new table may need it.
     {
         CUDA_CHECK(cudaDeviceSynchronize());
@@ -405,6 +499,12 @@ bool Query_Engine<T_sym_>::configure(const idx_t stride, const uint32_t key_word
 
     opt_.stride = stride;
     opt_.key_words = w;
+
+    // A bracket probes at most `stride + K - 2` ranks: those of a sample gap, and the `K - 1` shorter suffixes that match the key of a
+    // pattern ending in `0`. Their bytes, rounded out to 16-byte words, gain at most 15 at each end.
+    if(opt_.gather == Gather::always)
+        window_bytes_ = std::min(WINDOW_MAX_BYTES, (SA_WIDTH * (stride + tab_.key_symbols() - 2) + 2 * 15 + 15) & ~idx_t(15));
+
     return true;
 }
 
@@ -487,17 +587,25 @@ void Query_Engine<T_sym_>::search(const uint64_t* const off, const T_sym_* const
     if(!tab_.built())
     {
         const auto grid = static_cast<unsigned>((2 * q + BLOCK - 1) / BLOCK);
-        search_kernel<<<grid, BLOCK, 0, s>>>(idx_.text<T_sym_>(), idx_.n(), idx_.sa(), off, sym, off0, nullptr, nullptr, q, out);
+        search_kernel<<<grid, BLOCK, 0, s>>>(idx_.text<T_sym_>(), idx_.n(), idx_.sa(), off, sym, off0, nullptr, nullptr, 0, q, nullptr, 0, out);
         CUDA_CHECK(cudaGetLastError());
         return;
     }
 
+    uint8_t* win = nullptr; // A tile's gathered brackets.
+    const idx_t tile = std::min(q, opt_.gather_queries);
+    if(window_bytes_ > 0)
+        CUDA_CHECK(cudaMallocFromPoolAsync(reinterpret_cast<void**>(&win), 2 * window_bytes_ * tile + WINDOW_PAD_BYTES, pool_, s));
+
     switch(tab_.key_words())
     {
-    case 1: find_two_phase<T_sym_, 1>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, s); break;
-    case 2: find_two_phase<T_sym_, 2>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, s); break;
-    default:    find_two_phase<T_sym_, 4>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, s);
+    case 1: find_two_phase<T_sym_, 1>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s); break;
+    case 2: find_two_phase<T_sym_, 2>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s); break;
+    default:    find_two_phase<T_sym_, 4>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s);
     }
+
+    if(win != nullptr)
+        CUDA_CHECK(cudaFreeAsync(win, s));
 }
 
 

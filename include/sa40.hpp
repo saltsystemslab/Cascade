@@ -40,22 +40,31 @@ constexpr idx_t SA_ENTRY_MASK = SA_MAX_N - 1;
 namespace sa40
 {
 
+// Returns the 40-bit entry at byte `b` of the bytes `p` of a suffix array.
+// NB: device-side, `p` must be 4-byte aligned, and readable up to the 4-byte
+// word past the entry's last.
+CUDA_SPECIFIER
+inline idx_t load_at(const uint8_t* const p, const idx_t b)
+{
+#ifdef __CUDA_ARCH__
+    // Two aligned 32-bit loads cover the 5 bytes at any offset `b % 4 <= 3`.
+    const uint32_t* const w = reinterpret_cast<const uint32_t*>(p + (b & ~idx_t(3)));
+    const idx_t v = (static_cast<idx_t>(__ldg(w + 1)) << 32) | __ldg(w);
+    return (v >> ((b & 3) * 8)) & SA_ENTRY_MASK;
+#else
+    idx_t v = 0;    // The host is little-endian: the low bytes of `v` receive the entry.
+    std::memcpy(&v, p + b, SA_WIDTH);
+    return v;
+#endif
+}
+
+
 // Returns the entry at rank `r` of the 40-bit suffix array `SA`.
 // NB: device-side, `SA` must be 4-byte aligned and padded with `SA_PAD_BYTES`.
 CUDA_SPECIFIER
 inline idx_t load(const uint8_t* const SA, const idx_t r)
 {
-#ifdef __CUDA_ARCH__
-    // Two aligned 32-bit loads cover the 5 bytes at any offset `b % 4 <= 3`.
-    const idx_t b = SA_WIDTH * r;
-    const uint32_t* const w = reinterpret_cast<const uint32_t*>(SA + (b & ~idx_t(3)));
-    const idx_t v = (static_cast<idx_t>(__ldg(w + 1)) << 32) | __ldg(w);
-    return (v >> ((b & 3) * 8)) & SA_ENTRY_MASK;
-#else
-    idx_t v = 0;    // The host is little-endian: the low bytes of `v` receive the entry.
-    std::memcpy(&v, SA + SA_WIDTH * r, SA_WIDTH);
-    return v;
-#endif
+    return load_at(SA, SA_WIDTH * r);
 }
 
 
