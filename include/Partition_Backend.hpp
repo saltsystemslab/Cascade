@@ -78,7 +78,7 @@ private:
     static constexpr bool DYNAMIC_CONTENT = false;
 
     std::size_t fixed_; // Bytes of the fixed host-allocation still held: `fixed_bytes` at construction, less the cap's raises.
-    Host_Budget budget_;    // Host-memory budget of the elastic RAM-tier.
+    Host_Budget budget_;    // Host-memory budget of the RAM-tiers of the content and of the messages.
     const p_sz_t msg_chunk_cap_;    // Messages per RAM message-chunk: a slab's inbox-range spans `MSG_CHUNKS_PER_SLAB` of them.
     std::unique_ptr<Message_Pool> pool_;    // Pool of the RAM message-chunks.
 
@@ -224,8 +224,10 @@ private:
     bool admit(Field f, p_id_t p_id, idx_t c, Claim claim);
 
     // Aborts unless the RAM-chunks retired as tails are exactly the ones past
-    // their partitions' active-sets, of sizes `Active_sz`, and the RAM-chunks'
-    // charges agree with their tiers.
+    // their partitions' active-sets, of sizes `Active_sz`, the RAM-chunks'
+    // charges agree with their tiers, and the budget's charges are the
+    // content's and the resident message-chunks'. To be invoked between the
+    // generations.
     void check_tiers(const std::vector<idx_t>& Active_sz) const;
 
     // Counts a transition of kind `t`.
@@ -247,8 +249,9 @@ public:
     // Constructs a backend for partitions with capacities `P_cap`, staged in
     // slabs of capacity `chunk_cap`. It spills to spill-store `spill` whenever
     // the memory `budget` of the host, less its fixed allocation cost
-    // `fixed_bytes` cannot hold some data. The elastic RAM-tier starts with
-    // what the partitions' residency plan leaves of the budget.
+    // `fixed_bytes` cannot hold some data. The content that the partitions'
+    // residency-plan places in RAM is charged to the budget first, and the
+    // messages' RAM-tier takes the rest.
     Partition_Backend(const std::vector<idx_t>& P_cap, idx_t chunk_cap, Spill_Store& spill, std::size_t budget, std::size_t fixed_bytes, p_id_t p);
 
     Partition_Backend(const Partition_Backend&) = delete;

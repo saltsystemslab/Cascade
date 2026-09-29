@@ -27,7 +27,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , tail_ram_(0)
     , evict_cursor_(0)
     , fixed_(fixed_bytes)
-    , budget_(budget - fixed_bytes - plan_.data_resident(), plan_.force_spill())
+    , budget_(budget - fixed_bytes, plan_.force_spill())
     , msg_chunk_cap_(chunk_cap / MSG_CHUNKS_PER_SLAB)
     , pool_(std::make_unique<Message_Pool>(msg_chunk_cap_, budget_.pinned() ? 0 : budget))
     , msg_off_(nullptr)
@@ -57,6 +57,13 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
                     static_cast<uint8_t>(plan_.data(p_id) ? Tier::ram : Tier::disk), std::memory_order_relaxed);
 
     std::copy(P_cap.cbegin(), P_cap.cend(), active_slot_);  // No chunk is a retired tail before the first generation.
+
+    // The content that the residency-plan places in RAM is charged to the budget first; the messages get the rest.
+    if(!budget_.try_charge(plan_.data_resident()))
+    {
+        std::cerr << "The residency-plan's " << plan_.data_resident() << " bytes of RAM-content exceed the host-memory budget's cap of " << budget_.cap() << " bytes. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 
     for(idx_t parity = 0; parity < 2; ++parity)
     {
@@ -121,6 +128,7 @@ void Partition_Backend::retire_partition(const p_id_t p_id)
         }
 
     content_ram_.fetch_sub(ram, std::memory_order_relaxed), tail_ram_.fetch_sub(tail, std::memory_order_relaxed);
+    budget_.uncharge(ram);
 }
 
 
@@ -307,6 +315,14 @@ void Partition_Backend::check_tiers(const std::vector<idx_t>& Active_sz) const
     if(ram != content_ram_ || tail != tail_ram_)
     {
         std::cerr << "The content's RAM-chunks are charged " << content_ram_ << " bytes, " << tail_ram_ << " of them in retired tails; their tiers hold " << ram << " and " << tail << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    // Between the generations, the budget's charges are the content's and the resident message-chunks'.
+    const std::size_t msg = (pool_ ? std::size_t(pool_->carved() - pool_->released()) * pool_->chunk_bytes() : 0);
+    if(budget_.used() != content_ram_ + msg)
+    {
+        std::cerr << "The host-memory budget has " << budget_.used() << " bytes charged, against " << content_ram_ << " of content and " << msg << " of message-chunks. Aborting.\n";
         std::exit(EXIT_FAILURE);
     }
 }
@@ -750,11 +766,11 @@ void Partition_Backend::log_barrier(const idx_t gen, const std::vector<idx_t>& A
     const auto transitions = [&](const Transition t){ return transition_c_[static_cast<std::size_t>(t)].exchange(0, std::memory_order_relaxed); };
     std::cerr   << "Barrier " << gen << " (" << active_c << " partitions active):\n"
                 << "\tmemory:  cap " << GB(budget_.cap()) << "GBs, fixed " << GB(fixed_) << "GBs; "
-                    << "RSS " << GB(util::resident_memory()) << "GBs, against " << GB(fixed_ + content + budget_.used()) << "GBs accounted.\n"
+                    << "RSS " << GB(util::resident_memory()) << "GBs, against " << GB(fixed_ + budget_.used()) << "GBs accounted.\n"
                 << "\tcontent: cohort " << GB(cohort_ram) << "GBs in RAM, " << GB(cohort_disk) << "GBs on disk; "
                     << "RAM-chunks " << GB(content) << "GBs, " << GB(tail) << "GBs of them retired tails.\n"
                 << "\tinboxes: cohort's " << msg_ram << " messages in RAM, " << msg_disk << " on disk; "
-                    << "message-chunks " << GB(budget_.used()) << "GBs charged, " << GB(budget_.pooled()) << "GBs of them pooled.\n"
+                    << "message-chunks " << GB(budget_.used() - content) << "GBs charged, " << GB(budget_.pooled()) << "GBs of them pooled.\n"
                 << "\ttransitions since the last barrier: " << transitions(Transition::ram_write) << " RAM-writes, "
                     << transitions(Transition::disk_write) << " disk-writes, " << transitions(Transition::admit) << " admissions, "
                     << transitions(Transition::admit_tail) << " retiring admissions, " << transitions(Transition::tail_mark) << " tail-marks, "
@@ -795,20 +811,25 @@ void Partition_Backend::shuffle_tiers(const idx_t gen, const std::vector<idx_t>&
                 if(move(shuffle_rng_))
                 {
                     const auto field = static_cast<Field>(f);
-                    in_ram(field, p_id, c) ? move_to_disk(field, p_id, c) : move_to_ram(field, p_id, c);
+                    const auto bytes = chunk_bytes(field, p_id, c);
+                    if(in_ram(field, p_id, c))
+                        move_to_disk(field, p_id, c), budget_.uncharge(bytes);
+                    else if(budget_.try_charge(bytes))  // A move to RAM takes free room only.
+                        move_to_ram(field, p_id, c);
+                    else
+                        continue;
 #ifdef STATS
                     count(Transition::shuffle);
 #endif
                 }
 
-    // The retired tails leave likewise, through the evictor. Their memory is the residency-plan's, not the budget's, so their
-    // charges return nowhere.
+    // The retired tails leave likewise, through the evictor, and their charges return to the budget.
     std::size_t evict_c = 0;
     for(std::size_t x = 0; x < FIELD_C * chunk_base_[p_]; ++x)
         evict_c += (tier_[x].load(std::memory_order_relaxed) == static_cast<uint8_t>(Tier::ram_tail) && move(shuffle_rng_));
 
     for(std::size_t i = 0; i < evict_c; ++i)
-        evict_one();
+        budget_.uncharge(evict_one());
 }
 
 
