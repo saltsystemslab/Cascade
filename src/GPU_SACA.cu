@@ -1125,6 +1125,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(backend_->active_slot(p_id), active_set_sz_d + p_id, sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));   // For the writers to mark the retired tails.
         CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
         const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
 
@@ -1702,6 +1703,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(backend_->active_slot(p_id), active_set_sz_d + p_id, sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));   // For the writers to mark the retired tails.
         CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
         const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
 

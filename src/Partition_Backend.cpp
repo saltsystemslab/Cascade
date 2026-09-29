@@ -21,6 +21,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , disk_(P_cap, spill, plan_)
     , chunk_cap_(chunk_cap)
     , chunk_base_(p_ + 1, 0)
+    , active_slot_(nullptr)
     , budget_(budget - fixed_bytes - plan_.data_resident(), plan_.force_spill())
     , msg_chunk_cap_(chunk_cap / MSG_CHUNKS_PER_SLAB)
     , pool_(std::make_unique<Message_Pool>(msg_chunk_cap_, budget_.pinned() ? 0 : budget))
@@ -33,6 +34,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , ov_lock_(p_)
 {
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
+    CUDA_CHECK(pinned_allocate_host(active_slot_, p_));
 
     // The chunks' tiers follow the residency-plan: a partition's content resides whole in RAM or in disk.
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
@@ -44,6 +46,8 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
             for(idx_t c = chunk_base_[p_id]; c < chunk_base_[p_id + 1]; ++c)
                 tier_[f * chunk_base_[p_] + c].store(
                     static_cast<uint8_t>(plan_.data(p_id) ? Tier::ram : Tier::disk), std::memory_order_relaxed);
+
+    std::copy(P_cap.cbegin(), P_cap.cend(), active_slot_);  // No chunk is a retired tail before the first generation.
 
     for(idx_t parity = 0; parity < 2; ++parity)
     {
@@ -65,6 +69,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
 Partition_Backend::~Partition_Backend()
 {
     CUDA_CHECK(deallocate_host(msg_off_));
+    CUDA_CHECK(deallocate_host(active_slot_));
     for(idx_t p_id = 0; p_id < p_; ++p_id)
         util::deallocate(ov_tgt_[p_id]),
         util::deallocate(ov_rank_[p_id]);
@@ -150,8 +155,8 @@ void Partition_Backend::read_suf_chunk(const p_id_t p_id, const idx_t off, const
     for_each_chunk(off, sz,
         [&](const idx_t c, const idx_t from, const idx_t len)
         {
-            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.read_suf(p_id, from, len, suf + (from - off)) :
-                                                        disk_.read_suf(p_id, from, len, suf + (from - off));
+            in_ram(Field::suf, p_id, c) ?   ram_.read_suf(p_id, from, len, suf + (from - off)) :
+                                            disk_.read_suf(p_id, from, len, suf + (from - off));
         });
 }
 
@@ -162,10 +167,10 @@ void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx
     for_each_chunk(off, sz,
         [&](const idx_t c, const idx_t from, const idx_t len)
         {
-            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.read_suf(p_id, from, len, suf + (from - off)) :
-                                                        disk_.read_suf(p_id, from, len, suf + (from - off));
-            tier(Field::key, p_id, c) == Tier::ram ?    ram_.read_key(p_id, from, len, key + (from - off)) :
-                                                        disk_.read_key(p_id, from, len, key + (from - off));
+            in_ram(Field::suf, p_id, c) ?   ram_.read_suf(p_id, from, len, suf + (from - off)) :
+                                            disk_.read_suf(p_id, from, len, suf + (from - off));
+            in_ram(Field::key, p_id, c) ?   ram_.read_key(p_id, from, len, key + (from - off)) :
+                                            disk_.read_key(p_id, from, len, key + (from - off));
         });
 }
 
@@ -209,16 +214,38 @@ void Partition_Backend::write(const Staging_Slab& s)
 
     const auto p_id = s.p_id();
     const auto off = s.off();
+    const auto a_new = active_slot_[p_id];  // The partition's active-set size past this generation.
     const auto* const suf = s.suf();
     const auto* const key = reinterpret_cast<const p_sz_t*>(s.key());
     for_each_chunk(off, s.size(),
         [&](const idx_t c, const idx_t from, const idx_t len)
         {
-            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.write_suf(p_id, from, len, suf + (from - off)) :
-                                                        disk_.write_suf(p_id, from, len, suf + (from - off));
-            tier(Field::key, p_id, c) == Tier::ram ?    ram_.write_key(p_id, from, len, key + (from - off)) :
-                                                        disk_.write_key(p_id, from, len, key + (from - off));
+#ifdef TESTS
+            if(tier(Field::suf, p_id, c) == Tier::ram_tail || tier(Field::key, p_id, c) == Tier::ram_tail)
+            {
+                std::cerr << "Chunk " << c << " of partition " << p_id << " is a retired tail, yet in the cohort. Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+#endif
+            in_ram(Field::suf, p_id, c) ?   ram_.write_suf(p_id, from, len, suf + (from - off)) :
+                                            disk_.write_suf(p_id, from, len, suf + (from - off));
+            in_ram(Field::key, p_id, c) ?   ram_.write_key(p_id, from, len, key + (from - off)) :
+                                            disk_.write_key(p_id, from, len, key + (from - off));
+
+            if(c * chunk_cap_ >= a_new) // The chunk lies past the partition's new active-set.
+                mark_tail(p_id, c);
         });
+}
+
+
+void Partition_Backend::mark_tail(const p_id_t p_id, const idx_t c)
+{
+    for(std::size_t f = 0; f < FIELD_C; ++f)
+    {
+        auto& t = tier_[tier_idx(static_cast<Field>(f), p_id, c)];
+        if(t.load(std::memory_order_relaxed) == static_cast<uint8_t>(Tier::ram))
+            t.store(static_cast<uint8_t>(Tier::ram_tail), std::memory_order_release);  // Publishes the chunk's completed writeback.
+    }
 }
 
 
@@ -227,8 +254,8 @@ void Partition_Backend::write_suffixes(const p_id_t p_id, const idx_t off, const
     for_each_chunk(off, sz,
         [&](const idx_t c, const idx_t from, const idx_t len)
         {
-            tier(Field::suf, p_id, c) == Tier::ram ?    ram_.write_suf(p_id, from, len, suf + (from - off)) :
-                                                        disk_.write_suf(p_id, from, len, suf + (from - off));
+            in_ram(Field::suf, p_id, c) ?   ram_.write_suf(p_id, from, len, suf + (from - off)) :
+                                            disk_.write_suf(p_id, from, len, suf + (from - off));
         });
 }
 
@@ -440,6 +467,21 @@ void Partition_Backend::open_generation(const idx_t gen, const std::vector<idx_t
 {
     inbox_write_parity_ = write_parity(gen), inbox_read_parity_ = read_parity(gen);
     disk_.set_generation(gen);
+
+#ifdef TESTS
+    // A RAM-chunk is a retired tail iff it lies past its partition's active-set.
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        for(idx_t c = 0; c < chunk_base_[p_id + 1] - chunk_base_[p_id]; ++c)
+            for(std::size_t f = 0; f < FIELD_C; ++f)
+            {
+                const auto t = tier(static_cast<Field>(f), p_id, c);
+                if(t != Tier::disk && (t == Tier::ram_tail) != (c * chunk_cap_ >= Active_sz[p_id]))
+                {
+                    std::cerr << "Chunk " << c << " of partition " << p_id << " is " << (t == Tier::ram_tail ? "" : "not ") << "a retired tail, at active-set size " << Active_sz[p_id] << ". Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+            }
+#endif
 
     const auto parity = write_parity(gen);
     std::memset(msg_off_, 0, p_ * p_* sizeof(p_sz_t));

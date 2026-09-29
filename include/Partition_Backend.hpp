@@ -44,12 +44,14 @@ private:
 
         static constexpr std::size_t FIELD_C = static_cast<std::size_t>(Field::field_c);
 
-        // Residency tiers of a chunk's field.
-        enum class Tier : uint8_t { disk = 0, ram, };
+        // Residency tiers of a chunk's field. A RAM-chunk past its partition's
+        // active-set is a retired tail: it is never in a cohort again.
+        enum class Tier : uint8_t { disk = 0, ram, ram_tail, };
 
         const idx_t chunk_cap_; // Elements per content-chunk: a staging-slab's capacity.
         std::vector<idx_t> chunk_base_; // Index of each partition's first chunk, in the partitions' flattened chunk-sequence; `p + 1` entries.
         std::unique_ptr<std::atomic<uint8_t>[]> tier_;  // Tier of each chunk's each field, field-major: `FIELD_C x chunk_base_[p]` entries.
+        idx_t* active_slot_;    // Pinned slots of the partitions' active-set sizes past their device-runs, for their writers; `p` entries.
     // }
 
     Host_Budget budget_;    // Host-memory budget of the elastic RAM-tier.
@@ -127,8 +129,21 @@ private:
     // Returns the RAM-part `in`'s message-chunks to the pool, and empties it.
     void release_inbox(RAM_Inbox& in);
 
+    // Returns the index of field `f` of the `p_id`'th partition's `c`'th chunk
+    // into the tier-table.
+    std::size_t tier_idx(Field f, p_id_t p_id, idx_t c) const;
+
     // Returns the tier of field `f` of the `p_id`'th partition's `c`'th chunk.
     Tier tier(Field f, p_id_t p_id, idx_t c) const;
+
+    // Returns whether field `f` of the `p_id`'th partition's `c`'th chunk
+    // resides in RAM.
+    bool in_ram(const Field f, const p_id_t p_id, const idx_t c) const { return tier(f, p_id, c) != Tier::disk; }
+
+    // Marks the RAM-resident fields of the `p_id`'th partition's `c`'th chunk
+    // as retired tails; the disk-resident ones stay as they are. To be invoked
+    // once the chunk's writeback completes.
+    void mark_tail(p_id_t p_id, idx_t c);
 
     // Applies `f(c, from, len)` to each piece `[from, from + len)` of a
     // partition's range `[off, off + sz)` that lies in the partition's `c`'th
@@ -179,6 +194,10 @@ public:
     // Returns the (exclusive) ending-offsets of the destination-partitions into
     // the messages produced by the `p_id`'th partition.
     auto msg_off(const p_id_t p_id) const { return msg_off_ + p_id * p_; }
+
+    // Returns the slot of the `p_id`'th partition's active-set size past its
+    // device-run at the current generation; its writers read it.
+    idx_t* active_slot(const p_id_t p_id) { return active_slot_ + p_id; }
 
     // Returns the size of the `q`'th inbox at the generation last written to.
     p_sz_t msg_count(const p_id_t q) const { return ram_inbox_[inbox_write_parity_][q].unwrap().count + disk_count(q); }
@@ -251,9 +270,15 @@ public:
 };
 
 
+inline std::size_t Partition_Backend::tier_idx(const Field f, const p_id_t p_id, const idx_t c) const
+{
+    return static_cast<std::size_t>(f) * chunk_base_[p_] + chunk_base_[p_id] + c;
+}
+
+
 inline Partition_Backend::Tier Partition_Backend::tier(const Field f, const p_id_t p_id, const idx_t c) const
 {
-    return static_cast<Tier>(tier_[static_cast<std::size_t>(f) * chunk_base_[p_] + chunk_base_[p_id] + c].load(std::memory_order_relaxed));
+    return static_cast<Tier>(tier_[tier_idx(f, p_id, c)].load(std::memory_order_relaxed));
 }
 
 }
