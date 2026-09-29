@@ -349,9 +349,9 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
         return false;
     }
 
-    if(opt.chunk_queries == 0 || opt.chunk_queries > INT_MAX || opt.chunk_symbols == 0)
+    if(opt.chunk_queries == 0 || opt.chunk_queries > INT_MAX || opt.chunk_symbols == 0 || opt.min_chunk_queries == 0 || opt.min_chunk_symbols == 0)
     {
-        err = "a chunk needs 1 to " + std::to_string(INT_MAX) + " queries, and room for a symbol";
+        err = "a chunk needs 1 to " + std::to_string(INT_MAX) + " queries and room for a symbol, and its least share a query and a symbol";
         return false;
     }
 
@@ -533,17 +533,34 @@ void Query_Engine<T_sym_>::find(const uint64_t* const off, const T_sym_* const s
 
     std::lock_guard<std::mutex> guard(find_lock_);
 
-    // The chunks: up to `chunk_queries` queries of up to `chunk_symbols` symbols in all, or a longer query alone.
+    // The chunks: a chunk ends at the first of its share of the batch's queries and of its symbols, a share being at least the
+    // options' least for a chunk, and at most their most; a query longer than a chunk's share is a chunk of its own.
+    const idx_t chunk_c = CHUNKS_PER_STREAM * STREAM_C, sym_c = off[q] - off[0];
+    const idx_t share_q = std::min(opt_.chunk_queries, std::max(opt_.min_chunk_queries, (q + chunk_c - 1) / chunk_c));
+    const idx_t share_s = std::min(opt_.chunk_symbols, std::max(opt_.min_chunk_symbols, (sym_c + chunk_c - 1) / chunk_c));
     std::vector<std::pair<idx_t, idx_t>> chunk;
     for(idx_t a = 0; a < q; )
     {
-        const idx_t b_max = std::min(q, a + opt_.chunk_queries);
-        const idx_t b = std::upper_bound(off + a + 1, off + b_max + 1, off[a] + opt_.chunk_symbols) - off - 1;
+        const idx_t b_max = std::min(q, a + share_q);
+        const idx_t b = std::upper_bound(off + a + 1, off + b_max + 1, off[a] + share_s) - off - 1;
         chunk.emplace_back(a, std::max(b, a + 1));
         a = chunk.back().second;
     }
 
     const Pinned_Arrays pinned{is_pinned(off), is_pinned(sym), is_pinned(out)};
+    if(pinned.off && pinned.sym && pinned.out)
+    {
+        // Nothing to stage: the chunks are enqueued in turn over the lanes, whose streams keep a lane's buffers until its previous
+        // chunk is done with them. No thread waits on a chunk, so a chunk's search overlaps the next ones' transfers.
+        for(std::size_t c = 0; c < chunk.size(); ++c)
+            find_chunk(lane_[c % STREAM_C], off, sym, chunk[c].first, chunk[c].second, out, pinned);
+
+        for(std::size_t l = 0; l < std::min(STREAM_C, chunk.size()); ++l)
+            CUDA_CHECK(cudaStreamSynchronize(lane_[l].stream));
+
+        return;
+    }
+
     std::atomic<std::size_t> next(0);   // The first chunk not claimed yet.
     const auto dispatch = [&](const std::size_t l)
     {
@@ -557,7 +574,7 @@ void Query_Engine<T_sym_>::find(const uint64_t* const off, const T_sym_* const s
         return;
     }
 
-    // A dispatcher per lane, as `GPU_SACA::compute_partition_IDs` runs them.
+    // A dispatcher per lane, staging its chunks, as `GPU_SACA::compute_partition_IDs` runs them.
     std::vector<std::thread> dispatchers;
     for(std::size_t l = 0; l < std::min(STREAM_C, chunk.size()); ++l)
         dispatchers.emplace_back([&, l] { CUDA_CHECK(cudaSetDevice(device_)); dispatch(l); });
@@ -607,9 +624,13 @@ void Query_Engine<T_sym_>::find_chunk(const Lane& l, const uint64_t* const off, 
     if(alone)
         CUDA_CHECK(cudaFreeAsync(sym_d, s));
 
-    CUDA_CHECK(cudaStreamSynchronize(s));
-    if(!pinned.out)
-        std::memcpy(out + a, l.out_h, q * sizeof(SA_Interval));
+    // Staging reuses the lane's buffers, and staged intervals must reach `out`: the chunk must be done. Else, the stream orders it.
+    if(!pinned.off || !pinned.sym || !pinned.out)
+    {
+        CUDA_CHECK(cudaStreamSynchronize(s));
+        if(!pinned.out)
+            std::memcpy(out + a, l.out_h, q * sizeof(SA_Interval));
+    }
 }
 
 

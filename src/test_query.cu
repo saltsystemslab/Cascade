@@ -568,8 +568,8 @@ struct Pinned_Batch
 
 
 // Checks that the engine finds the intervals `want` of the batch `off`, `sym`
-// every way: through the pipeline from pageable memory and from pinned memory,
-// and from device memory.
+// every way: through the pipeline from pageable memory, from pinned memory,
+// and from pinned queries into pageable intervals; and from device memory.
 template <typename T_sym_>
 bool check_every_way(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t>& off, const std::vector<T_sym_>& sym,
                      const std::vector<SA_Interval>& want, const std::string& what)
@@ -580,6 +580,8 @@ bool check_every_way(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t
     Pinned_Batch<T_sym_> pb(off, sym);
     std::fill(pb.out, pb.out + q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
     eng.find(pb.off, pb.sym, q, pb.out);
+    std::vector<SA_Interval> mixed(q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
+    eng.find(pb.off, pb.sym, q, mixed.data());
     const auto dev = device_find(eng, off, sym);
 
     for(idx_t i = 0; i < q; ++i)
@@ -588,6 +590,8 @@ bool check_every_way(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t
               what.c_str(), i, off[i + 1] - off[i], got[i].lo, got[i].hi, want[i].lo, want[i].hi);
         CHECK(same(pb.out[i], want[i]), "%s: query %" PRIu64 " (m = %" PRIu64 "): pinned [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")",
               what.c_str(), i, off[i + 1] - off[i], pb.out[i].lo, pb.out[i].hi, want[i].lo, want[i].hi);
+        CHECK(same(mixed[i], want[i]), "%s: query %" PRIu64 " (m = %" PRIu64 "): pinned into pageable [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64
+              ", %" PRIu64 ")", what.c_str(), i, off[i + 1] - off[i], mixed[i].lo, mixed[i].hi, want[i].lo, want[i].hi);
         CHECK(same(dev[i], want[i]), "%s: query %" PRIu64 " (m = %" PRIu64 "): device [%" PRIu64 ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")",
               what.c_str(), i, off[i + 1] - off[i], dev[i].lo, dev[i].hi, want[i].lo, want[i].hi);
     }
@@ -731,8 +735,9 @@ bool test_gpu_find()
 
 // Checks the pipeline on batches of many chunks, in the direct mode and in two
 // phases, sorted and not: chunks bounded by their queries and by their
-// symbols, queries longer than a chunk, empty queries, offsets that start past
-// the symbols' first, an empty batch, and concurrent calls.
+// symbols, as the most for a chunk and as its share of a batch split across
+// the streams; queries longer than a chunk, empty queries, offsets that start
+// past the symbols' first, an empty batch, and concurrent calls.
 bool test_pipeline()
 {
     std::mt19937_64 rng(17);
@@ -771,22 +776,35 @@ bool test_pipeline()
     const std::vector<uint64_t> off_e(1001, 0); // Empty queries.
     const std::vector<SA_Interval> want_e(1000, SA_Interval{0, n});
 
-    struct Chunk { idx_t queries, symbols; };
+    std::vector<uint64_t> off_l;    // Enough queries to split across the streams with the default least shares.
+    std::vector<uint16_t> sym_l;
+    fixture_queries(T, alpha, rng, 200000, off_l, sym_l);
+    const auto want_l = oracle(off_l, sym_l);
+
+    // The most for a chunk, and the least of its share of a batch.
+    struct Chunk { idx_t queries, symbols, min_queries, min_symbols; };
     struct Mode { idx_t stride; uint32_t key_words; bool sort; };
-    for(const Chunk ch : {Chunk{Query_Options().chunk_queries, Query_Options().chunk_symbols}, Chunk{1000, 5000}, Chunk{3, 2}})
+    const Query_Options dflt;
+    for(const Chunk ch : {Chunk{dflt.chunk_queries, dflt.chunk_symbols, dflt.min_chunk_queries, dflt.min_chunk_symbols}, Chunk{1000, 5000, 1000, 5000},
+                          Chunk{3, 2, 3, 2}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1000, 5000}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1, 1},
+                          Chunk{700, 3000, 1, 1}})
     {
         Query_Options opt;
         opt.chunk_queries = ch.queries;
         opt.chunk_symbols = ch.symbols;
+        opt.min_chunk_queries = ch.min_queries;
+        opt.min_chunk_symbols = ch.min_symbols;
         Query_Engine<uint16_t> eng;
         CHECK(eng.load(dir.string(), opt, err), "%s", err.c_str());
         for(const Mode md : {Mode{0, 0, false}, Mode{16, 2, false}, Mode{16, 2, true}})
         {
             CHECK(eng.configure(md.stride, md.key_words, md.sort, err), "%s", err.c_str());
-            const std::string what = "chunks of " + std::to_string(ch.queries) + " queries and " + std::to_string(ch.symbols) + " symbols, stride "
-                                     + std::to_string(md.stride) + ", sort " + std::to_string(md.sort);
+            const std::string what = "chunks of up to " + std::to_string(ch.queries) + " queries and " + std::to_string(ch.symbols) + " symbols, of at least "
+                                     + std::to_string(ch.min_queries) + " and " + std::to_string(ch.min_symbols) + ", stride " + std::to_string(md.stride)
+                                     + ", sort " + std::to_string(md.sort);
             if(!check_every_way(eng, off, sym, want, what) || !check_every_way(eng, off5, sym5, want, what + ", offsets from 5")
-                || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries"))
+                || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries")
+                || (ch.min_queries == dflt.min_chunk_queries && !check_every_way(eng, off_l, sym_l, want_l, what + ", 200000 queries")))
                 return false;
 
             eng.find(off.data(), sym.data(), 0, nullptr);   // No queries: nothing to touch.
@@ -862,6 +880,12 @@ bool test_gpu_rejects()
     Query_Engine<uint8_t> narrow;
     CHECK(!narrow.load(dir.string(), Query_Options{}, err), "a symbol-width mismatch must be rejected");
     CHECK(!eng.load(dir.string(), Query_Options{Residency::pageable, Residency::device, 0}, err), "a host-only placement must be rejected");
+    for(const int k : {0, 1, 2, 3})
+    {
+        Query_Options opt;
+        (k == 0 ? opt.chunk_queries : (k == 1 ? opt.chunk_symbols : (k == 2 ? opt.min_chunk_queries : opt.min_chunk_symbols))) = 0;
+        CHECK(!eng.load(dir.string(), opt, err), "a chunking option of 0 must be rejected");
+    }
 
     std::filesystem::resize_file(dir / "sa.u40.part0", SA_WIDTH * T.size() - 1);
     CHECK(!eng.load(dir.string(), Query_Options{}, err), "a truncated suffix array must be rejected");

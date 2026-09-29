@@ -40,8 +40,10 @@ struct Query_Options
     idx_t stride = 32;  // Sample-table stride; `0` selects the direct mode.
     uint32_t key_words = 0; // 64-bit words per table key: 1, 2, or 4; `0` picks 2, or 4 for 4-byte symbols.
     bool sort = false;  // Whether to sort every batch by its packed prefixes before searching.
-    idx_t chunk_queries = idx_t(1) << 18;   // Queries per chunk of a host-side batch.
-    idx_t chunk_symbols = idx_t(1) << 24;   // Symbols per chunk of a host-side batch; a longer query is a chunk of its own.
+    idx_t chunk_queries = idx_t(1) << 18;   // Queries per chunk of a host-side batch, at most.
+    idx_t chunk_symbols = idx_t(1) << 24;   // Symbols per chunk of a host-side batch, at most; a longer query is a chunk of its own.
+    idx_t min_chunk_queries = idx_t(1) << 16;   // Least queries of a chunk's share of a host-side batch, which splits into two chunks per stream.
+    idx_t min_chunk_symbols = idx_t(1) << 22;   // Least symbols of a chunk's share.
 };
 
 
@@ -85,6 +87,7 @@ private:
     };
 
     static constexpr std::size_t STREAM_C = 3;  // Streams of the host-side pipeline.
+    static constexpr std::size_t CHUNKS_PER_STREAM = 2; // Chunks per stream a batch splits into, when large enough.
 
     Suffix_Index idx_;  // The loaded index.
     Sample_Table tab_;  // Its sample table.
@@ -109,8 +112,10 @@ private:
                 cudaStream_t s) const;
 
     // Finds the SA-intervals of the queries `[a, b)` of the host-side batch
-    // `off`, `sym` into `out[a, b)` through the lane `l`, synchronously; the
-    // arrays not in pinned memory, per `pinned`, go through its staging.
+    // `off`, `sym` into `out[a, b)` through the lane `l`. The arrays not in
+    // pinned memory, per `pinned`, go through the lane's staging, and then the
+    // chunk is found synchronously; else it is only enqueued on the lane's
+    // stream.
     void find_chunk(const Lane& l, const uint64_t* off, const T_sym_* sym, idx_t a, idx_t b, SA_Interval* out,
                     const Pinned_Arrays& pinned) const;
 
@@ -139,9 +144,13 @@ public:
 
     // Finds the SA-intervals of the queries `sym[off[i], off[i + 1])`, `i < q`,
     // into `out[0, q)`; all host-side arrays, synchronously. The batch streams
-    // through the device in chunks; an array in pinned memory is transferred
-    // directly, and one in pageable memory through pinned staging. Concurrent
-    // calls run one after another.
+    // through the device in chunks, `CHUNKS_PER_STREAM` per stream: a chunk
+    // ends at its share of the batch's queries or of its symbols, whichever
+    // comes first, a share being no less than the options' least for a chunk
+    // and no more than their most. A batch in pinned memory is transferred
+    // directly, its chunks enqueued ahead from the calling thread; one with an
+    // array in pageable memory goes through pinned staging, from a thread per
+    // stream. Concurrent calls run one after another.
     void find(const uint64_t* off, const T_sym_* sym, idx_t q, SA_Interval* out) const;
 
     // Checks the intervals `I[0, q)` of the queries `sym[off[i], off[i + 1])`

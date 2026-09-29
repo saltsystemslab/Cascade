@@ -37,24 +37,25 @@ R"(Usage:
       Prints the index's metadata and whether it fits the device.
   query find --index DIR --queries Q1.qry[,Q2.qry,...] [--q N] [--text-res R] [--sa-res R]
              [--spot N] [--stride S,...] [--key-words W,...] [--sort 0|1,...] [--reps K]
-             [--chunk-queries C] [--chunk-symbols Y] [--itv-out F] [--cnt-out F] [--cnt-dir D]
-             [--validate]
+             [--chunk-queries C] [--chunk-symbols Y] [--min-chunk-queries C'] [--min-chunk-symbols Y']
+             [--itv-out F] [--cnt-out F] [--cnt-dir D] [--validate]
       Loads the index once, and finds the SA-intervals of the first N (default:
       all) queries of every query file, K times (default 3) each way: from
       device memory, and end to end, from host memory through the pipeline, both
       pinned and pageable. Reports the load, transfer, search, and end-to-end
       times, and the counts' hash. The pipeline streams chunks of up to C
-      queries (default 2^18) of up to Y symbols (default 2^24) in all; its
-      intervals must equal those from device memory. R is `device` (default)
-      or `pinned`; --spot sets the suffix-array order spot-checks at load
-      (default 100000). The search runs in two phases over a sample table of
-      stride S (default 32; 0 selects the direct mode) with keys of W words (1,
-      2, or 4; default 2, or 4 for 4-byte symbols), with every batch sorted by
-      its packed prefixes if --sort 1; lists run every combination as a mode,
-      on the index loaded once. --validate checks every interval with the O(m)
-      certificate on the device. The counts of a single query file and mode go
-      to --cnt-out, or those of each to D/<stem>.cnt, or D/<stem>@s<S>w<W>o<sort>.cnt
-      for several modes.
+      queries (default 2^18) of up to Y symbols (default 2^24) in all, two per
+      stream when their shares of the batch are at least C' queries (default
+      2^16) or Y' symbols (default 2^22); its intervals must equal those from
+      device memory. R is `device` (default) or `pinned`; --spot sets the
+      suffix-array order spot-checks at load (default 100000). The search runs
+      in two phases over a sample table of stride S (default 32; 0 selects the
+      direct mode) with keys of W words (1, 2, or 4; default 2, or 4 for 4-byte
+      symbols), with every batch sorted by its packed prefixes if --sort 1;
+      lists run every combination as a mode, on the index loaded once.
+      --validate checks every interval with the O(m) certificate on the device.
+      The counts of a single query file and mode go to --cnt-out, or those of
+      each to D/<stem>.cnt, or D/<stem>@s<S>w<W>o<sort>.cnt for several modes.
   query gen --index DIR --out Q.qry --kind K [--q N --len L1[,L2,...]] [--source F]
             [--vocab V] [--seed S]
       Writes N queries of lengths drawn from L1, L2, ...: K = substring (default)
@@ -353,6 +354,7 @@ int run_find(const Args& a)
     std::vector<uint64_t> strides = {opt.stride}, key_words = {0}, sorts = {0};
     if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
         || !get_u64(a, "chunk-queries", opt.chunk_queries, err) || !get_u64(a, "chunk-symbols", opt.chunk_symbols, err)
+        || !get_u64(a, "min-chunk-queries", opt.min_chunk_queries, err) || !get_u64(a, "min-chunk-symbols", opt.min_chunk_symbols, err)
         || !get_u64_list(a, "stride", strides, err) || !get_u64_list(a, "key-words", key_words, err) || !get_u64_list(a, "sort", sorts, err)
         || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
     {
@@ -403,8 +405,9 @@ int run_find(const Args& a)
     std::printf("index=%s\nn=%" PRIu64 "\nsym_bytes=%u\ntext_res=%s\nsa_res=%s\nt_load_text=%.3f\nt_load_sa=%.3f\nspot_pairs=%" PRIu64 "\nt_spot=%.3f\n",
                 a.get("index").c_str(), idx.n(), idx.sym_bytes(), residency_name(idx.text_residency()), residency_name(idx.sa_residency()),
                 st.t_text, st.t_sa, st.spot_pairs, st.t_spot);
-    std::printf("streams=%zu\nchunk_queries=%" PRIu64 "\nchunk_symbols=%" PRIu64 "\n", eng.streams(), eng.options().chunk_queries,
-                eng.options().chunk_symbols);
+    std::printf("streams=%zu\nchunk_queries=%" PRIu64 "\nchunk_symbols=%" PRIu64 "\nmin_chunk_queries=%" PRIu64 "\nmin_chunk_symbols=%" PRIu64 "\n",
+                eng.streams(), eng.options().chunk_queries, eng.options().chunk_symbols, eng.options().min_chunk_queries,
+                eng.options().min_chunk_symbols);
 
     // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`; to `<stem>@<mode>.cnt` if several modes.
     int rc = 0;
