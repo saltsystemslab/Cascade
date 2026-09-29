@@ -39,6 +39,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , transition_c_{}
     , disk_read_(0)
     , read_prediction_(0)
+    , shuffle_rng_(env::get_u64("GPU_SACA_TIER_SHUFFLE_SEED").value_or(1))
 {
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
     CUDA_CHECK(pinned_allocate_host(active_slot_, p_));
@@ -682,6 +683,27 @@ void Partition_Backend::log_barrier(const idx_t gen, const std::vector<idx_t>& A
 #endif
 
     read_prediction_ = predicted;
+}
+
+
+void Partition_Backend::shuffle_tiers(const idx_t gen, const std::vector<idx_t>& Active_sz)
+{
+    if(TIER_SHUFFLE <= 0.0)
+        return;
+
+    std::bernoulli_distribution move(TIER_SHUFFLE);
+    const std::size_t field_c = (gen > 0 ? FIELD_C : 1);    // The suffixes alone, before the first generation.
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        for(idx_t c = 0; c * chunk_cap_ < Active_sz[p_id]; ++c) // The cohort's chunks: the retired tails stay.
+            for(std::size_t f = 0; f < field_c; ++f)
+                if(move(shuffle_rng_))
+                {
+                    const auto field = static_cast<Field>(f);
+                    in_ram(field, p_id, c) ? move_to_disk(field, p_id, c) : move_to_ram(field, p_id, c);
+#ifdef STATS
+                    count(Transition::shuffle);
+#endif
+                }
 }
 
 

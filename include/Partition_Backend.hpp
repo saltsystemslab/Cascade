@@ -15,8 +15,10 @@
 #include "Spin_Lock.hpp"
 #include "message.hpp"
 #include "utility.hpp"
+#include "env.hpp"
 
 #include <cstddef>
+#include <random>
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -101,14 +103,21 @@ private:
     // Statistics for the barriers' planner-log.
     // {
         // Kinds of transitions of the content's chunk-fields: writebacks that
-        // keep a tier, and markings of retired tails.
-        enum class Transition : std::size_t { ram_write = 0, disk_write, tail_mark, transition_c, };
+        // keep a tier, markings of retired tails, and the tests' tier-shuffles.
+        enum class Transition : std::size_t { ram_write = 0, disk_write, tail_mark, shuffle, transition_c, };
 
         static constexpr std::size_t TRANSITION_C = static_cast<std::size_t>(Transition::transition_c);
 
         std::atomic<uint64_t> transition_c_[TRANSITION_C];  // Transitions since the last barrier, per kind.
         mutable std::atomic<uint64_t> disk_read_;   // Bytes the pipeline's readers read from the disk since the last barrier.
         uint64_t read_prediction_;  // Bytes predicted at the last barrier for `disk_read_` at the next.
+    // }
+
+    // Tier-shuffle of the tests: whole-chunk moves between the tiers at the
+    // barriers, which mix the tiers within partitions.
+    // {
+        inline static const double TIER_SHUFFLE = env::get_f64("GPU_SACA_TIER_SHUFFLE").value_or(0.0);  // Probability of a cohort's chunk-field moving, per barrier.
+        std::mt19937_64 shuffle_rng_;   // Source of the moves; seeded by `GPU_SACA_TIER_SHUFFLE_SEED`.
     // }
 
 
@@ -162,6 +171,9 @@ private:
     // as retired tails; the disk-resident ones stay as they are. To be invoked
     // once the chunk's writeback completes.
     void mark_tail(p_id_t p_id, idx_t c);
+
+    // Returns the count of elements in the `p_id`'th partition's `c`'th chunk.
+    idx_t chunk_len(p_id_t p_id, idx_t c) const;
 
     // Returns the bytes of field `f` of the `p_id`'th partition's `c`'th chunk.
     std::size_t chunk_bytes(Field f, p_id_t p_id, idx_t c) const;
@@ -296,6 +308,13 @@ public:
     // the next barrier.
     void log_barrier(idx_t gen, const std::vector<idx_t>& Active_sz);
 
+    // Moves each field of each chunk in the cohorts to its other tier, with
+    // probability `GPU_SACA_TIER_SHUFFLE`, at the barrier opening generation
+    // `gen`, where the partitions have active-set sizes `Active_sz`. Seeded and
+    // single-threaded; only the suffixes move before the first generation, as
+    // the keys hold no content yet. For tests purposes only.
+    void shuffle_tiers(idx_t gen, const std::vector<idx_t>& Active_sz);
+
     // Returns the message-count in the `p_id'`th partition's inbox for the
     // current generation (written to at the preceding generation).
     p_sz_t inbox_size(p_id_t p_id) const;
@@ -320,9 +339,15 @@ inline std::size_t Partition_Backend::tier_idx(const Field f, const p_id_t p_id,
 }
 
 
+inline idx_t Partition_Backend::chunk_len(const p_id_t p_id, const idx_t c) const
+{
+    return std::min(chunk_cap_, P_cap_[p_id] - c * chunk_cap_);
+}
+
+
 inline std::size_t Partition_Backend::chunk_bytes(const Field f, const p_id_t p_id, const idx_t c) const
 {
-    return std::min(chunk_cap_, P_cap_[p_id] - c * chunk_cap_) * width(f);
+    return chunk_len(p_id, c) * width(f);
 }
 
 

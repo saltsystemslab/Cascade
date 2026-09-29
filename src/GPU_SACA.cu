@@ -909,6 +909,9 @@ void GPU_SACA<T_sym_>::initial_rank()
 {
     INSTRUMENT(probe::P().begin_iteration(0, 0, n_));
 
+#ifdef TESTS
+    backend_->shuffle_tiers(0, Active_sz);
+#endif
 #ifdef STATS
     backend_->log_barrier(0, Active_sz);
 #endif
@@ -929,6 +932,10 @@ void GPU_SACA<T_sym_>::initial_rank()
         PROFILE_SCOPE("collect_active_set_sizes");
         CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
     }
+
+#ifdef TESTS
+    backend_->shuffle_tiers(1, Active_sz);
+#endif
 
 
 #ifdef STATS
@@ -1802,6 +1809,8 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             CUDA_CHECK(cudaMemcpy(&pill_c_h, pill_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
             std::cerr << "Active suffixes with poison-pill received for generation " << gen << ": " << pill_c_h << ".\n";
         }
+
+        backend_->shuffle_tiers(gen + 1, Active_sz);
 #endif
 
         const auto t_1 = gpu_saca::timer::now();
