@@ -313,6 +313,32 @@ void Partition_Backend::mark_tail(const p_id_t p_id, const idx_t c)
 }
 
 
+void Partition_Backend::move_to_disk(const Field f, const p_id_t p_id, const idx_t c)
+{
+    // The whole chunk goes, so its block-rounding spills only past the partition's end, if at all.
+    // The tier turns before the release, so that no RAM-tier stands over released memory.
+    const auto off = c * chunk_cap_, len = chunk_len(p_id, c);
+    f == Field::suf ?   disk_.write_suf(p_id, off, len, ram_.suf(p_id) + off) :
+                        disk_.write_key(p_id, off, len, ram_.key(p_id) + off);
+    tier_[tier_idx(f, p_id, c)].store(static_cast<uint8_t>(Tier::disk), std::memory_order_release);
+    f == Field::suf ?   ram_.release_suf(p_id, off, len) :
+                        ram_.release_key(p_id, off, len);
+
+    content_ram_.fetch_sub(chunk_bytes(f, p_id, c), std::memory_order_relaxed);
+}
+
+
+void Partition_Backend::move_to_ram(const Field f, const p_id_t p_id, const idx_t c)
+{
+    const auto off = c * chunk_cap_, len = chunk_len(p_id, c);
+    f == Field::suf ?   disk_.read_suf(p_id, off, len, ram_.suf(p_id) + off) :
+                        disk_.read_key(p_id, off, len, ram_.key(p_id) + off);
+    tier_[tier_idx(f, p_id, c)].store(static_cast<uint8_t>(Tier::ram), std::memory_order_release);
+
+    content_ram_.fetch_add(chunk_bytes(f, p_id, c), std::memory_order_relaxed);
+}
+
+
 void Partition_Backend::write_suffixes(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const suf)
 {
     for_each_chunk(off, sz,
@@ -634,7 +660,8 @@ void Partition_Backend::log_barrier(const idx_t gen, const std::vector<idx_t>& A
                 << "\tinboxes: cohort's " << msg_ram << " messages in RAM, " << msg_disk << " on disk; "
                     << "message-chunks " << GB(budget_.used()) << "GBs charged, " << GB(budget_.pooled()) << "GBs of them pooled.\n"
                 << "\ttransitions since the last barrier: " << transitions(Transition::ram_write) << " RAM-writes, "
-                    << transitions(Transition::disk_write) << " disk-writes, " << transitions(Transition::tail_mark) << " tail-marks.\n";
+                    << transitions(Transition::disk_write) << " disk-writes, " << transitions(Transition::tail_mark) << " tail-marks, "
+                    << transitions(Transition::shuffle) << " tier-shuffles.\n";
 
     // The preceding generation's disk-reads, against their prediction at the last barrier.
     const auto read = disk_read_.exchange(0, std::memory_order_relaxed);

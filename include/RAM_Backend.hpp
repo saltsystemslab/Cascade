@@ -38,6 +38,12 @@ public:
 
     ~RAM_Backend();
 
+    // Returns the `p_id`'th partition's suffixes.
+    idx_t* suf(const p_id_t p_id) { return suf_[p_id]; }
+
+    // Returns the `p_id`'th partition's keys.
+    p_sz_t* key(const p_id_t p_id) { return key_[p_id]; }
+
     // Reads `sz`-many suffixes of the `p_id`'th partition, from its offset
     // `off`, into `dst`.
     void read_suf(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
@@ -53,6 +59,14 @@ public:
     // Writes `sz`-many keys of the `p_id`'th partition, at its offset `off`,
     // from `src`.
     void write_key(p_id_t p_id, idx_t off, idx_t sz, const p_sz_t* src);
+
+    // Releases the memory of `sz`-many suffixes of the `p_id`'th partition, from
+    // its page-aligned offset `off`; the range reads back as zeros.
+    void release_suf(p_id_t p_id, idx_t off, idx_t sz);
+
+    // Releases the memory of `sz`-many keys of the `p_id`'th partition, from its
+    // page-aligned offset `off`; the range reads back as zeros.
+    void release_key(p_id_t p_id, idx_t off, idx_t sz);
 
     // Releases the memory of the `p_id`'th partition's suffixes and keys; their
     // address-space stays reserved.

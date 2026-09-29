@@ -166,6 +166,14 @@ private:
     // Returns the bytes of field `f` of the `p_id`'th partition's `c`'th chunk.
     std::size_t chunk_bytes(Field f, p_id_t p_id, idx_t c) const;
 
+    // Moves field `f` of the `p_id`'th partition's `c`'th chunk from RAM to the
+    // disk in whole: written out, then its tier set, then its memory released.
+    void move_to_disk(Field f, p_id_t p_id, idx_t c);
+
+    // Moves field `f` of the `p_id`'th partition's `c`'th chunk from the disk to
+    // RAM in whole.
+    void move_to_ram(Field f, p_id_t p_id, idx_t c);
+
     // Aborts unless the RAM-chunks retired as tails are exactly the ones past
     // their partitions' active-sets, of sizes `Active_sz`, and the RAM-chunks'
     // charges agree with their tiers.
