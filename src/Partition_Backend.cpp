@@ -20,8 +20,12 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , ram_(P_cap)
     , disk_(P_cap, spill, plan_)
     , chunk_cap_(chunk_cap)
+    , P_cap_(P_cap)
     , chunk_base_(p_ + 1, 0)
     , active_slot_(nullptr)
+    , content_ram_(plan_.data_resident())
+    , tail_ram_(0)
+    , fixed_(fixed_bytes)
     , budget_(budget - fixed_bytes - plan_.data_resident(), plan_.force_spill())
     , msg_chunk_cap_(chunk_cap / MSG_CHUNKS_PER_SLAB)
     , pool_(std::make_unique<Message_Pool>(msg_chunk_cap_, budget_.pinned() ? 0 : budget))
@@ -32,6 +36,9 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , ov_rank_(p_, nullptr)
     , ov_sz_(p_, 0)
     , ov_lock_(p_)
+    , transition_c_{}
+    , disk_read_(0)
+    , read_prediction_(0)
 {
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
     CUDA_CHECK(pinned_allocate_host(active_slot_, p_));
@@ -100,6 +107,18 @@ void Partition_Backend::retire_messages()
 void Partition_Backend::retire_partition(const p_id_t p_id)
 {
     ram_.retire_data(p_id), disk_.retire_data(p_id);    // The partition's chunks may reside in either tier.
+
+    // Its RAM-chunks' charges return.
+    std::size_t ram = 0, tail = 0;
+    for(idx_t c = 0; c < chunk_base_[p_id + 1] - chunk_base_[p_id]; ++c)
+        for(std::size_t f = 0; f < FIELD_C; ++f)
+        {
+            const auto field = static_cast<Field>(f);
+            ram += (in_ram(field, p_id, c) ? chunk_bytes(field, p_id, c) : 0);
+            tail += (tier(field, p_id, c) == Tier::ram_tail ? chunk_bytes(field, p_id, c) : 0);
+        }
+
+    content_ram_.fetch_sub(ram, std::memory_order_relaxed), tail_ram_.fetch_sub(tail, std::memory_order_relaxed);
 }
 
 
@@ -130,6 +149,9 @@ void Partition_Backend::read_suffixes(Staging_Slab& s) const
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * sizeof(idx_t));
     INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()));
+#ifdef STATS
+    disk_read_.fetch_add(disk_bytes(Field::suf, s.p_id(), s.off(), s.size()), std::memory_order_relaxed);
+#endif
 
     read_suf_chunk(s.p_id(), s.off(), s.size(), s.suf());
 }
@@ -144,6 +166,9 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
         INSTRUMENT_TIMER(probe::P().me().io_ns);
         INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
         INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()) + disk_bytes(Field::key, s.p_id(), s.off(), s.size()));
+#ifdef STATS
+        disk_read_.fetch_add(disk_bytes(Field::suf, s.p_id(), s.off(), s.size()) + disk_bytes(Field::key, s.p_id(), s.off(), s.size()), std::memory_order_relaxed);
+#endif
         read_chunk(s.p_id(), s.off(), s.size(), suf, key);
     }
 }
@@ -201,6 +226,9 @@ void Partition_Backend::read_messages(Staging_Slab& s)
     {
         const auto from = std::max(lo, n_r);
         INSTRUMENT(probe::P().me().disk_bytes += (hi - from) * MESSAGE_BYTES);
+#ifdef STATS
+        disk_read_.fetch_add((hi - from) * MESSAGE_BYTES, std::memory_order_relaxed);
+#endif
         disk_.read_messages(p_id, from - n_r, hi - from, s.msg_target() + (from - lo), s.msg_rank() + (from - lo));
     }
 }
@@ -231,10 +259,40 @@ void Partition_Backend::write(const Staging_Slab& s)
                                             disk_.write_suf(p_id, from, len, suf + (from - off));
             in_ram(Field::key, p_id, c) ?   ram_.write_key(p_id, from, len, key + (from - off)) :
                                             disk_.write_key(p_id, from, len, key + (from - off));
+#ifdef STATS
+            count(in_ram(Field::suf, p_id, c) ? Transition::ram_write : Transition::disk_write);
+            count(in_ram(Field::key, p_id, c) ? Transition::ram_write : Transition::disk_write);
+#endif
 
             if(c * chunk_cap_ >= a_new) // The chunk lies past the partition's new active-set.
                 mark_tail(p_id, c);
         });
+}
+
+
+void Partition_Backend::check_tiers(const std::vector<idx_t>& Active_sz) const
+{
+    std::size_t ram = 0, tail = 0;
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        for(idx_t c = 0; c < chunk_base_[p_id + 1] - chunk_base_[p_id]; ++c)
+            for(std::size_t f = 0; f < FIELD_C; ++f)
+            {
+                const auto t = tier(static_cast<Field>(f), p_id, c);
+                if(t != Tier::disk && (t == Tier::ram_tail) != (c * chunk_cap_ >= Active_sz[p_id]))
+                {
+                    std::cerr << "Chunk " << c << " of partition " << p_id << " is " << (t == Tier::ram_tail ? "" : "not ") << "a retired tail, at active-set size " << Active_sz[p_id] << ". Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+
+                ram += (t != Tier::disk ? chunk_bytes(static_cast<Field>(f), p_id, c) : 0);
+                tail += (t == Tier::ram_tail ? chunk_bytes(static_cast<Field>(f), p_id, c) : 0);
+            }
+
+    if(ram != content_ram_ || tail != tail_ram_)
+    {
+        std::cerr << "The content's RAM-chunks are charged " << content_ram_ << " bytes, " << tail_ram_ << " of them in retired tails; their tiers hold " << ram << " and " << tail << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 
@@ -244,7 +302,13 @@ void Partition_Backend::mark_tail(const p_id_t p_id, const idx_t c)
     {
         auto& t = tier_[tier_idx(static_cast<Field>(f), p_id, c)];
         if(t.load(std::memory_order_relaxed) == static_cast<uint8_t>(Tier::ram))
+        {
             t.store(static_cast<uint8_t>(Tier::ram_tail), std::memory_order_release);  // Publishes the chunk's completed writeback.
+            tail_ram_.fetch_add(chunk_bytes(static_cast<Field>(f), p_id, c), std::memory_order_relaxed);
+#ifdef STATS
+            count(Transition::tail_mark);
+#endif
+        }
     }
 }
 
@@ -469,18 +533,7 @@ void Partition_Backend::open_generation(const idx_t gen, const std::vector<idx_t
     disk_.set_generation(gen);
 
 #ifdef TESTS
-    // A RAM-chunk is a retired tail iff it lies past its partition's active-set.
-    for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        for(idx_t c = 0; c < chunk_base_[p_id + 1] - chunk_base_[p_id]; ++c)
-            for(std::size_t f = 0; f < FIELD_C; ++f)
-            {
-                const auto t = tier(static_cast<Field>(f), p_id, c);
-                if(t != Tier::disk && (t == Tier::ram_tail) != (c * chunk_cap_ >= Active_sz[p_id]))
-                {
-                    std::cerr << "Chunk " << c << " of partition " << p_id << " is " << (t == Tier::ram_tail ? "" : "not ") << "a retired tail, at active-set size " << Active_sz[p_id] << ". Aborting.\n";
-                    std::exit(EXIT_FAILURE);
-                }
-            }
+    check_tiers(Active_sz);
 #endif
 
     const auto parity = write_parity(gen);
@@ -533,6 +586,75 @@ void Partition_Backend::close_generation()
 
         flush_overflow(p_id, true);
     }
+}
+
+
+void Partition_Backend::log_barrier(const idx_t gen, const std::vector<idx_t>& Active_sz)
+{
+    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+
+    // The cohort's content by tier, and the generation's disk-reads of it: of the suffixes alone at the first generation.
+    p_id_t active_c = 0;
+    std::size_t cohort_ram = 0, cohort_disk = 0;
+    uint64_t predicted = 0;
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+    {
+        active_c += (Active_sz[p_id] > 0);
+        for_each_chunk(0, Active_sz[p_id],
+            [&](const idx_t c, idx_t, const idx_t len)
+            {
+                for(std::size_t f = 0; f < FIELD_C; ++f)
+                {
+                    const auto field = static_cast<Field>(f);
+                    const auto bytes = len * width(field);
+                    if(in_ram(field, p_id, c))
+                        cohort_ram += bytes;
+                    else
+                        cohort_disk += bytes, predicted += (gen > 0 || field == Field::suf ? bytes : 0);
+                }
+            });
+    }
+
+    // The cohort's inboxes, i.e. the ones the generation reads, and the generation's disk-reads of them.
+    const auto parity = read_parity(gen);
+    idx_t msg_ram = 0, msg_disk = 0;
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        if(Active_sz[p_id] > 0)
+            msg_ram += ram_inbox_[parity][p_id].unwrap().count, msg_disk += msg_count_[parity][p_id];
+    predicted += msg_disk * MESSAGE_BYTES;
+
+    const auto content = content_ram_.load(std::memory_order_relaxed);
+    const auto tail = tail_ram_.load(std::memory_order_relaxed);
+    const auto transitions = [&](const Transition t){ return transition_c_[static_cast<std::size_t>(t)].exchange(0, std::memory_order_relaxed); };
+    std::cerr   << "Barrier " << gen << " (" << active_c << " partitions active):\n"
+                << "\tmemory:  cap " << GB(budget_.cap()) << "GBs, fixed " << GB(fixed_) << "GBs; "
+                    << "RSS " << GB(util::resident_memory()) << "GBs, against " << GB(fixed_ + content + budget_.used()) << "GBs accounted.\n"
+                << "\tcontent: cohort " << GB(cohort_ram) << "GBs in RAM, " << GB(cohort_disk) << "GBs on disk; "
+                    << "RAM-chunks " << GB(content) << "GBs, " << GB(tail) << "GBs of them retired tails.\n"
+                << "\tinboxes: cohort's " << msg_ram << " messages in RAM, " << msg_disk << " on disk; "
+                    << "message-chunks " << GB(budget_.used()) << "GBs charged, " << GB(budget_.pooled()) << "GBs of them pooled.\n"
+                << "\ttransitions since the last barrier: " << transitions(Transition::ram_write) << " RAM-writes, "
+                    << transitions(Transition::disk_write) << " disk-writes, " << transitions(Transition::tail_mark) << " tail-marks.\n";
+
+    // The preceding generation's disk-reads, against their prediction at the last barrier.
+    const auto read = disk_read_.exchange(0, std::memory_order_relaxed);
+    std::cerr << "\tdisk-reads: ";
+    if(gen > 0)
+        std::cerr << read << " bytes at generation " << (gen - 1) << ", predicted " << read_prediction_ << (read == read_prediction_ ? " (exact)" : " (MISMATCH)") << "; ";
+    std::cerr << predicted << " bytes predicted for generation " << gen << ".\n";
+
+#ifdef TESTS
+    if(gen > 0 && read != read_prediction_)
+    {
+        std::cerr << "Disk-reads at generation " << (gen - 1) << " differ from their prediction. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    if(active_c == 0)   // No generation opens past the last barrier, to check the tiers at.
+        check_tiers(Active_sz);
+#endif
+
+    read_prediction_ = predicted;
 }
 
 

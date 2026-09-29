@@ -20,6 +20,7 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <algorithm>
 
 
 namespace gpu_saca
@@ -49,11 +50,15 @@ private:
         enum class Tier : uint8_t { disk = 0, ram, ram_tail, };
 
         const idx_t chunk_cap_; // Elements per content-chunk: a staging-slab's capacity.
+        const std::vector<idx_t> P_cap_;    // Partition capacities.
         std::vector<idx_t> chunk_base_; // Index of each partition's first chunk, in the partitions' flattened chunk-sequence; `p + 1` entries.
         std::unique_ptr<std::atomic<uint8_t>[]> tier_;  // Tier of each chunk's each field, field-major: `FIELD_C x chunk_base_[p]` entries.
         idx_t* active_slot_;    // Pinned slots of the partitions' active-set sizes past their device-runs, for their writers; `p` entries.
+        std::atomic<std::size_t> content_ram_;  // Bytes of the chunks' fields resident in RAM: the content's charge on the host-memory.
+        std::atomic<std::size_t> tail_ram_; // Of `content_ram_`, the bytes in retired tails.
     // }
 
+    std::size_t fixed_; // Bytes of the fixed host-allocation still held: `fixed_bytes` at construction, less the cap's raises.
     Host_Budget budget_;    // Host-memory budget of the elastic RAM-tier.
     const p_sz_t msg_chunk_cap_;    // Messages per RAM message-chunk: a slab's inbox-range spans `MSG_CHUNKS_PER_SLAB` of them.
     std::unique_ptr<Message_Pool> pool_;    // Pool of the RAM message-chunks.
@@ -91,6 +96,19 @@ private:
         std::vector<msg_rank_t*> ov_rank_;  // Rank-buffers, parallel to `ov_tgt_`.
         std::vector<p_sz_t> ov_sz_; // Messages currently buffered (due to block-alignment overhanging), per destination.
         std::vector<util::Spin_Lock> ov_lock_;  // Mutually-exclusive lock to the overflow buffers, per destination.
+    // }
+
+    // Statistics for the barriers' planner-log.
+    // {
+        // Kinds of transitions of the content's chunk-fields: writebacks that
+        // keep a tier, and markings of retired tails.
+        enum class Transition : std::size_t { ram_write = 0, disk_write, tail_mark, transition_c, };
+
+        static constexpr std::size_t TRANSITION_C = static_cast<std::size_t>(Transition::transition_c);
+
+        std::atomic<uint64_t> transition_c_[TRANSITION_C];  // Transitions since the last barrier, per kind.
+        mutable std::atomic<uint64_t> disk_read_;   // Bytes the pipeline's readers read from the disk since the last barrier.
+        uint64_t read_prediction_;  // Bytes predicted at the last barrier for `disk_read_` at the next.
     // }
 
 
@@ -145,6 +163,17 @@ private:
     // once the chunk's writeback completes.
     void mark_tail(p_id_t p_id, idx_t c);
 
+    // Returns the bytes of field `f` of the `p_id`'th partition's `c`'th chunk.
+    std::size_t chunk_bytes(Field f, p_id_t p_id, idx_t c) const;
+
+    // Aborts unless the RAM-chunks retired as tails are exactly the ones past
+    // their partitions' active-sets, of sizes `Active_sz`, and the RAM-chunks'
+    // charges agree with their tiers.
+    void check_tiers(const std::vector<idx_t>& Active_sz) const;
+
+    // Counts a transition of kind `t`.
+    void count(const Transition t) { transition_c_[static_cast<std::size_t>(t)].fetch_add(1, std::memory_order_relaxed); }
+
     // Applies `f(c, from, len)` to each piece `[from, from + len)` of a
     // partition's range `[off, off + sz)` that lies in the partition's `c`'th
     // chunk, in the range's order. An empty range touches no chunk.
@@ -176,7 +205,7 @@ public:
 
     // Raises the cap of the elastic RAM-tier by `b` bytes, freed from some
     // fixed allocation.
-    void raise_cap(const std::size_t b) { budget_.raise_cap(b); }
+    void raise_cap(const std::size_t b) { fixed_ -= b, budget_.raise_cap(b); }
 
     // Returns the host-memory budget of the elastic RAM-tier.
     const auto& budget() const { return budget_; }
@@ -252,6 +281,13 @@ public:
     // buffer. To be invoked once at a generation's ending barrier.
     void close_generation();
 
+    // Logs the backend's state at the barrier opening generation `gen`, where
+    // the partitions have active-set sizes `Active_sz`: the memory, the content
+    // and the inboxes by tier, the transitions since the last barrier, and the
+    // generation's disk-reads—predicted here, and checked against the actual at
+    // the next barrier.
+    void log_barrier(idx_t gen, const std::vector<idx_t>& Active_sz);
+
     // Returns the message-count in the `p_id'`th partition's inbox for the
     // current generation (written to at the preceding generation).
     p_sz_t inbox_size(p_id_t p_id) const;
@@ -273,6 +309,12 @@ public:
 inline std::size_t Partition_Backend::tier_idx(const Field f, const p_id_t p_id, const idx_t c) const
 {
     return static_cast<std::size_t>(f) * chunk_base_[p_] + chunk_base_[p_id] + c;
+}
+
+
+inline std::size_t Partition_Backend::chunk_bytes(const Field f, const p_id_t p_id, const idx_t c) const
+{
+    return std::min(chunk_cap_, P_cap_[p_id] - c * chunk_cap_) * width(f);
 }
 
 

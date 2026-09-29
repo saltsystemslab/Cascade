@@ -909,6 +909,10 @@ void GPU_SACA<T_sym_>::initial_rank()
 {
     INSTRUMENT(probe::P().begin_iteration(0, 0, n_));
 
+#ifdef STATS
+    backend_->log_barrier(0, Active_sz);
+#endif
+
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
@@ -937,6 +941,7 @@ void GPU_SACA<T_sym_>::initial_rank()
         std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
         std::cerr << "Per-partition active-set sizes by context-size " << ell << ": " << util::join(Active_sz) << "\n";
+        backend_->log_barrier(1, Active_sz);
     }
 #endif
 
@@ -1813,6 +1818,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << ". Time taken in iteration: " << gpu_saca::timer::duration(t_1 - t_0) << "s."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
             std::cerr << "Per-partition active-set sizes by context-size " << (k * 2) << ": " << util::join(Active_sz) << "\n";
+            backend_->log_barrier(gen + 1, Active_sz);
 #endif
 
             INSTRUMENT(probe::P().report_log());
