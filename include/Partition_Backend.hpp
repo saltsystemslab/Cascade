@@ -22,6 +22,7 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <tuple>
 #include <algorithm>
 
 
@@ -48,8 +49,10 @@ private:
         static constexpr std::size_t FIELD_C = static_cast<std::size_t>(Field::field_c);
 
         // Residency tiers of a chunk's field. A RAM-chunk past its partition's
-        // active-set is a retired tail: it is never in a cohort again.
-        enum class Tier : uint8_t { disk = 0, ram, ram_tail, };
+        // active-set is a retired tail: it is never in a cohort again. An
+        // evicting chunk is a retired tail on its way to the disk, claimed by
+        // one evictor.
+        enum class Tier : uint8_t { disk = 0, ram, ram_tail, evicting, };
 
         const idx_t chunk_cap_; // Elements per content-chunk: a staging-slab's capacity.
         const std::vector<idx_t> P_cap_;    // Partition capacities.
@@ -58,7 +61,21 @@ private:
         idx_t* active_slot_;    // Pinned slots of the partitions' active-set sizes past their device-runs, for their writers; `p` entries.
         std::atomic<std::size_t> content_ram_;  // Bytes of the chunks' fields resident in RAM: the content's charge on the host-memory.
         std::atomic<std::size_t> tail_ram_; // Of `content_ram_`, the bytes in retired tails.
+        std::atomic<std::size_t> evict_cursor_; // Rotating start of the evictors' scans over the tier-table.
     // }
+
+    // Kinds of claims on the host-memory budget: of a cohort's chunk-field at
+    // its writeback, which may reclaim room from the pooled message-chunks and
+    // the retired tails; of a chunk-field retiring at its writeback, which
+    // takes free room only; and of a message-chunk, which may reclaim room from
+    // the retired tails.
+    enum class Claim { content, retiring, message, };
+
+    // Whether the content's chunks change tiers within the generations:
+    // admitted to RAM at their writebacks, and evicted to the disk for the
+    // claims on a full budget. Off while the residency-plan fixes the content's
+    // tiers.
+    static constexpr bool DYNAMIC_CONTENT = false;
 
     std::size_t fixed_; // Bytes of the fixed host-allocation still held: `fixed_bytes` at construction, less the cap's raises.
     Host_Budget budget_;    // Host-memory budget of the elastic RAM-tier.
@@ -103,8 +120,9 @@ private:
     // Statistics for the barriers' planner-log.
     // {
         // Kinds of transitions of the content's chunk-fields: writebacks that
-        // keep a tier, markings of retired tails, and the tests' tier-shuffles.
-        enum class Transition : std::size_t { ram_write = 0, disk_write, tail_mark, shuffle, transition_c, };
+        // keep a tier, markings of retired tails, the tests' tier-shuffles,
+        // admissions to RAM of active and of retiring chunks, and evictions.
+        enum class Transition : std::size_t { ram_write = 0, disk_write, tail_mark, shuffle, admit, admit_tail, evict, transition_c, };
 
         static constexpr std::size_t TRANSITION_C = static_cast<std::size_t>(Transition::transition_c);
 
@@ -185,6 +203,25 @@ private:
     // Moves field `f` of the `p_id`'th partition's `c`'th chunk from the disk to
     // RAM in whole.
     void move_to_ram(Field f, p_id_t p_id, idx_t c);
+
+    // Returns the field, the partition, and the chunk of the tier-table's
+    // `x`'th entry.
+    std::tuple<Field, p_id_t, idx_t> tier_entry(std::size_t x) const;
+
+    // Charges `b` bytes of the host-memory budget for a claim of kind `claim`.
+    // On a full cap, the claim reclaims room as far as its kind permits, and
+    // takes the reclaimed charge directly, so that no competing claimant takes
+    // the room freed. Returns whether charged. Thread-safe.
+    bool charge(std::size_t b, Claim claim);
+
+    // Evicts a retired tail's chunk-field to the disk, and returns its bytes,
+    // still charged; `0` if no tail is left to evict. Thread-safe.
+    std::size_t evict_one();
+
+    // Admits field `f` of the `p_id`'th partition's `c`'th chunk to RAM iff its
+    // claim of kind `claim` is charged; the chunk's writeback then goes to RAM,
+    // whole. Returns whether admitted.
+    bool admit(Field f, p_id_t p_id, idx_t c, Claim claim);
 
     // Aborts unless the RAM-chunks retired as tails are exactly the ones past
     // their partitions' active-sets, of sizes `Active_sz`, and the RAM-chunks'
@@ -312,7 +349,8 @@ public:
     // probability `GPU_SACA_TIER_SHUFFLE`, at the barrier opening generation
     // `gen`, where the partitions have active-set sizes `Active_sz`. Seeded and
     // single-threaded; only the suffixes move before the first generation, as
-    // the keys hold no content yet. For tests purposes only.
+    // the keys hold no content yet. The retired tails are evicted likewise,
+    // through the evictor. For tests purposes only.
     void shuffle_tiers(idx_t gen, const std::vector<idx_t>& Active_sz);
 
     // Returns the message-count in the `p_id'`th partition's inbox for the

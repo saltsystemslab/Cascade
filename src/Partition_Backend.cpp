@@ -25,6 +25,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , active_slot_(nullptr)
     , content_ram_(plan_.data_resident())
     , tail_ram_(0)
+    , evict_cursor_(0)
     , fixed_(fixed_bytes)
     , budget_(budget - fixed_bytes - plan_.data_resident(), plan_.force_spill())
     , msg_chunk_cap_(chunk_cap / MSG_CHUNKS_PER_SLAB)
@@ -97,7 +98,7 @@ void Partition_Backend::retire_messages()
         for(auto& in : ram_inbox_[parity])
             release_inbox(in.unwrap());
 
-    const auto pool_bytes = std::size_t(pool_->carved()) * pool_->chunk_bytes();  // All free, and charged.
+    const auto pool_bytes = std::size_t(pool_->carved() - pool_->released()) * pool_->chunk_bytes();    // All free, and charged but the released.
     budget_.unpool(pool_bytes), budget_.uncharge(pool_bytes);
     pool_.reset();
 
@@ -239,7 +240,6 @@ void Partition_Backend::write(const Staging_Slab& s)
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
     INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
-    INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()) + disk_bytes(Field::key, s.p_id(), s.off(), s.size()));
 
     const auto p_id = s.p_id();
     const auto off = s.off();
@@ -256,16 +256,25 @@ void Partition_Backend::write(const Staging_Slab& s)
                 std::exit(EXIT_FAILURE);
             }
 #endif
-            in_ram(Field::suf, p_id, c) ?   ram_.write_suf(p_id, from, len, suf + (from - off)) :
-                                            disk_.write_suf(p_id, from, len, suf + (from - off));
-            in_ram(Field::key, p_id, c) ?   ram_.write_key(p_id, from, len, key + (from - off)) :
-                                            disk_.write_key(p_id, from, len, key + (from - off));
+            // A disk-chunk written back whole may move to RAM: an active one reclaiming room for itself, and a retiring one
+            // taking free room only.
+            const bool retiring = (c * chunk_cap_ >= a_new);    // The chunk lies past the partition's new active-set.
+            const bool whole = (len == chunk_len(p_id, c));
+            const auto claim = (retiring ? Claim::retiring : Claim::content);
+            const bool suf_ram = in_ram(Field::suf, p_id, c) || (whole && admit(Field::suf, p_id, c, claim));
+            const bool key_ram = in_ram(Field::key, p_id, c) || (whole && admit(Field::key, p_id, c, claim));
+            INSTRUMENT(probe::P().me().disk_bytes += (suf_ram ? 0 : len * sizeof(idx_t)) + (key_ram ? 0 : len * sizeof(p_sz_t)));
+
+            suf_ram ?   ram_.write_suf(p_id, from, len, suf + (from - off)) :
+                        disk_.write_suf(p_id, from, len, suf + (from - off));
+            key_ram ?   ram_.write_key(p_id, from, len, key + (from - off)) :
+                        disk_.write_key(p_id, from, len, key + (from - off));
 #ifdef STATS
-            count(in_ram(Field::suf, p_id, c) ? Transition::ram_write : Transition::disk_write);
-            count(in_ram(Field::key, p_id, c) ? Transition::ram_write : Transition::disk_write);
+            count(suf_ram ? Transition::ram_write : Transition::disk_write);
+            count(key_ram ? Transition::ram_write : Transition::disk_write);
 #endif
 
-            if(c * chunk_cap_ >= a_new) // The chunk lies past the partition's new active-set.
+            if(retiring)
                 mark_tail(p_id, c);
         });
 }
@@ -279,6 +288,12 @@ void Partition_Backend::check_tiers(const std::vector<idx_t>& Active_sz) const
             for(std::size_t f = 0; f < FIELD_C; ++f)
             {
                 const auto t = tier(static_cast<Field>(f), p_id, c);
+                if(t == Tier::evicting)
+                {
+                    std::cerr << "Chunk " << c << " of partition " << p_id << " is mid-eviction at a barrier. Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+
                 if(t != Tier::disk && (t == Tier::ram_tail) != (c * chunk_cap_ >= Active_sz[p_id]))
                 {
                     std::cerr << "Chunk " << c << " of partition " << p_id << " is " << (t == Tier::ram_tail ? "" : "not ") << "a retired tail, at active-set size " << Active_sz[p_id] << ". Aborting.\n";
@@ -337,6 +352,86 @@ void Partition_Backend::move_to_ram(const Field f, const p_id_t p_id, const idx_
     tier_[tier_idx(f, p_id, c)].store(static_cast<uint8_t>(Tier::ram), std::memory_order_release);
 
     content_ram_.fetch_add(chunk_bytes(f, p_id, c), std::memory_order_relaxed);
+}
+
+
+std::tuple<Partition_Backend::Field, p_id_t, idx_t> Partition_Backend::tier_entry(const std::size_t x) const
+{
+    const auto flat = static_cast<idx_t>(x % chunk_base_[p_]);  // The chunk's index in the partitions' flattened chunk-sequence.
+    const auto p_id = static_cast<p_id_t>(std::upper_bound(chunk_base_.cbegin(), chunk_base_.cend(), flat) - chunk_base_.cbegin() - 1);
+    return {static_cast<Field>(x / chunk_base_[p_]), p_id, flat - chunk_base_[p_id]};
+}
+
+
+bool Partition_Backend::charge(const std::size_t b, const Claim claim)
+{
+    if(!DYNAMIC_CONTENT)    // The content's tiers stay as planned, and the messages take free room only.
+        return claim == Claim::message && budget_.try_charge(b);
+
+    if(budget_.try_charge(b))
+        return true;
+
+    if(claim == Claim::retiring)
+        return false;
+
+    // Reclaim: the pooled message-chunks' memory goes to the kernel for content, and then the retired tails go to the disk;
+    // their charges stay, for this claim.
+    std::size_t got = 0;
+    if(claim == Claim::content)
+        got = pool_->release_free(b), budget_.unpool(got);
+
+    while(got < b)
+        if(const auto e = evict_one(); e > 0)
+            got += e;
+        else
+            break;
+
+    budget_.uncharge(got >= b ? got - b : got); // The claim keeps what it needs; the rest frees up.
+    return got >= b;
+}
+
+
+std::size_t Partition_Backend::evict_one()
+{
+    if(tail_ram_.load(std::memory_order_relaxed) == 0)  // No tail to scan for.
+        return 0;
+
+    const std::size_t entry_c = FIELD_C * chunk_base_[p_];
+    for(std::size_t i = 0; i < entry_c; ++i)
+    {
+        const auto x = evict_cursor_.fetch_add(1, std::memory_order_relaxed) % entry_c;
+        auto t = static_cast<uint8_t>(Tier::ram_tail);
+        if(tier_[x].load(std::memory_order_relaxed) != t ||
+            !tier_[x].compare_exchange_strong(t, static_cast<uint8_t>(Tier::evicting), std::memory_order_acquire))  // One evictor claims the tail, and sees its writeback.
+            continue;
+
+        const auto [f, p_id, c] = tier_entry(x);
+        const auto bytes = chunk_bytes(f, p_id, c);
+        move_to_disk(f, p_id, c);
+        tail_ram_.fetch_sub(bytes, std::memory_order_relaxed);
+#ifdef STATS
+        count(Transition::evict);
+#endif
+        return bytes;
+    }
+
+    return 0;
+}
+
+
+bool Partition_Backend::admit(const Field f, const p_id_t p_id, const idx_t c, const Claim claim)
+{
+    if(!charge(chunk_bytes(f, p_id, c), claim))
+        return false;
+
+    // The writeback following fills the chunk whole, before any read of it: the chunk's one reader of the generation has read it.
+    tier_[tier_idx(f, p_id, c)].store(static_cast<uint8_t>(Tier::ram), std::memory_order_relaxed);
+    content_ram_.fetch_add(chunk_bytes(f, p_id, c), std::memory_order_relaxed);
+#ifdef STATS
+    count(claim == Claim::retiring ? Transition::admit_tail : Transition::admit);
+#endif
+
+    return true;
 }
 
 
@@ -455,7 +550,7 @@ Message_Pool::chunk_t Partition_Backend::acquire_msg_chunk()
     if(const auto c = pool_->take_free(); c != Message_Pool::NIL)  // Free chunks are resident, and charged already.
         return budget_.unpool(pool_->chunk_bytes()), c;
 
-    if(!budget_.try_charge(pool_->chunk_bytes()))
+    if(!charge(pool_->chunk_bytes(), Claim::message))
         return Message_Pool::NIL;
 
     const auto c = pool_->take_new();
@@ -661,8 +756,9 @@ void Partition_Backend::log_barrier(const idx_t gen, const std::vector<idx_t>& A
                 << "\tinboxes: cohort's " << msg_ram << " messages in RAM, " << msg_disk << " on disk; "
                     << "message-chunks " << GB(budget_.used()) << "GBs charged, " << GB(budget_.pooled()) << "GBs of them pooled.\n"
                 << "\ttransitions since the last barrier: " << transitions(Transition::ram_write) << " RAM-writes, "
-                    << transitions(Transition::disk_write) << " disk-writes, " << transitions(Transition::tail_mark) << " tail-marks, "
-                    << transitions(Transition::shuffle) << " tier-shuffles.\n";
+                    << transitions(Transition::disk_write) << " disk-writes, " << transitions(Transition::admit) << " admissions, "
+                    << transitions(Transition::admit_tail) << " retiring admissions, " << transitions(Transition::tail_mark) << " tail-marks, "
+                    << transitions(Transition::evict) << " evictions, " << transitions(Transition::shuffle) << " tier-shuffles.\n";
 
     // The preceding generation's disk-reads, against their prediction at the last barrier.
     const auto read = disk_read_.exchange(0, std::memory_order_relaxed);
@@ -704,6 +800,15 @@ void Partition_Backend::shuffle_tiers(const idx_t gen, const std::vector<idx_t>&
                     count(Transition::shuffle);
 #endif
                 }
+
+    // The retired tails leave likewise, through the evictor. Their memory is the residency-plan's, not the budget's, so their
+    // charges return nowhere.
+    std::size_t evict_c = 0;
+    for(std::size_t x = 0; x < FIELD_C * chunk_base_[p_]; ++x)
+        evict_c += (tier_[x].load(std::memory_order_relaxed) == static_cast<uint8_t>(Tier::ram_tail) && move(shuffle_rng_));
+
+    for(std::size_t i = 0; i < evict_c; ++i)
+        evict_one();
 }
 
 
