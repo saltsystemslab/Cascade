@@ -10,7 +10,6 @@
 #include "Residency_Plan.hpp"
 #include "message.hpp"
 
-#include <cstdint>
 #include <cstddef>
 #include <vector>
 #include <memory>
@@ -29,6 +28,8 @@ private:
 
     std::vector<Direct_File> suf_;  // Suffix-files of the partitions.
     std::vector<Direct_File> key_;  // Key-files of the partitions.
+    std::unique_ptr<std::once_flag[]> suf_open_;    // Opening-flags of the partitions' suffix-files.
+    std::unique_ptr<std::once_flag[]> key_open_;    // Opening-flags of the partitions' key-files.
 
     std::vector<Direct_File> msg_tgt_[2];   // Message-target files of the partitions' inboxes, per generation-parity.
     std::vector<Direct_File> msg_rank_[2];  // Message-rank files of the partitions' inboxes, per generation-parity.
@@ -36,18 +37,27 @@ private:
 
     Spill_Store* const spill_;  // Spill-store to open the deferred files from.
     const std::vector<idx_t> P_cap_;    // Partition capacities.
-    const std::vector<uint8_t> data_resident_;  // Whether each partition's data is host-resident.
 
     // TODO: all the following generation-parity logic need to move upwards in the hierarchy: to partition-backend or somewhere else.
 
     std::size_t write_parity_;  // Generation-parity currently being written to.
     std::size_t read_parity_;   // Generation-parity currently being read from.
 
+
+    // Opens the `p_id`'th partition's suffix-file, unless already open. Thread-
+    // safe.
+    void ensure_suf(p_id_t p_id);
+
+    // Opens the `p_id`'th partition's key-file, unless already open. Thread-
+    // safe.
+    void ensure_key(p_id_t p_id);
+
 public:
 
-    // Constructs a disk-backend for partitions with capacities `P_cap`, by
-    // opening their spill-files (if required) in `spill`, as per the residency
-    // plan `plan`. Inbox-files are opened lazily, at their first write.
+    // Constructs a disk-backend for partitions with capacities `P_cap`, in the
+    // spill-store `spill`. The suffix-files of the partitions spilled per the
+    // residency plan `plan` open upfront; the rest open lazily, at their first
+    // write.
     Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const Residency_Plan& plan);
 
     Disk_Backend(const Disk_Backend&) = delete;
@@ -59,9 +69,6 @@ public:
 
     // Retires the partitions' inbox-files of both the generation-parities.
     void retire_inboxes();
-
-    // Opens the `p_id`'th partition's key-file.
-    void open_key(p_id_t p_id);
 
     // Returns the `p_id`'th partition's inbox message-target file for the
     // generation-parity currently being written.

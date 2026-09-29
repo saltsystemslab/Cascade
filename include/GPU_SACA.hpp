@@ -192,10 +192,6 @@ private:
     // Partitions the suffixes based on the selected pivots.
     void partition();
 
-    // Measures the cost of prefix-key gathers in initial ranking, against the
-    // layouts: (1) that `partition()` produces, and (2) the suffix-order.
-    void probe_prefix_key_gather();
-
     // Sets the context-size that the current generation is resolving to `ctx`
     // and the generation's index to `gen`.
     void set_context(idx_t ctx, idx_t gen);

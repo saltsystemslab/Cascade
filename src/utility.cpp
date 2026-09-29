@@ -92,6 +92,13 @@ void unreserve_memory(void* const ptr, const std::size_t bytes)
 }
 
 
+void release_memory(void* const ptr, const std::size_t bytes)
+{
+    if(ptr != nullptr && bytes > 0)
+        ::madvise(ptr, bytes, MADV_DONTNEED);
+}
+
+
 std::pair<std::size_t, std::size_t> thp_coverage(const void* const p)
 {
     std::ifstream smaps("/proc/self/smaps");

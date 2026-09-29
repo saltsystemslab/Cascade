@@ -173,9 +173,6 @@ public:
     // past the last generation, as no inbox is read or written onward.
     void retire_messages();
 
-    // Opens the `p_id`'th partition's key-file.
-    void open_key(p_id_t p_id);
-
     // Retires the `p_id`'th partition's suffixes and keys.
     void retire_partition(p_id_t p_id);
 
@@ -194,12 +191,6 @@ public:
     // disk-part; this can exceed `disk_count(q)` due to disk-block alignment
     // requirements.
     p_sz_t msg_written(const p_id_t q) const { return msg_written_[inbox_write_parity_][q]; }
-
-    // Returns the `p_id`'th partition's resident suffixes, if any.
-    auto* resident_suf(const p_id_t p_id) { return plan_.data(p_id) ? ram_.suf(p_id) : nullptr; }
-
-    // Returns the `p_id`'th partition's resident keys, if any.
-    auto* resident_key(const p_id_t p_id) { return plan_.data(p_id) ? ram_.key(p_id) : nullptr; }
 
     // Reads the staging slab `s`'s chunk of suffixes from the backend into it.
     void read_suffixes(Staging_Slab& s) const;

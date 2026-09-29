@@ -7,30 +7,47 @@ namespace gpu_saca
 {
 
 Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const Residency_Plan& plan):
-      spill_(&spill)
+      suf_(P_cap.size())
+    , key_(P_cap.size())
+    , suf_open_(std::make_unique<std::once_flag[]>(P_cap.size()))
+    , key_open_(std::make_unique<std::once_flag[]>(P_cap.size()))
+    , spill_(&spill)
     , P_cap_(P_cap)
-    , data_resident_(plan.data())
     , write_parity_(write_parity(0))
     , read_parity_(read_parity(0))
 {
     const auto p = P_cap_.size();
-    suf_.reserve(p), key_.reserve(p);
     for(std::size_t parity = 0; parity < 2; ++parity)   // Inbox-files are opened lazily, at their first write.
         msg_tgt_[parity].resize(p), msg_rank_[parity].resize(p),
         inbox_open_[parity] = std::make_unique<std::once_flag[]>(p);
 
-    for(p_id_t p_id = 0; p_id < p; ++p_id)
-    {
-        // Open the required psuffix-files; opening of required key-files is deferred.
-        key_.emplace_back();
-        if(plan.data(p_id))
-            suf_.emplace_back();
-        else
+    for(p_id_t p_id = 0; p_id < p; ++p_id)  // The spilled suffix-files open upfront, off the scatter's path.
+        if(!plan.data(p_id))
+            ensure_suf(p_id);
+}
+
+
+void Disk_Backend::ensure_suf(const p_id_t p_id)
+{
+    std::call_once(suf_open_[p_id], // A content-file is opened once, and never re-assigned: concurrent writes may be using it.
+        [&]
         {
-            suf_.emplace_back(spill.open(p_id, Spill_Role::suf, Direct_File::Mode::read_write));
-            suf_.back().preallocate(P_cap_[p_id] * sizeof(idx_t));
+            suf_[p_id] = spill_->open(p_id, Spill_Role::suf, Direct_File::Mode::read_write);
+            suf_[p_id].preallocate(P_cap_[p_id] * sizeof(idx_t));
         }
-    }
+    );
+}
+
+
+void Disk_Backend::ensure_key(const p_id_t p_id)
+{
+    std::call_once(key_open_[p_id], // A content-file is opened once, and never re-assigned: concurrent writes may be using it.
+        [&]
+        {
+            key_[p_id] = spill_->open(p_id, Spill_Role::key, Direct_File::Mode::read_write);
+            key_[p_id].preallocate(P_cap_[p_id] * sizeof(p_sz_t));
+        }
+    );
 }
 
 
@@ -80,23 +97,15 @@ void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz
 
 void Disk_Backend::write_suf(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const src)
 {
+    ensure_suf(p_id);
     suf_[p_id].write_at(src, sz * sizeof(idx_t), off * sizeof(idx_t));
 }
 
 
 void Disk_Backend::write_key(const p_id_t p_id, const idx_t off, const idx_t sz, const p_sz_t* const src)
 {
+    ensure_key(p_id);   // Key-files open at their first write, as partitions leave initial ranking.
     key_[p_id].write_at(src, sz * sizeof(p_sz_t), off * sizeof(p_sz_t));
-}
-
-
-void Disk_Backend::open_key(const p_id_t p_id)
-{
-    if(!data_resident_[p_id])
-    {
-        key_[p_id] = spill_->open(p_id, Spill_Role::key, Direct_File::Mode::read_write);
-        key_[p_id].preallocate(P_cap_[p_id] * sizeof(p_sz_t));
-    }
 }
 
 

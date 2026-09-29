@@ -222,6 +222,11 @@ void* reserve_memory(std::size_t bytes);
 // Releases the reservation `ptr` of `bytes` bytes, made with `reserve_memory`.
 void unreserve_memory(void* ptr, std::size_t bytes);
 
+// Returns the physical memory backing the range `[ptr, ptr + bytes)` of a
+// reservation made with `reserve_memory`; `ptr` must be page-aligned. The range
+// stays reserved, and reads back as zeros.
+void release_memory(void* ptr, std::size_t bytes);
+
 // Returns from `/proc/self/smaps` (pseudo-file with memory consumption metrics
 // for each memory mapping), for the memory mapping containing the address `p`,
 // `(RSS-bytes, THP-bytes)`. Both are `0` if not found.

@@ -17,7 +17,7 @@ namespace gpu_saca
 Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_t chunk_cap, Spill_Store& spill, const std::size_t budget, const std::size_t fixed_bytes, const p_id_t p):
       p_(p)
     , plan_(P_cap, budget, fixed_bytes)
-    , ram_(P_cap, plan_)
+    , ram_(P_cap)
     , disk_(P_cap, spill, plan_)
     , chunk_cap_(chunk_cap)
     , chunk_base_(p_ + 1, 0)
@@ -92,16 +92,9 @@ void Partition_Backend::retire_messages()
 }
 
 
-void Partition_Backend::open_key(const p_id_t p_id)
-{
-    disk_.open_key(p_id);
-}
-
-
 void Partition_Backend::retire_partition(const p_id_t p_id)
 {
-    plan_.data(p_id) ?  ram_.retire_data(p_id) :
-                        disk_.retire_data(p_id);
+    ram_.retire_data(p_id), disk_.retire_data(p_id);    // The partition's chunks may reside in either tier.
 }
 
 
