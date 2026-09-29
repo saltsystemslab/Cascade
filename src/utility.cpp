@@ -53,6 +53,25 @@ std::size_t available_memory()
 }
 
 
+std::size_t resident_memory()
+{
+    constexpr const char* field = "VmRSS:";
+    std::ifstream status("/proc/self/status");
+    std::string line;
+
+    while(std::getline(status, line))
+        if(line.rfind(field, 0) == 0)
+        {
+            std::stringstream ss(line.substr(sizeof("VmRSS:") - 1));
+            std::size_t memory_KB = 0;
+            if(ss >> memory_KB)
+                return memory_KB * 1024;
+        }
+
+    return 0;
+}
+
+
 void* reserve_memory(const std::size_t bytes)
 {
     if(bytes == 0)

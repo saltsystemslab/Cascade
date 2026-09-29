@@ -213,6 +213,9 @@ void prepage(T_* const ptr, const std::size_t size)
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
 
+// Returns the process' resident set size, in bytes; `0` if not found.
+std::size_t resident_memory();
+
 // Returns a reservation of `bytes` bytes of address-space, `HUGE_PAGE_SIZE`-
 // aligned and backed by physical memory only when touched; `nullptr` for empty
 // reservations. The reservation opts into transparent huge pages iff the env
