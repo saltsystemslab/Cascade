@@ -16,7 +16,7 @@ namespace gpu_saca
 
 Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_t chunk_cap, Spill_Store& spill, const std::size_t budget, const std::size_t fixed_bytes, const p_id_t p):
       p_(p)
-    , plan_(P_cap, budget, fixed_bytes)
+    , plan_(P_cap, chunk_cap, budget, fixed_bytes)
     , ram_(P_cap)
     , disk_(P_cap, spill, plan_)
     , chunk_cap_(chunk_cap)
@@ -45,16 +45,15 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
     CUDA_CHECK(pinned_allocate_host(active_slot_, p_));
 
-    // The chunks' tiers follow the residency-plan: a partition's content resides whole in RAM or in disk.
+    // The chunks' tiers follow the residency-plan: per field, a leading run of each partition's chunks starts in RAM.
     for(p_id_t p_id = 0; p_id < p_; ++p_id)
-        chunk_base_[p_id + 1] = chunk_base_[p_id] + (P_cap[p_id] + chunk_cap_ - 1) / chunk_cap_;
+        chunk_base_[p_id + 1] = chunk_base_[p_id] + plan_.chunk_c(p_id);
 
     tier_ = std::make_unique<std::atomic<uint8_t>[]>(FIELD_C * chunk_base_[p_]);
-    for(std::size_t f = 0; f < FIELD_C; ++f)
-        for(p_id_t p_id = 0; p_id < p_; ++p_id)
-            for(idx_t c = chunk_base_[p_id]; c < chunk_base_[p_id + 1]; ++c)
-                tier_[f * chunk_base_[p_] + c].store(
-                    static_cast<uint8_t>(plan_.data(p_id) ? Tier::ram : Tier::disk), std::memory_order_relaxed);
+    for(p_id_t p_id = 0; p_id < p_; ++p_id)
+        for(idx_t c = 0; c < plan_.chunk_c(p_id); ++c)
+            tier_[tier_idx(Field::suf, p_id, c)].store(static_cast<uint8_t>(c < plan_.suf_ram(p_id) ? Tier::ram : Tier::disk), std::memory_order_relaxed),
+            tier_[tier_idx(Field::key, p_id, c)].store(static_cast<uint8_t>(c < plan_.key_ram(p_id) ? Tier::ram : Tier::disk), std::memory_order_relaxed);
 
     std::copy(P_cap.cbegin(), P_cap.cend(), active_slot_);  // No chunk is a retired tail before the first generation.
 

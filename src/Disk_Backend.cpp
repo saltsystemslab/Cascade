@@ -21,8 +21,8 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
         msg_tgt_[parity].resize(p), msg_rank_[parity].resize(p),
         inbox_open_[parity] = std::make_unique<std::once_flag[]>(p);
 
-    for(p_id_t p_id = 0; p_id < p; ++p_id)  // The spilled suffix-files open upfront, off the scatter's path.
-        if(!plan.data(p_id))
+    for(p_id_t p_id = 0; p_id < p; ++p_id)  // The suffix-files with chunks spilled open upfront, off the scatter's path.
+        if(plan.suf_ram(p_id) < plan.chunk_c(p_id))
             ensure_suf(p_id);
 }
 

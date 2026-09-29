@@ -6,35 +6,47 @@
 
 #include "types.hpp"
 
-#include <cstdint>
 #include <cstddef>
 #include <vector>
 
 namespace gpu_saca
 {
 
+// Host-residency plan of the partitions' content at the first barrier: per
+// field, a leading run of each partition's chunks starts in RAM.
 class Residency_Plan
 {
 private:
 
-    std::vector<uint8_t> data_; // Whether each partition's data (suffixes and keys) are host-resident.
+    std::vector<idx_t> chunk_c_;    // Count of each partition's chunks.
+    std::vector<idx_t> suf_ram_;    // Count of each partition's leading chunks whose suffixes start in RAM.
+    std::vector<idx_t> key_ram_;    // Count of each partition's leading chunks whose keys start in RAM.
     const bool force_spill_;    // Whether all data spills regardless of the budget: `GPU_SACA_FORCE_SPILL`.
+    const bool chunk_wise_; // Whether the suffixes alone are placed, chunk-wise: `GPU_SACA_CHUNK_PLAN`.
     std::size_t data_resident_; // Bytes of the partitions' data that are host-resident.
 
 
 public:
 
-    // Plans residency for partitions with capacities `P_cap` on host-budget
-    // `budget`, given an unavoidable host allocation `fixed_bytes`.
-    Residency_Plan(const std::vector<idx_t>& P_cap, std::size_t budget, std::size_t fixed_bytes);
+    // Plans residency for partitions with capacities `P_cap`, in chunks of
+    // `chunk_cap` elements, on host-budget `budget`, given an unavoidable host
+    // allocation `fixed_bytes`. Whole partitions' data (suffixes and keys) is
+    // placed in RAM largest-first, as far as the budget admits; or, with
+    // `GPU_SACA_CHUNK_PLAN` set, the suffixes alone: whole partitions' largest-
+    // first, then as many chunks of the partition next as fit, with the keys
+    // starting in disk.
+    Residency_Plan(const std::vector<idx_t>& P_cap, idx_t chunk_cap, std::size_t budget, std::size_t fixed_bytes);
 
-    // Returns whether the `p_id`'th partition's data (suffixes and keys) are
-    // host-resident.
-    bool data(const p_id_t p_id) const { return data_[p_id]; }
+    // Returns the count of the `p_id`'th partition's chunks.
+    idx_t chunk_c(const p_id_t p_id) const { return chunk_c_[p_id]; }
 
-    // Returns whether each partition's data (suffixes and keys) are host-
-    // resident.
-    const auto& data() const { return data_; }
+    // Returns the count of the `p_id`'th partition's leading chunks whose
+    // suffixes start in RAM.
+    idx_t suf_ram(const p_id_t p_id) const { return suf_ram_[p_id]; }
+
+    // Returns the count of the `p_id`'th partition's leading chunks whose keys
+    // start in RAM.
+    idx_t key_ram(const p_id_t p_id) const { return key_ram_[p_id]; }
 
     // Returns whether all data spills regardless of the budget; the elastic
     // RAM-tiers then get no budget either.

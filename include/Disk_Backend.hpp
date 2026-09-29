@@ -55,9 +55,9 @@ private:
 public:
 
     // Constructs a disk-backend for partitions with capacities `P_cap`, in the
-    // spill-store `spill`. The suffix-files of the partitions spilled per the
-    // residency plan `plan` open upfront; the rest open lazily, at their first
-    // write.
+    // spill-store `spill`. The suffix-files of the partitions with suffixes
+    // spilled per the residency plan `plan` open upfront; the rest open lazily,
+    // at their first write.
     Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const Residency_Plan& plan);
 
     Disk_Backend(const Disk_Backend&) = delete;
