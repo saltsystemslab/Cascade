@@ -26,6 +26,7 @@ KINDS = ("present", "mutated", "random", "heldout", "unigram", "batch")
 SHOWN = ("present-m1", "present-m10", "random-m5", "present-m100", "present-m1000")
 NAN = math.nan
 PLACED = {"mmap": "mapped", "ram": "in the heap"}
+TIERS = {"device": "device memory", "pinned": "pinned host memory"}
 
 
 def pairs(path):
@@ -56,9 +57,13 @@ def batches(path, engine, run):
         out.append(cur)
     for b in out:
         b.update(engine=engine, run=run, log=str(path))
-        b["config"] = (f"s{b.get('stride')}w{b.get('key_words')}o{b.get('sort')}" + (f"g{b['gather']}" if "gather" in b else "")
-                       if engine == "ours"
-                       else f"{b.get('mode')}-t{b.get('threads')}-p{b.get('prefetch')}-{b.get('load')}")
+        if engine == "ours":
+            # Brackets are gathered iff the suffix array is pinned, unless a mode says otherwise; only then does its name say so.
+            placed = "1" if b.get("sa_res") == "pinned" and b.get("stride") not in (None, "0") else "0"
+            forced = b.get("gather", placed) != placed
+            b["config"] = f"s{b.get('stride')}w{b.get('key_words')}o{b.get('sort')}" + (f"g{b['gather']}" if forced else "")
+        else:
+            b["config"] = f"{b.get('mode')}-t{b.get('threads')}-p{b.get('prefetch')}-{b.get('load')}"
     return [b for b in out if "qps" in b]
 
 
@@ -177,15 +182,15 @@ def agreement(bs, d):
     return out
 
 
-def main_rows(bs, t_all, ig_load, piped):
+def main_rows(bs, t_all, ig_load, piped, two):
     ig_cfg = f"direct-t{t_all}-p0-{ig_load}"
     rows, speedups = [], []
     for w in sorted({b["workload"] for b in bs if is_main(b["run"])}, key=order):
         ig = sel(bs, "ig", is_main, ig_cfg, w)
-        tp, e2e = sel(bs, "ours", is_main, "s32w2o0", w), sel(bs, "ours", is_main, "s32w2o0", w, "qps_e2e")
+        tp, e2e = sel(bs, "ours", is_main, two, w), sel(bs, "ours", is_main, two, w, "qps_e2e")
         q = next(b["q"] for b in bs if b["workload"] == w and is_main(b["run"]))
         speedups.append((median(tp) / median(ig) if ig else NAN, median(e2e) / median(ig) if ig else NAN))
-        pageable = [spread(sel(bs, "ours", is_main, "s32w2o0", w, "qps_e2e_pageable"))] if piped else []
+        pageable = [spread(sel(bs, "ours", is_main, two, w, "qps_e2e_pageable"))] if piped else []
         rows.append([w, f"{int(q):,}", spread(ig), spread(sel(bs, "ours", is_main, "s0w0o0", w)), spread(tp), spread(e2e)] + pageable
                     + [times(median(tp), median(ig)), times(median(e2e), median(ig))])
     return rows, speedups
@@ -198,11 +203,11 @@ def batch_rows(bs, t_all, ig_load):
         t = min(t_all, (q + 255) // 256)
         ig = [median(sel(bs, "ig", "batch", f"direct-t{x}-p0-{ig_load}", w)) for x in sorted({t_all, t})]
         ig_best = max((x for x in ig if not math.isnan(x)), default=NAN)
-        tp = median(sel(bs, "ours", "batch", "s32w2o0", w))
-        e2e = [median(sel(bs, "ours", "batch", c, w, "qps_e2e")) for c in ("s0w0o0", "s32w2o0")]
+        tp = [median(sel(bs, "ours", "batch", c, w)) for c in ("s32w2o0", "s32w2o1")]
+        e2e = [median(sel(bs, "ours", "batch", c, w, "qps_e2e")) for c in ("s0w0o0", "s32w2o0", "s32w2o1")]
+        best = lambda xs: max((x for x in xs if not math.isnan(x)), default=NAN)
         rows.append([f"{q:,}", mq(ig[-1]), mq(ig[0]) if t < t_all else "-", mq(median(sel(bs, "ours", "batch", "s0w0o0", w))),
-                     mq(tp), mq(median(sel(bs, "ours", "batch", "s32w2o1", w))), mq(e2e[0]), mq(e2e[1]), times(tp, ig_best),
-                     times(max((x for x in e2e if not math.isnan(x)), default=NAN), ig_best)])
+                     mq(tp[0]), mq(tp[1]), mq(e2e[0]), mq(e2e[1]), mq(e2e[2]), times(best(tp), ig_best), times(best(e2e), ig_best)])
     return rows
 
 
@@ -244,14 +249,14 @@ def variant_rows(bs, t_all, ig_load, other):
     return rows
 
 
-def setup_lines(bs):
+def setup_lines(bs, two):
     """Load times: ours per process of the main runs; infini-gram's page-cache warm-up and heap loads."""
     procs = {}
     for b in bs:
         if b["engine"] == "ours" and is_main(b["run"]):
             procs.setdefault(b["run"], b)
     ours = [(num(b, "t_load_text"), num(b, "t_load_sa"), num(b, "t_spot")) for b in procs.values()]
-    tab = [num(b, "t_table") for b in bs if b["engine"] == "ours" and is_main(b["run"]) and b["config"] == "s32w2o0"]
+    tab = [num(b, "t_table") for b in bs if b["engine"] == "ours" and is_main(b["run"]) and b["config"] == two]
     warm = [num(b, "t_prewarm") for b in bs if b["engine"] == "ig" and num(b, "prewarm_bytes") > 0]
     heap = list({b["log"]: num(b, "t_load") for b in bs if b["engine"] == "ig" and b.get("load") == "ram"}.values())
     out = []
@@ -285,18 +290,22 @@ def main(argv):
         for b in bs:
             f.write("\t".join(f"{b[c]:.6g}" if isinstance(b.get(c), float) else str(b.get(c, "")) for c in cols) + "\n")
 
+    text, sa = (TIERS[env.get(k, "device")] for k in ("ours_text_res", "ours_sa_res"))
+    placement = f"both its arrays in {text}" if text == sa else f"its text in {text} and its suffix array in {sa}"
     md = [f"# Timed query runs: {env.get('host', '?')}, {env.get('gpu', '?')}", "",
           f"Commit {env.get('commit', '?')}, job {env.get('job', '?')}, {env.get('date', '?')}. "
           f"{env.get('reps', '?')} repetitions per batch; infini-gram's pool {t_all} threads, its index {PLACED[ig_load]}, "
           f"its first repetition dropped; "
-          f"ours bound with `{env.get('ours_numactl', 'none')}`. Throughput in millions of queries per second.", "",
+          f"ours bound with `{env.get('ours_numactl', 'none')}`, {placement}. Throughput in millions of queries per second.", "",
           "## Correctness", ""] + agreement(bs, d) + [f"- Logs without results or with errors: {len(bad)}."] \
         + [f"  - {x}" for x in bad]
 
     # End to end: through the pipeline if the results have it; from before it, the transfers and the search added up.
     piped = any("t_e2e_median" in b for b in bs)
     e2e = "end to end" if piped else "with transfers"
-    rows, speedups = main_rows(bs, t_all, ig_load, piped)
+    # Our two-phase mode of the main runs: unsorted if they ran it, else sorted.
+    two = next((c for c in ("s32w2o0", "s32w2o1") if any(b["config"] == c and is_main(b["run"]) for b in bs)), "s32w2o0")
+    rows, speedups = main_rows(bs, t_all, ig_load, piped, two)
     if rows:
         md += ["", "## Main: infini-gram's `_find_thread` against ours", "",
                "Median over processes (min-max). Ours from device memory: the search on device-resident queries. "
@@ -304,7 +313,8 @@ def main(argv):
                   "over streams; from pinned memory, and from pageable memory in its own column." if piped else
                   "With transfers: plus the batch's copy to the device and the intervals' copy back, unoverlapped, from pageable "
                   "memory."), ""]
-        md += table(["workload", "q", f"infini-gram, {PLACED[ig_load]}", "ours, direct", "ours, two-phase", f"two-phase, {e2e}"]
+        sorted_ = ", sorted" if two.endswith("o1") else ""
+        md += table(["workload", "q", f"infini-gram, {PLACED[ig_load]}", "ours, direct", f"ours, two-phase{sorted_}", f"two-phase, {e2e}"]
                     + (["end to end, pageable"] if piped else []) + ["speedup", e2e], rows, ["---"] + ["--:"] * (7 + piped))
         sp = [x for x, _ in speedups if not math.isnan(x)]
         sp_e2e = [y for _, y in speedups if not math.isnan(y)]
@@ -317,9 +327,9 @@ def main(argv):
     if rows:
         md += ["", "## Batch size: present patterns, m = 10", "",
                "infini-gram with every core, and with a pool no larger than the batch's 256-query chunks. The speedups are over "
-               f"the better of the two: two-phase's from device memory, and our better mode's {e2e}.", ""]
+               f"the better of the two: our better two-phase mode's from device memory, and our best mode's {e2e}.", ""]
         md += table(["q", "infini-gram", "infini-gram, small pool", "ours, direct", "two-phase", "two-phase, sorted", f"direct, {e2e}",
-                     f"two-phase, {e2e}", "speedup", e2e], rows, ["--:"] * 10)
+                     f"two-phase, {e2e}", f"sorted, {e2e}", "speedup", e2e], rows, ["--:"] * 11)
 
     rows = ablation_rows(bs)
     if rows:
@@ -340,7 +350,7 @@ def main(argv):
         md += table(["workload", f"`_find_thread`, {PLACED[ig_load]}", "`find`", "prefetching", f"`_find_thread`, {PLACED[other]}",
                      "`find` / `_find_thread`"], rows, ["---"] + ["--:"] * 5)
 
-    lines = setup_lines(bs)
+    lines = setup_lines(bs, two)
     if lines:
         md += ["", "## Setup", ""] + lines
 
