@@ -118,22 +118,44 @@ void Partition_Backend::retire_messages()
 }
 
 
-void Partition_Backend::retire_partition(const p_id_t p_id)
+void Partition_Backend::retire_chunk(const p_id_t p_id, const idx_t c)
 {
-    ram_.retire_data(p_id), disk_.retire_data(p_id);    // The partition's chunks may reside in either tier.
+#ifdef TESTS
+    if(!frozen_)
+    {
+        std::cerr << "Chunk " << c << " of partition " << p_id << " is retired before the claims freeze. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+#endif
 
-    // Its RAM-chunks' charges return.
+    // Its RAM-fields' memory goes, and their charges return. Their tiers turn to the disk first, so that no RAM-tier stands over
+    // released memory, and a repeated retirement finds none; the chunk being dead onward, the disk need not hold it.
+    const auto off = c * chunk_cap_, len = chunk_len(p_id, c);
     std::size_t ram = 0, tail = 0;
-    for(idx_t c = 0; c < chunk_base_[p_id + 1] - chunk_base_[p_id]; ++c)
-        for(std::size_t f = 0; f < FIELD_C; ++f)
-        {
-            const auto field = static_cast<Field>(f);
-            ram += (in_ram(field, p_id, c) ? chunk_bytes(field, p_id, c) : 0);
-            tail += (tier(field, p_id, c) == Tier::ram_tail ? chunk_bytes(field, p_id, c) : 0);
-        }
+    for(std::size_t f = 0; f < FIELD_C; ++f)
+    {
+        const auto field = static_cast<Field>(f);
+        const auto t = tier(field, p_id, c);
+        if(t == Tier::disk)
+            continue;
+
+        tier_[tier_idx(field, p_id, c)].store(static_cast<uint8_t>(Tier::disk), std::memory_order_relaxed);
+        field == Field::suf ?   ram_.release_suf(p_id, off, len) :
+                                ram_.release_key(p_id, off, len);
+        ram += chunk_bytes(field, p_id, c), tail += (t == Tier::ram_tail ? chunk_bytes(field, p_id, c) : 0);
+    }
 
     content_ram_.fetch_sub(ram, std::memory_order_relaxed), tail_ram_.fetch_sub(tail, std::memory_order_relaxed);
     budget_.uncharge(ram);
+}
+
+
+void Partition_Backend::retire_partition(const p_id_t p_id)
+{
+    for(idx_t c = 0; c < chunk_base_[p_id + 1] - chunk_base_[p_id]; ++c)
+        retire_chunk(p_id, c);
+
+    disk_.retire_data(p_id);
 }
 
 

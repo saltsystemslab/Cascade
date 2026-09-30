@@ -1989,6 +1989,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
                         s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
                         backend_->read_keys(*s);
+                        backend_->retire_chunk(rt.p_id, rt.chunk_idx);  // Read for the last time: its memory goes now.
 
                         auto& p_assembly = part_assembly[rt.p_id];
                         p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
@@ -2089,6 +2090,14 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
         INSTRUMENT(probe::P().stop_sampler());
     }
+
+#ifdef TESTS
+    if(backend_->budget().used() != 0)  // Every chunk is retired, and every charge returned.
+    {
+        std::cerr << "The host-memory budget has " << backend_->budget().used() << " bytes charged past the concatenation. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+#endif
 
 
     // Close the output file.

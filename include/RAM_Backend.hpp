@@ -67,10 +67,6 @@ public:
     // Releases the memory of `sz`-many keys of the `p_id`'th partition, from its
     // page-aligned offset `off`; the range reads back as zeros.
     void release_key(p_id_t p_id, idx_t off, idx_t sz);
-
-    // Releases the memory of the `p_id`'th partition's suffixes and keys; their
-    // address-space stays reserved.
-    void retire_data(p_id_t p_id);
 };
 
 }

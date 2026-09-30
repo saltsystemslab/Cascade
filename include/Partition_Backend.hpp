@@ -288,7 +288,14 @@ public:
     // inbox is read or written onward, and no memory is claimed.
     void retire_messages();
 
-    // Retires the `p_id`'th partition's suffixes and keys.
+    // Retires the `p_id`'th partition's `c`'th chunk: releases the memory of
+    // its RAM-resident fields, and returns their charges. To be invoked once
+    // the chunk is read for the last time, with the claims frozen, so that no
+    // evictor takes it meanwhile. Thread-safe for distinct chunks.
+    void retire_chunk(p_id_t p_id, idx_t c);
+
+    // Retires the `p_id`'th partition's suffixes and keys: its chunks not
+    // retired yet, and its files.
     void retire_partition(p_id_t p_id);
 
     // Returns the (exclusive) ending-offsets of the destination-partitions into

@@ -46,13 +46,6 @@ void RAM_Backend::release_key(const p_id_t p_id, const idx_t off, const idx_t sz
 }
 
 
-void RAM_Backend::retire_data(const p_id_t p_id)
-{
-    util::release_memory(suf_[p_id], reservation(P_cap_[p_id], sizeof(idx_t)));
-    util::release_memory(key_[p_id], reservation(P_cap_[p_id], sizeof(p_sz_t)));
-}
-
-
 void RAM_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const dst) const
 {
     std::memcpy(dst, suf_[p_id] + off, sz * sizeof(idx_t));
