@@ -17,7 +17,7 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const idx_t chun
     , suf_ram_(P_cap.size(), 0)
     , key_ram_(P_cap.size(), 0)
     , force_spill_(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) != 0)
-    , chunk_wise_(env::get_u64("GPU_SACA_CHUNK_PLAN").value_or(0) != 0)
+    , chunk_wise_(env::get_u64("GPU_SACA_CHUNK_PLAN").value_or(1) != 0)
     , data_resident_(0)
 {
     constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };

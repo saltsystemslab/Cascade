@@ -22,7 +22,7 @@ private:
     std::vector<idx_t> suf_ram_;    // Count of each partition's leading chunks whose suffixes start in RAM.
     std::vector<idx_t> key_ram_;    // Count of each partition's leading chunks whose keys start in RAM.
     const bool force_spill_;    // Whether all data spills regardless of the budget: `GPU_SACA_FORCE_SPILL`.
-    const bool chunk_wise_; // Whether the suffixes alone are placed, chunk-wise: `GPU_SACA_CHUNK_PLAN`.
+    const bool chunk_wise_; // Whether the suffixes alone are placed, chunk-wise: `GPU_SACA_CHUNK_PLAN`, on by default.
     std::size_t data_resident_; // Bytes of the partitions' data that are host-resident.
 
 
@@ -30,11 +30,11 @@ public:
 
     // Plans residency for partitions with capacities `P_cap`, in chunks of
     // `chunk_cap` elements, on host-budget `budget`, given an unavoidable host
-    // allocation `fixed_bytes`. Whole partitions' data (suffixes and keys) is
-    // placed in RAM largest-first, as far as the budget admits; or, with
-    // `GPU_SACA_CHUNK_PLAN` set, the suffixes alone: whole partitions' largest-
-    // first, then as many chunks of the partition next as fit, with the keys
-    // starting in disk.
+    // allocation `fixed_bytes`. The suffixes alone are placed in RAM: whole
+    // partitions' largest-first, then as many chunks of the partition next as
+    // fit, with the keys starting in disk. Or, with `GPU_SACA_CHUNK_PLAN=0`,
+    // whole partitions' data (suffixes and keys) is placed, largest-first, as
+    // far as the budget admits.
     Residency_Plan(const std::vector<idx_t>& P_cap, idx_t chunk_cap, std::size_t budget, std::size_t fixed_bytes);
 
     // Returns the count of the `p_id`'th partition's chunks.
