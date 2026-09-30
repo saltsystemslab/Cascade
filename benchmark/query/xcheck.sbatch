@@ -22,9 +22,14 @@
 #   XC_Q            queries per workload of patterns up to 10 long; a tenth of it
 #                   for longer ones; default 1000000
 #   XC_STRIDE       search modes, as `query find --stride`; default 0,32
+#   XC_SORT         batch orders of the modes, as `query find --sort`; default 0
 #   XC_RES          tier of both arrays: device (default) or pinned
+#   XC_TEXT_RES     tier of the text; default XC_RES
+#   XC_SA_RES       tier of the suffix array; default XC_RES
+#   XC_SPOT         suffix-array order spot-checks at load; default 100000
 #   XC_ARCH         CUDA architecture of the in-job build; default 120-real
 #   XC_THREADS      infini-gram's pool size; default the job's CPUs
+#   XC_CMAKE_ARGS   extra configure arguments, e.g. FETCHCONTENT_SOURCE_DIR_* offline
 #   INFINIGRAM_DIR  infini-gram checkout at v2.6.0; default ~/infini-gram
 
 #SBATCH --job-name=xcheck
@@ -71,16 +76,19 @@ OUT="${3:-${RESULTS_ROOT:-${HOME}/gpu-saca-results}/xcheck-$(basename "${IDX}")-
 Q="${XC_Q:-1000000}"
 ARCH="${XC_ARCH:-120-real}"
 RES="${XC_RES:-device}"
+TEXT_RES="${XC_TEXT_RES:-${RES}}"
+SA_RES="${XC_SA_RES:-${RES}}"
 THREADS="${XC_THREADS:-${SLURM_CPUS_PER_TASK:-$(nproc)}}"
 B="${REPO}/build-xcheck-sm${ARCH%%-*}"
 mkdir -p "${OUT}/qry" "${OUT}/ours" "${OUT}/ig"
 
 stamp() { echo "[$(date -u +%FT%TZ)] $*"; }
-stamp "start: $(hostname), $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1), commit $(git -C "${REPO}" rev-parse --short HEAD)$(git -C "${REPO}" diff --quiet HEAD || echo -dirty), results ${OUT}"
+stamp "start: $(hostname), $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1), commit $(git -C "${REPO}" rev-parse --short HEAD)$(git -C "${REPO}" diff --quiet HEAD || echo -dirty), text ${TEXT_RES}, suffix array ${SA_RES}, results ${OUT}"
 
 stamp "build"
+# shellcheck disable=SC2086
 { cmake -S "${REPO}" -B "${B}" -DCMAKE_BUILD_TYPE=Release -DCUDA_ARCH="${ARCH}" -DBENCHMARK=ON \
-        -DFETCHCONTENT_SOURCE_DIR_INFINIGRAM="${INFINIGRAM_DIR:-${HOME}/infini-gram}" \
+        -DFETCHCONTENT_SOURCE_DIR_INFINIGRAM="${INFINIGRAM_DIR:-${HOME}/infini-gram}" ${XC_CMAKE_ARGS:-} \
     && cmake --build "${B}" -j "${THREADS}" --target query bench_infinigram_query; } > "${OUT}/build.log" 2>&1 \
     || { stamp "FATAL: build failed; see ${OUT}/build.log"; exit 1; }
 
@@ -106,8 +114,8 @@ fi
 files=$(ls "${OUT}"/qry/*.qry | paste -sd, -)
 
 stamp "ours"
-"${B}/src/query" find --index "${IDX}" --queries "${files}" --text-res "${RES}" --sa-res "${RES}" --stride "${XC_STRIDE:-0,32}" \
-    --validate --reps 1 --cnt-dir "${OUT}/ours" > "${OUT}/ours/find.log" 2>&1
+"${B}/src/query" find --index "${IDX}" --queries "${files}" --text-res "${TEXT_RES}" --sa-res "${SA_RES}" --spot "${XC_SPOT:-100000}" \
+    --stride "${XC_STRIDE:-0,32}" --sort "${XC_SORT:-0}" --validate --reps 1 --cnt-dir "${OUT}/ours" > "${OUT}/ours/find.log" 2>&1
 stamp "ours: rc=$?"
 
 stamp "infini-gram"
