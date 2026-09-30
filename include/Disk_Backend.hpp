@@ -69,10 +69,10 @@ public:
 
     // Constructs a disk-backend for partitions with capacities `P_cap`, in the
     // spill-store `spill`, striping the partitions' spill-files across its
-    // scratch by their footprints, with the host-memory of the residency plan
-    // `plan` holding some of their data instead. The suffix-files of the
-    // partitions with suffixes spilled per `plan` open upfront; the rest open
-    // lazily, at their first write.
+    // scratch, and checking its room for their footprints, with the host-memory
+    // of the residency plan `plan` holding some of their data instead. The
+    // suffix-files of the partitions with suffixes spilled per `plan` open
+    // upfront; the rest open lazily, at their first write.
     Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const Residency_Plan& plan);
 
     Disk_Backend(const Disk_Backend&) = delete;

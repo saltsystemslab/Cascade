@@ -5,7 +5,6 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 
-#include <numeric>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -97,37 +96,18 @@ void Spill_Store::stripe(const std::vector<std::size_t>& content, const std::vec
         room[fs[r]] = static_cast<std::size_t>(vfs.f_bavail) * vfs.f_frsize;
     }
 
-    // Largest partitions first, by their spill-files at their largest, each to the root whose filesystem has the most room
-    // left, and to the root least taken among those of one filesystem.
+    // The partitions stripe round-robin across the roots.
     const auto p = content.size();
-    std::vector<std::size_t> footprint(p);  // Bytes of each partition's spill-files at their largest: with both the generation-parities' inbox-files.
-    for(p_id_t p_id = 0; p_id < p; ++p_id)
-        footprint[p_id] = content[p_id] + 2 * inbox[p_id];
-
-    std::vector<p_id_t> order(p);
-    std::iota(order.begin(), order.end(), 0);
-    std::stable_sort(order.begin(), order.end(), [&](const auto x, const auto y){ return footprint[x] > footprint[y]; });
-
-    root_of_.assign(p, 0);
-    std::vector<std::size_t> taken(at.size(), 0);   // Bytes striped to each filesystem.
+    root_of_.resize(p);
+    std::vector<std::size_t> taken(at.size(), 0);   // Bytes striped to each filesystem, of the spill-files at their largest: with both the generation-parities' inbox-files.
     std::vector<std::size_t> content_taken(at.size(), 0);   // Bytes of content-files striped to each filesystem.
     std::vector<std::size_t> inbox_taken(at.size(), 0); // Bytes of a generation-parity's inbox-files striped to each filesystem.
-    std::vector<std::size_t> root_taken(root_c, 0); // Bytes striped to each root.
     std::vector<std::size_t> root_part_c(root_c, 0);    // Partitions striped to each root.
-    for(const auto p_id : order)
+    for(p_id_t p_id = 0; p_id < p; ++p_id)
     {
-        std::size_t to = 0;
-        for(std::size_t r = 1; r < root_c; ++r)
-        {
-            // The rooms left compare with each side offset by the other's taken bytes, so that neither underflows.
-            const auto left_r = room[fs[r]] + taken[fs[to]], left_to = room[fs[to]] + taken[fs[r]];
-            if(left_r > left_to || (left_r == left_to && root_taken[r] < root_taken[to]))
-                to = r;
-        }
-
-        root_of_[p_id] = to;
-        taken[fs[to]] += footprint[p_id], root_taken[to] += footprint[p_id], root_part_c[to]++;
-        content_taken[fs[to]] += content[p_id], inbox_taken[fs[to]] += inbox[p_id];
+        const auto to = p_id % root_c;
+        root_of_[p_id] = to, root_part_c[to]++;
+        taken[fs[to]] += content[p_id] + 2 * inbox[p_id], content_taken[fs[to]] += content[p_id], inbox_taken[fs[to]] += inbox[p_id];
     }
 
     // The filesystems' needs at the moments that bound them: past the initial ranking, whose messages fill a generation-
