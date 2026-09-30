@@ -57,9 +57,11 @@ def batches(path, engine, run):
         out.append(cur)
     for b in out:
         b.update(engine=engine, run=run, log=str(path))
-        if engine == "ours":
+        if engine == "ours" and b.get("stride") == "0":
+            b["config"] = "s0w0o0"  # The direct mode neither sorts nor gathers, whatever the options of its run.
+        elif engine == "ours":
             # Brackets are gathered iff the suffix array is pinned, unless a mode says otherwise; only then does its name say so.
-            placed = "1" if b.get("sa_res") == "pinned" and b.get("stride") not in (None, "0") else "0"
+            placed = "1" if b.get("sa_res") == "pinned" else "0"
             forced = b.get("gather", placed) != placed
             b["config"] = f"s{b.get('stride')}w{b.get('key_words')}o{b.get('sort')}" + (f"g{b['gather']}" if forced else "")
         else:
