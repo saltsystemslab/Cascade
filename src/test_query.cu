@@ -743,8 +743,9 @@ bool test_gpu_find()
 // phases, sorted and not, and gathered in tiles that cross chunks: chunks
 // bounded by their queries and by their symbols, as the most for a chunk and as
 // its share of a batch split across the streams, or whole if gathering; the
-// most's defaults; queries longer than a chunk, empty queries, offsets that
-// start past the symbols' first, an empty batch, and concurrent calls.
+// most's defaults; queries longer than a chunk, empty queries, runs of
+// identical queries and their near twins, offsets that start past the symbols'
+// first, an empty batch, and concurrent calls.
 bool test_pipeline()
 {
     std::mt19937_64 rng(17);
@@ -788,6 +789,41 @@ bool test_pipeline()
     fixture_queries(T, alpha, rng, 200000, off_l, sym_l);
     const auto want_l = oracle(off_l, sym_l);
 
+    // Runs of identical queries, shuffled, whose sorted gathers cross tiles and chunks: some of the queries above, and twins that share
+    // a packed prefix but not a length or the symbols past it, many times over; the longest few times.
+    std::vector<uint64_t> off_d(1, 0);
+    std::vector<uint16_t> sym_d;
+    {
+        std::vector<std::vector<uint16_t>> distinct;
+        for(idx_t i = 0; i < 40; ++i)
+            distinct.emplace_back(sym.begin() + off[i], sym.begin() + off[i + 1]);
+        const idx_t pos = rng() % (n - 20);
+        std::vector<uint16_t> P(T.begin() + pos, T.begin() + pos + 20);   // Longer than a key.
+        distinct.push_back(P);
+        P.back() = (P.back() == 1 ? 2 : 1);
+        distinct.push_back(P);
+        P.push_back(0);
+        distinct.push_back(P);
+        distinct.push_back({P[0], P[1], P[2]});
+        distinct.push_back({P[0], P[1], P[2], 0});
+
+        std::vector<const std::vector<uint16_t>*> runs;
+        for(const auto& x : distinct)
+            runs.insert(runs.end(), 400, &x);
+        const std::vector<uint16_t> long_a(sym.begin() + off[off.size() - 3], sym.begin() + off[off.size() - 2]);
+        const std::vector<uint16_t> long_b(sym.begin() + off[off.size() - 2], sym.end());
+        runs.insert(runs.end(), 3, &long_a);
+        runs.insert(runs.end(), 3, &long_b);
+        std::shuffle(runs.begin(), runs.end(), rng);
+        for(const auto* x : runs)
+        {
+            sym_d.insert(sym_d.end(), x->begin(), x->end());
+            off_d.push_back(sym_d.size());
+        }
+    }
+
+    const auto want_d = oracle(off_d, sym_d);
+
     // The most for a chunk picked by the brackets' source.
     for(const Gather g : {Gather::never, Gather::always})
     {
@@ -826,6 +862,7 @@ bool test_pipeline()
                                      + ", gather " + std::to_string(md.gather == Gather::always);
             if(!check_every_way(eng, off, sym, want, what) || !check_every_way(eng, off5, sym5, want, what + ", offsets from 5")
                 || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries")
+                || !check_every_way(eng, off_d, sym_d, want_d, what + ", runs of identical queries")
                 || (ch.min_queries == dflt.min_chunk_queries && !check_every_way(eng, off_l, sym_l, want_l, what + ", 200000 queries")))
                 return false;
 
