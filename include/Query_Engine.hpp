@@ -50,7 +50,7 @@ struct Query_Options
     idx_t spot = 100000;    // Random adjacent pairs of the suffix array spot-checked for order at load; `0` skips.
     idx_t stride = 32;  // Sample-table stride; `0` selects the direct mode.
     uint32_t key_words = 0; // 64-bit words per table key: 1, 2, or 4; `0` picks 2, or 4 for 4-byte symbols.
-    bool sort = false;  // Whether to sort every batch by its packed prefixes before searching.
+    bool sort = false;  // Whether to sort every batch by its packed prefixes before searching; gathering, identical queries then gather once.
     Gather gather = Gather::automatic;  // Where the two-phase search reads its brackets' suffix-array entries.
     idx_t gather_queries = idx_t(1) << 18;  // Queries whose brackets are gathered at a time, bounding the copies' device memory.
     idx_t chunk_queries = 0;    // Queries per chunk of a host-side batch, at most; `0` picks 2^18, or 2^24 if gathering.
@@ -69,6 +69,9 @@ struct Search_Buffers
     void* brackets = nullptr;   // The ranks that contain the queries' interval boundaries, two per query.
     void* sort_space = nullptr; // Scratch of the sort.
     std::size_t sort_bytes = 0;
+    uint32_t* heads = nullptr;  // Per position of the sorted queries, the first of its run of identical queries.
+    void* scan_space = nullptr; // Scratch of finding the runs' first positions.
+    std::size_t scan_bytes = 0;
 };
 
 

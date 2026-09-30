@@ -177,20 +177,72 @@ __global__ void table_kernel(const Packed_Prefix<W_>* const tab, const idx_t J, 
 }
 
 
-// Gathers into the windows `win` of a tile the suffix-array bytes that the
-// searches of its brackets `br[0, 2q)` probe, from the suffix array `SA`: each
-// bracket's as `window_of` places it, in slots of `wb` bytes. A warp gathers a
-// query's two brackets, 16 bytes a lane: all of it their union, or half of it
-// each bracket.
-__global__ void gather_kernel(const uint8_t* const SA, const Rank_Range* const br, const idx_t q, const idx_t wb, uint8_t* const win)
+// Writes into `heads[g]` the position `g` of a batch sorted by the packed
+// prefixes `keys` if its query differs from the one before it, and `0` if it
+// does not: in its length, its prefix, or its symbols past the prefix's `K`.
+// The queries are `sym[off[i] - off0, off[i + 1] - off0)`, position `g` of the
+// batch the query `ids[g]`. A maximum-scan of `heads` then gives every
+// position the first of its run of identical queries.
+template <typename T_sym_, idx_t W_>
+__global__ void head_kernel(const uint64_t* const off, const T_sym_* const sym, const uint64_t off0, const Packed_Prefix<W_>* const keys,
+                            const uint32_t* const ids, const idx_t q, uint32_t* const heads)
 {
-    const idx_t g = (idx_t(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
+    constexpr idx_t K = W_ * sizeof(uint64_t) / sizeof(T_sym_);   // Symbols per key.
+    for(idx_t g = idx_t(blockIdx.x) * blockDim.x + threadIdx.x; g < q; g += idx_t(gridDim.x) * blockDim.x)
+    {
+        bool same = false;
+        if(g > 0)
+        {
+            const idx_t i = ids[g], j = ids[g - 1];
+            const idx_t m = off[i + 1] - off[i];
+            same = (off[j + 1] - off[j] == m && keys[g] == keys[g - 1]);
+            for(idx_t x = K; same && x < m; ++x)
+                same = (sym[off[i] - off0 + x] == sym[off[j] - off0 + x]);
+        }
+
+        heads[g] = (same ? 0 : static_cast<uint32_t>(g));
+    }
+}
+
+
+// The maximum of two positions.
+struct Max_Position
+{
+    __device__ uint32_t operator()(const uint32_t a, const uint32_t b) const { return a > b ? a : b; }
+};
+
+
+// Returns the position whose gathered brackets serve the position `g` of a
+// batch, in the tile starting at `g0`: the first of `g`'s run of identical
+// queries, `heads[g]`, if in the tile, else the tile's first; `g` if `heads` is
+// null.
+__device__ inline idx_t gathered_at(const uint32_t* const heads, const idx_t g0, const idx_t g)
+{
+    return heads == nullptr ? g : (heads[g] > g0 ? heads[g] : g0);
+}
+
+
+// Gathers into the windows `win` of the tile of the positions `[g0, g0 + q)` of
+// a batch the suffix-array bytes that the searches of their brackets `br[2g]`
+// and `br[2g + 1]` probe, from the suffix array `SA`: each bracket's as
+// `window_of` places it, in slots of `wb` bytes. With the runs' first positions
+// `heads`, a run of identical queries gathers once in the tile. A warp gathers
+// a query's two brackets, 16 bytes a lane: all of it their union, or half of
+// it each bracket.
+__global__ void gather_kernel(const uint8_t* const SA, const Rank_Range* const br, const uint32_t* const heads, const idx_t g0, const idx_t q,
+                              const idx_t wb, uint8_t* const win)
+{
+    const idx_t t = (idx_t(blockIdx.x) * blockDim.x + threadIdx.x) >> 5;
     const unsigned lane = threadIdx.x & 31;
-    if(g >= q)
+    if(t >= q)
+        return;
+
+    const idx_t g = g0 + t;
+    if(gathered_at(heads, g0, g) != g)  // An earlier copy of the query in the tile gathers for it.
         return;
 
     const Rank_Range lo = br[2 * g], hi = br[2 * g + 1];
-    const Window w_lo = window_of(lo, hi, false, g, wb), w_hi = window_of(hi, lo, true, g, wb);
+    const Window w_lo = window_of(lo, hi, false, t, wb), w_hi = window_of(hi, lo, true, t, wb);
     const bool whole = (w_lo.dst == w_hi.dst);  // The union's slots, or no slot.
     const Window& w = (whole || lane < 16 ? w_lo : w_hi);
     const idx_t first = 16 * (whole ? lane : lane & 15), step = (whole ? 32 * 16 : 16 * 16);
@@ -210,11 +262,13 @@ __global__ void gather_kernel(const uint8_t* const SA, const Rank_Range* const b
 // `br` is not null, and all of `[0, n]` otherwise; the pair's searches then
 // share their early path. If `win` is not null, it holds the positions'
 // gathered brackets, in slots of `wb` bytes, which the searches read instead of
-// the suffix array.
+// the suffix array: a position's own, or those of the first of its run of
+// identical queries in the tile per `heads`, if not null.
 template <typename T_sym_>
 __global__ void search_kernel(const T_sym_* const T, const idx_t n, const uint8_t* const SA, const uint64_t* const off,
                               const T_sym_* const sym, const uint64_t off0, const uint32_t* const ids, const Rank_Range* const br,
-                              const idx_t g0, const idx_t q, const uint8_t* const win, const idx_t wb, SA_Interval* const out)
+                              const uint32_t* const heads, const idx_t g0, const idx_t q, const uint8_t* const win, const idx_t wb,
+                              SA_Interval* const out)
 {
     const idx_t t = idx_t(blockIdx.x) * blockDim.x + threadIdx.x;
     if(t >= 2 * q)
@@ -234,9 +288,9 @@ __global__ void search_kernel(const T_sym_* const T, const idx_t n, const uint8_
     {
         const Rank_Range r = br[2 * g + upper];
         low = r.first, len = r.last - r.first;
-        if(win != nullptr)
+        if(win != nullptr)  // An identical query's brackets are the same, and so are their windows.
         {
-            const Window w = window_of(r, br[2 * g + !upper], upper, t >> 1, wb);
+            const Window w = window_of(r, br[2 * g + !upper], upper, gathered_at(heads, g0, g) - g0, wb);
             if(w.dst != NO_SLOT)
                 src = win + w.dst, b0 = w.b0;
         }
@@ -283,10 +337,24 @@ std::size_t sort_bytes(const idx_t q, const uint32_t w)
 }
 
 
+// Returns the scratch bytes of finding the first positions of the runs of
+// identical queries in a sorted batch of `q`.
+std::size_t scan_bytes(const idx_t q)
+{
+    std::size_t bytes = 0;
+    CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+        nullptr, bytes,
+        static_cast<uint32_t*>(nullptr), static_cast<uint32_t*>(nullptr),
+        Max_Position{},
+        static_cast<int>(q)));
+    return bytes;
+}
+
+
 // Allocates into `sb` the buffers of a two-phase search of `cap` queries with
-// keys of `w` words, and of sorting them if `sort`: from the pool `pool` on the
-// stream `s` if the pool is not null, and directly otherwise. Returns the first
-// error.
+// keys of `w` words, and of sorting them and finding their runs if `sort`: from
+// the pool `pool` on the stream `s` if the pool is not null, and directly
+// otherwise. Returns the first error.
 cudaError_t allocate(Search_Buffers& sb, const idx_t cap, const uint32_t w, const bool sort, const cudaMemPool_t pool, const cudaStream_t s)
 {
     sb = Search_Buffers();
@@ -310,6 +378,9 @@ cudaError_t allocate(Search_Buffers& sb, const idx_t cap, const uint32_t w, cons
         alloc(sb.ids[0], cap * sizeof(uint32_t));
         alloc(sb.ids[1], cap * sizeof(uint32_t));
         alloc(sb.sort_space, sb.sort_bytes);
+        sb.scan_bytes = scan_bytes(cap);
+        alloc(sb.heads, cap * sizeof(uint32_t));
+        alloc(sb.scan_space, sb.scan_bytes);
     }
 
     return e;
@@ -320,7 +391,8 @@ cudaError_t allocate(Search_Buffers& sb, const idx_t cap, const uint32_t w, cons
 // directly otherwise.
 void release(Search_Buffers& sb, const bool pooled, const cudaStream_t s)
 {
-    for(void* const p : {sb.keys[0], sb.keys[1], static_cast<void*>(sb.ids[0]), static_cast<void*>(sb.ids[1]), sb.brackets, sb.sort_space})
+    for(void* const p : {sb.keys[0], sb.keys[1], static_cast<void*>(sb.ids[0]), static_cast<void*>(sb.ids[1]), sb.brackets, sb.sort_space,
+                         static_cast<void*>(sb.heads), sb.scan_space})
         if(p != nullptr)
             CUDA_CHECK(pooled ? cudaFreeAsync(p, s) : cudaFree(p));
 
@@ -333,7 +405,8 @@ void release(Search_Buffers& sb, const bool pooled, const cudaStream_t s)
 // `tab` of keys of `W_` words, and the buffers `sb`; sorting the batch by its
 // packed prefixes first if `sort`. If `win` is not null, the brackets of every
 // `tile` positions of the batch are gathered into it, in slots of `wb` bytes,
-// and searched there. Asynchronous on the stream `s`.
+// and searched there; sorted, a run of identical queries gathers once in a
+// tile. Asynchronous on the stream `s`.
 template <typename T_sym_, idx_t W_>
 void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool sort, const uint64_t* const off, const T_sym_* const sym,
                     const uint64_t off0, const idx_t q, SA_Interval* const out, const Search_Buffers& sb, uint8_t* const win,
@@ -374,6 +447,22 @@ void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool
     table_kernel<T_sym_, W_><<<grid_2q, BLOCK, 0, s>>>(tab.keys<W_>(), tab.size(), tab.stride(), idx.n(), off, sym, off0, k, id, q, br);
     CUDA_CHECK(cudaGetLastError());
 
+    // The runs of identical queries of a sorted batch, whose gathers are the same. Probed in place, they coalesce anyway.
+    const uint32_t* heads = nullptr;
+    if(sort && win != nullptr)
+    {
+        head_kernel<T_sym_, W_><<<grid_q, BLOCK, 0, s>>>(off, sym, off0, k, id, q, sb.heads);
+        CUDA_CHECK(cudaGetLastError());
+        std::size_t bytes = sb.scan_bytes;
+        CUDA_CHECK(cub::DeviceScan::InclusiveScan(
+            sb.scan_space, bytes,
+            sb.heads, sb.heads,
+            Max_Position{},
+            static_cast<int>(q), s)
+        );
+        heads = sb.heads;
+    }
+
     // A tile at a time: in the order of the batch, which sorted is that of the suffix array.
     const idx_t tile_q = (win != nullptr ? tile : q);
     for(idx_t g0 = 0; g0 < q; g0 += tile_q)
@@ -381,12 +470,12 @@ void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool
         const idx_t tq = std::min(tile_q, q - g0);
         if(win != nullptr)
         {
-            gather_kernel<<<static_cast<unsigned>((32 * tq + BLOCK - 1) / BLOCK), BLOCK, 0, s>>>(idx.sa(), br + 2 * g0, tq, wb, win);
+            gather_kernel<<<static_cast<unsigned>((32 * tq + BLOCK - 1) / BLOCK), BLOCK, 0, s>>>(idx.sa(), br, heads, g0, tq, wb, win);
             CUDA_CHECK(cudaGetLastError());
         }
 
         search_kernel<<<static_cast<unsigned>((2 * tq + BLOCK - 1) / BLOCK), BLOCK, 0, s>>>(idx.text<T_sym_>(), idx.n(), idx.sa(), off, sym,
-                                                                                          off0, id, br, g0, tq, win, wb, out);
+                                                                                          off0, id, br, heads, g0, tq, win, wb, out);
         CUDA_CHECK(cudaGetLastError());
     }
 }
@@ -561,8 +650,8 @@ void Query_Engine<T_sym_>::release_lanes()
             cudaStreamSynchronize(l.stream);
 
         for(void* const p : {l.space.keys[0], l.space.keys[1], static_cast<void*>(l.space.ids[0]), static_cast<void*>(l.space.ids[1]),
-                             l.space.brackets, l.space.sort_space, static_cast<void*>(l.off_d), static_cast<void*>(l.sym_d),
-                             static_cast<void*>(l.out_d)})
+                             l.space.brackets, l.space.sort_space, static_cast<void*>(l.space.heads), l.space.scan_space,
+                             static_cast<void*>(l.off_d), static_cast<void*>(l.sym_d), static_cast<void*>(l.out_d)})
             cudaFree(p);
 
         cudaFreeHost(l.off_h);
@@ -593,7 +682,7 @@ void Query_Engine<T_sym_>::search(const uint64_t* const off, const T_sym_* const
     if(!tab_.built())
     {
         const auto grid = static_cast<unsigned>((2 * q + BLOCK - 1) / BLOCK);
-        search_kernel<<<grid, BLOCK, 0, s>>>(idx_.text<T_sym_>(), idx_.n(), idx_.sa(), off, sym, off0, nullptr, nullptr, 0, q, nullptr, 0, out);
+        search_kernel<<<grid, BLOCK, 0, s>>>(idx_.text<T_sym_>(), idx_.n(), idx_.sa(), off, sym, off0, nullptr, nullptr, nullptr, 0, q, nullptr, 0, out);
         CUDA_CHECK(cudaGetLastError());
         return;
     }
