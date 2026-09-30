@@ -52,6 +52,8 @@ private:
 
     std::vector<std::string> drive_root_;   // Scratch roots (ideally one per NVMe) to stripe partitions across.
     std::string run_dir_;   // Run-scoped sub-directory path, created per each root.
+    std::string op_path_;   // Path to the run's output-file; empty for no output.
+    std::size_t op_bytes_;  // Bytes of the run's output.
     std::vector<std::size_t> root_of_;  // Scratch root of each partition's spill-files, as an index into `drive_root_`.
 
 
@@ -62,15 +64,23 @@ private:
 public:
 
     // Creates directories `<root>/<run_dir>` under each root in `drive_roots`,
-    // for a spill-store.
-    Spill_Store(std::vector<std::string> drive_roots, const std::string& run_dir);
+    // for a spill-store. The run writes its output of `op_bytes` bytes to the
+    // file at `op_path` once the inbox-files retire, alongside the content-
+    // files; or none, if `op_path` is empty.
+    Spill_Store(std::vector<std::string> drive_roots, const std::string& run_dir, const std::string& op_path, std::size_t op_bytes);
 
     // Stripes the partitions' spill-files across the scratch roots by their
     // filesystems' free space: largest first, each partition to the root whose
-    // filesystem has the most room left. The `p_id`'th partition's files take
-    // up at most `footprint[p_id]` bytes. Aborts unless each filesystem has
-    // room for its partitions' files. To be invoked before any file opens.
-    void stripe(const std::vector<std::size_t>& footprint);
+    // filesystem has the most room left. The `p_id`'th partition's content-
+    // files take up `content[p_id]` bytes, and its inbox-files at most
+    // `inbox[p_id]` bytes per generation-parity. Aborts if the filesystems
+    // cannot hold the spill-files even with `ram` bytes of the partitions' data
+    // held in RAM instead: past the initial ranking, whose messages fill a
+    // generation-parity's inbox-files, or at the output, which joins the
+    // content-files once the inbox-files retire. Warns if they may not, without
+    // RAM: with the spill-files at their largest, or at the output. To be
+    // invoked before any file opens.
+    void stripe(const std::vector<std::size_t>& content, const std::vector<std::size_t>& inbox, std::size_t ram);
 
     // Returns the path to the `p_id`'th partition's `role` file.
     std::string path(p_id_t p_id, Spill_Role role) const;

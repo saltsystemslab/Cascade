@@ -21,10 +21,10 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
     const auto p = P_cap_.size();
 
     // The partitions' spill-files are striped across the scratch before any of them opens.
-    std::vector<std::size_t> footprint(p);
+    std::vector<std::size_t> content(p), inbox(p);
     for(p_id_t p_id = 0; p_id < p; ++p_id)
-        footprint[p_id] = spill_footprint(P_cap_[p_id]);
-    spill_->stripe(footprint);
+        content[p_id] = content_footprint(P_cap_[p_id]), inbox[p_id] = inbox_footprint(P_cap_[p_id]);
+    spill_->stripe(content, inbox, plan.cap());
 
     for(std::size_t parity = 0; parity < 2; ++parity)   // Inbox-files are opened lazily, at their first write, and grow with their messages.
         msg_tgt_[parity].resize(p), msg_rank_[parity].resize(p),
@@ -38,11 +38,16 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
 }
 
 
-std::size_t Disk_Backend::spill_footprint(const idx_t cap)
+std::size_t Disk_Backend::content_footprint(const idx_t cap)
+{
+    return Direct_File::block_up(cap * sizeof(idx_t)) + Direct_File::block_up(cap * sizeof(p_sz_t));
+}
+
+
+std::size_t Disk_Backend::inbox_footprint(const idx_t cap)
 {
     const auto inbox_cap = cap + MSG_ALIGN; // As far as the inbox-files grow.
-    return Direct_File::block_up(cap * sizeof(idx_t)) + Direct_File::block_up(cap * sizeof(p_sz_t)) +
-            2 * (Direct_File::block_up(inbox_cap * sizeof(idx_t)) + Direct_File::block_up(inbox_cap * sizeof(msg_rank_t)));
+    return Direct_File::block_up(inbox_cap * sizeof(idx_t)) + Direct_File::block_up(inbox_cap * sizeof(msg_rank_t));
 }
 
 

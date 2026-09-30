@@ -18,6 +18,7 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const idx_t chun
     , key_ram_(P_cap.size(), 0)
     , force_spill_(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) != 0)
     , chunk_wise_(env::get_u64("GPU_SACA_CHUNK_PLAN").value_or(1) != 0)
+    , cap_(0)
     , data_resident_(0)
 {
     constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
@@ -27,6 +28,8 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const idx_t chun
         std::cerr << "The host memory-budget of " << GB(budget) << "GBs cannot fit the fixed requirement of " << GB(fixed_bytes) << "GBs. Aborting.\n";
         std::exit(EXIT_FAILURE);
     }
+
+    cap_ = (force_spill_ ? 0 : budget - fixed_bytes);
 
     for(std::size_t p_id = 0; p_id < P_cap.size(); ++p_id)
         chunk_c_[p_id] = (P_cap[p_id] + chunk_cap - 1) / chunk_cap;

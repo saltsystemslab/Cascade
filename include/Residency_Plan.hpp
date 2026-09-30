@@ -23,6 +23,7 @@ private:
     std::vector<idx_t> key_ram_;    // Count of each partition's leading chunks whose keys start in RAM.
     const bool force_spill_;    // Whether all data spills regardless of the budget: `GPU_SACA_FORCE_SPILL`.
     const bool chunk_wise_; // Whether the suffixes alone are placed, chunk-wise: `GPU_SACA_CHUNK_PLAN`, on by default.
+    std::size_t cap_;   // Bytes of host-memory for the partitions' data: the budget past the fixed allocation, or none if all data spills.
     std::size_t data_resident_; // Bytes of the partitions' data that are host-resident.
 
 
@@ -54,6 +55,10 @@ public:
 
     // Returns whether the suffixes alone are placed, chunk-wise.
     bool chunk_wise() const { return chunk_wise_; }
+
+    // Returns the bytes of host-memory for the partitions' data: the budget
+    // past the fixed allocation, or none if all data spills.
+    auto cap() const { return cap_; }
 
     // Returns the bytes of the partitions' data that are host-resident.
     auto data_resident() const { return data_resident_; }

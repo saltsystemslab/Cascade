@@ -57,18 +57,22 @@ private:
     // safe.
     void ensure_key(p_id_t p_id);
 
-    // Returns the bytes that the spill-files of a partition with capacity `cap`
-    // take up at most: its content-files', as preallocated, and its inbox-
-    // files' of both the generation-parities, grown to their capacities.
-    static std::size_t spill_footprint(idx_t cap);
+    // Returns the bytes that the content-files of a partition with capacity
+    // `cap` take up, as preallocated.
+    static std::size_t content_footprint(idx_t cap);
+
+    // Returns the bytes that the inbox-files of a partition with capacity `cap`
+    // take up at most for a generation-parity, grown to their capacities.
+    static std::size_t inbox_footprint(idx_t cap);
 
 public:
 
     // Constructs a disk-backend for partitions with capacities `P_cap`, in the
     // spill-store `spill`, striping the partitions' spill-files across its
-    // scratch by their footprints. The suffix-files of the partitions with
-    // suffixes spilled per the residency plan `plan` open upfront; the rest
-    // open lazily, at their first write.
+    // scratch by their footprints, with the host-memory of the residency plan
+    // `plan` holding some of their data instead. The suffix-files of the
+    // partitions with suffixes spilled per `plan` open upfront; the rest open
+    // lazily, at their first write.
     Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, const Residency_Plan& plan);
 
     Disk_Backend(const Disk_Backend&) = delete;
