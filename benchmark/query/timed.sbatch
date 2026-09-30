@@ -16,12 +16,13 @@
 #   OUT_DIR   default ${RESULTS_ROOT}/timed-<INDEX's name>-<UTC timestamp>
 #
 # Runs, most important first; TM_RUNS selects:
-#   main      ours in the direct mode and in two phases (stride 32, 2-word keys),
-#             and infini-gram's `_find_thread` from a pool of every core, its
-#             index placed as TM_IG_LOAD says; in TM_REPLICATES alternating
-#             processes of each
-#   batch     both, over present-pattern batches (m = 10) of TM_BATCHES queries;
-#             infini-gram also with a pool no larger than the batch's chunks
+#   main      ours in TM_MAIN_MODES, by default the direct mode and two phases
+#             (stride 32, 2-word keys), and infini-gram's `_find_thread` from a
+#             pool of every core, its index placed as TM_IG_LOAD says; in
+#             TM_REPLICATES alternating processes of each
+#   batch     both, over present-pattern batches (m = 10) of TM_BATCHES queries,
+#             ours in TM_BATCH_MODES; infini-gram also with a pool no larger
+#             than the batch's chunks
 #   ablation  ours over strides, key widths, and batch orders
 #   threads   infini-gram over pool sizes, on the TM_SWEEP workloads
 #   variants  on the TM_SWEEP workloads, infini-gram's own `find`, its
@@ -40,6 +41,12 @@
 #   TM_IG_LOAD      infini-gram's index in the main, batch, and thread runs: mmap,
 #                   mapped as its engine defaults to (default), or ram, read into
 #                   the heap
+#   TM_TEXT_RES     tier of our text: device (default) or pinned
+#   TM_SA_RES       tier of our suffix array: device (default) or pinned
+#   TM_MAIN_MODES   our modes of the main runs, as `query find` options; default
+#                   `--stride 0,32 --key-words 2 --sort 0`
+#   TM_BATCH_MODES  our modes of the batch runs; default `--stride 0,32 --key-words
+#                   2 --sort 0,1`
 #   TM_REPS         repetitions per batch; default 6 (infini-gram's driver drops the first)
 #   TM_REPLICATES   processes per engine of the main runs; default 3
 #   TM_BATCHES      default 1000,10000,100000,1000000,10000000,100000000
@@ -101,6 +108,10 @@ REPL="${TM_REPLICATES:-3}"
 BATCHES="${TM_BATCHES:-1000,10000,100000,1000000,10000000,100000000}"
 SWEEP="${TM_SWEEP:-present-m5,present-m10,present-m100,random-m5}"
 IG_LOAD="${TM_IG_LOAD:-mmap}"
+TEXT_RES="${TM_TEXT_RES:-device}"
+SA_RES="${TM_SA_RES:-device}"
+read -r -a MAIN_MODES <<< "${TM_MAIN_MODES:---stride 0,32 --key-words 2 --sort 0}"
+read -r -a BATCH_MODES <<< "${TM_BATCH_MODES:---stride 0,32 --key-words 2 --sort 0,1}"
 if [ "${IG_LOAD}" != mmap ] && [ "${IG_LOAD}" != ram ]; then
     echo "FATAL: TM_IG_LOAD must be mmap or ram, not '${IG_LOAD}'"
     exit 1
@@ -137,6 +148,10 @@ fi
     echo "ig_load=${IG_LOAD}"
     echo "gpu_numa_node=${node}"
     echo "ours_numactl=${NUMA[*]:-none}"
+    echo "ours_text_res=${TEXT_RES}"
+    echo "ours_sa_res=${SA_RES}"
+    echo "ours_main_modes=${MAIN_MODES[*]}"
+    echo "ours_batch_modes=${BATCH_MODES[*]}"
     echo "kernel=$(uname -r)"
     echo "cpu=$(lscpu | sed -n 's/^Model name: *//p')"
     echo "governor=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2> /dev/null || echo n/a)"
@@ -227,7 +242,7 @@ ours()
 {
     local log="$1" files="$2"
     shift 2
-    "${NUMA[@]}" "${B}/src/query" find --index "${SIDX}" --queries "${files}" --text-res device --sa-res device --reps "${REPS}" \
+    "${NUMA[@]}" "${B}/src/query" find --index "${SIDX}" --queries "${files}" --text-res "${TEXT_RES}" --sa-res "${SA_RES}" --reps "${REPS}" \
         --validate "$@" > "${log}" 2>&1
     local rc=$?
     stamp "ours ${log#"${OUT}"/}: rc=${rc}"
@@ -260,7 +275,7 @@ if want main; then
         mkdir -p "${d_ours}" "${d_ig}"
         cnt=()
         [ "${r}" -eq 1 ] && cnt=(--cnt-dir "${d_ours}")
-        ours "${d_ours}/find.log" "${files}" --stride 0,32 --key-words 2 --sort 0 "${cnt[@]}"
+        ours "${d_ours}/find.log" "${files}" "${MAIN_MODES[@]}" "${cnt[@]}"
         cnt=()
         [ "${r}" -eq 1 ] && cnt=(--cnt-dir "${d_ig}")
         ig "${d_ig}/${IG_LOAD}.log" "${files}" --mode direct --threads "${T_ALL}" --load "${IG_LOAD}" --prewarm 0 "${cnt[@]}"
@@ -279,7 +294,7 @@ if want batch; then
     done
 
     bfiles=$(for q in ${BATCHES//,/ }; do echo "${BQ}/batch-q${q}.qry"; done | paste -sd, -)
-    ours "${OUT}/ours/batch.log" "${bfiles}" --stride 0,32 --key-words 2 --sort 0,1
+    ours "${OUT}/ours/batch.log" "${bfiles}" "${BATCH_MODES[@]}"
     mkdir -p "${OUT}/ig/batch"
     ig "${OUT}/ig/batch/t${T_ALL}.log" "${bfiles}" --mode direct --threads "${T_ALL}" --load "${IG_LOAD}" --prewarm 0
     for q in ${BATCHES//,/ }; do
