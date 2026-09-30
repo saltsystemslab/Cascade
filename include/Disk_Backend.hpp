@@ -13,7 +13,9 @@
 #include <cstddef>
 #include <vector>
 #include <memory>
+#include <atomic>
 #include <mutex>
+#include <utility>
 
 namespace gpu_saca
 {
@@ -34,6 +36,9 @@ private:
     std::vector<Direct_File> msg_tgt_[2];   // Message-target files of the partitions' inboxes, per generation-parity.
     std::vector<Direct_File> msg_rank_[2];  // Message-rank files of the partitions' inboxes, per generation-parity.
     std::unique_ptr<std::once_flag[]> inbox_open_[2];   // Opening-flags of the partitions' inbox-files, per generation-parity.
+    std::unique_ptr<std::atomic<p_sz_t>[]> inbox_room_[2];  // Messages the partitions' inbox-files have room for, per generation-parity.
+    std::unique_ptr<std::mutex[]> inbox_grow_[2];   // Growth-locks of the partitions' inbox-files, per generation-parity.
+    static constexpr p_sz_t INBOX_GROWTH = 1 << 22; // Least messages an inbox-file's room grows by at once, if not by a quarter.
 
     Spill_Store* const spill_;  // Spill-store to open the deferred files from.
     const std::vector<idx_t> P_cap_;    // Partition capacities.
@@ -53,8 +58,8 @@ private:
     void ensure_key(p_id_t p_id);
 
     // Returns the bytes that the spill-files of a partition with capacity `cap`
-    // take up at most, as preallocated: its content-files', and its inbox-
-    // files' of both the generation-parities.
+    // take up at most: its content-files', as preallocated, and its inbox-
+    // files' of both the generation-parities, grown to their capacities.
     static std::size_t spill_footprint(idx_t cap);
 
 public:
@@ -73,8 +78,17 @@ public:
     // currently being written, unless already open. Thread-safe.
     void ensure_inbox(p_id_t p_id);
 
+    // Grows the `p_id`'th partition's inbox-files for the generation-parity
+    // currently being written to hold `msg_c` messages, unless they already
+    // do. To be invoked before writing past their room. Thread-safe.
+    void ensure_inbox_room(p_id_t p_id, p_sz_t msg_c);
+
     // Retires the partitions' inbox-files of both the generation-parities.
     void retire_inboxes();
+
+    // Returns the bytes that the spill-files take up now: of the content-files
+    // open, and of the inbox-files.
+    std::pair<std::size_t, std::size_t> allocated() const;
 
     // Returns the `p_id`'th partition's inbox message-target file for the
     // generation-parity currently being written.

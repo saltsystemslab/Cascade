@@ -661,6 +661,7 @@ void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s
     {
         const auto to_write = a_r - a_l;
         const auto write_off = msg_written_[parity][p_id].fetch_add(to_write, std::memory_order_relaxed);
+        disk_.ensure_inbox_room(p_id, write_off + to_write);
         disk_.msg_tgt(p_id).write_at(s.msg_target() + (a_l - base), to_write * sizeof(idx_t), write_off * sizeof(idx_t));
         disk_.msg_rank(p_id).write_at(s.msg_rank() + (a_l - base), to_write * sizeof(msg_rank_t), write_off * sizeof(msg_rank_t));
     }
@@ -702,6 +703,7 @@ void Partition_Backend::flush_overflow(const p_id_t p_id, const bool final)
 
     const auto parity = inbox_write_parity_;
     const auto write_off = msg_written_[parity][p_id].fetch_add(to_write, std::memory_order_relaxed);
+    disk_.ensure_inbox_room(p_id, write_off + to_write);
     disk_.msg_tgt(p_id).write_at(ov_tgt_[p_id], to_write * sizeof(idx_t), write_off * sizeof(idx_t));
     disk_.msg_rank(p_id).write_at(ov_rank_[p_id], to_write * sizeof(msg_rank_t), write_off * sizeof(msg_rank_t));
 
@@ -814,6 +816,7 @@ void Partition_Backend::log_barrier(const idx_t gen, const std::vector<idx_t>& A
 
     const auto content = content_ram_.load(std::memory_order_relaxed);
     const auto tail = tail_ram_.load(std::memory_order_relaxed);
+    const auto [content_files, inbox_files] = disk_.allocated();
     const auto transitions = [&](const Transition t){ return transition_c_[static_cast<std::size_t>(t)].exchange(0, std::memory_order_relaxed); };
     std::cerr   << "Barrier " << gen << " (" << active_c << " partitions active):\n"
                 << "\tmemory:  cap " << GB(budget_.cap()) << "GBs, fixed " << GB(fixed_) << "GBs; "
@@ -822,6 +825,8 @@ void Partition_Backend::log_barrier(const idx_t gen, const std::vector<idx_t>& A
                     << "RAM-chunks " << GB(content) << "GBs, " << GB(tail) << "GBs of them retired tails.\n"
                 << "\tinboxes: cohort's " << msg_ram << " messages in RAM, " << msg_disk << " on disk; "
                     << "message-chunks " << GB(budget_.used() - content) << "GBs charged, " << GB(budget_.pooled()) << "GBs of them pooled.\n"
+                << "\tscratch: spill-files take up " << GB(content_files + inbox_files) << "GBs: "
+                    << GB(content_files) << "GBs of content-files, " << GB(inbox_files) << "GBs of inbox-files.\n"
                 << "\ttransitions since the last barrier: " << transitions(Transition::ram_write) << " RAM-writes, "
                     << transitions(Transition::disk_write) << " disk-writes, " << transitions(Transition::admit) << " admissions, "
                     << transitions(Transition::admit_tail) << " retiring admissions, " << transitions(Transition::tail_mark) << " tail-marks, "
