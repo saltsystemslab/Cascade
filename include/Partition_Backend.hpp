@@ -73,9 +73,11 @@ private:
 
     // Whether the content's chunks change tiers within the generations:
     // admitted to RAM at their writebacks, and evicted to the disk for the
-    // claims on a full budget. Off while the residency-plan fixes the content's
-    // tiers.
-    static constexpr bool DYNAMIC_CONTENT = false;
+    // claims on a full budget. Set by `GPU_SACA_DYNAMIC_CONTENT`; else iff the
+    // residency-plan is chunk-wise.
+    const bool dynamic_;
+
+    bool frozen_;   // Whether the claims are all refused: past the last generation, as the concatenation claims no memory.
 
     std::size_t fixed_; // Bytes of the fixed host-allocation still held: `fixed_bytes` at construction, less the cap's raises.
     Host_Budget budget_;    // Host-memory budget of the RAM-tiers of the content and of the messages.
@@ -131,11 +133,15 @@ private:
         uint64_t read_prediction_;  // Bytes predicted at the last barrier for `disk_read_` at the next.
     // }
 
-    // Tier-shuffle of the tests: whole-chunk moves between the tiers at the
-    // barriers, which mix the tiers within partitions.
+    // Chaos of the tests: the tier-shuffle, with whole-chunk moves between the
+    // tiers at the barriers, which mix the tiers within partitions; and the
+    // refusals of claims at random.
     // {
         inline static const double TIER_SHUFFLE = env::get_f64("GPU_SACA_TIER_SHUFFLE").value_or(0.0);  // Probability of a cohort's chunk-field moving, per barrier.
         std::mt19937_64 shuffle_rng_;   // Source of the moves; seeded by `GPU_SACA_TIER_SHUFFLE_SEED`.
+        inline static const double CHARGE_REFUSAL = env::get_f64("GPU_SACA_CHARGE_REFUSAL").value_or(0.0);  // Probability of a claim's refusal.
+        const uint64_t refusal_seed_;   // Seed of the refusals: `GPU_SACA_CHARGE_REFUSAL_SEED`.
+        std::atomic<uint64_t> refusal_draw_;    // Count of the draws for refusals so far.
     // }
 
 
@@ -214,6 +220,10 @@ private:
     // the room freed. Returns whether charged. Thread-safe.
     bool charge(std::size_t b, Claim claim);
 
+    // Returns whether to refuse a claim at random, with probability
+    // `GPU_SACA_CHARGE_REFUSAL`, for the tests. Thread-safe.
+    bool refused();
+
     // Evicts a retired tail's chunk-field to the disk, and returns its bytes,
     // still charged; `0` if no tail is left to evict. Thread-safe.
     std::size_t evict_one();
@@ -273,8 +283,9 @@ public:
     // Returns the count of partitions.
     auto p() const { return p_; }
 
-    // Retires the inboxes of both the generation-parities. To be invoked once
-    // past the last generation, as no inbox is read or written onward.
+    // Retires the inboxes of both the generation-parities, and freezes the
+    // claims on the budget. To be invoked once past the last generation, as no
+    // inbox is read or written onward, and no memory is claimed.
     void retire_messages();
 
     // Retires the `p_id`'th partition's suffixes and keys.

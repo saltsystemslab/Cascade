@@ -26,6 +26,8 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , content_ram_(plan_.data_resident())
     , tail_ram_(0)
     , evict_cursor_(0)
+    , dynamic_(env::get_u64("GPU_SACA_DYNAMIC_CONTENT").value_or(plan_.chunk_wise()) != 0)
+    , frozen_(false)
     , fixed_(fixed_bytes)
     , budget_(budget - fixed_bytes, plan_.force_spill())
     , msg_chunk_cap_(chunk_cap / MSG_CHUNKS_PER_SLAB)
@@ -41,6 +43,8 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     , disk_read_(0)
     , read_prediction_(0)
     , shuffle_rng_(env::get_u64("GPU_SACA_TIER_SHUFFLE_SEED").value_or(1))
+    , refusal_seed_(env::get_u64("GPU_SACA_CHARGE_REFUSAL_SEED").value_or(1))
+    , refusal_draw_(0)
 {
     CUDA_CHECK(pinned_allocate_host(msg_off_, p_ * p_));
     CUDA_CHECK(pinned_allocate_host(active_slot_, p_));
@@ -99,6 +103,8 @@ std::size_t Partition_Backend::fixed_budget(const p_id_t p)
 
 void Partition_Backend::retire_messages()
 {
+    frozen_ = true; // No memory is claimed onward either, so nothing is evicted, nor admitted.
+
     // No inbox is read or written onward: return the RAM-parts' memory, and the disk-parts' scratch-space.
     for(std::size_t parity = 0; parity < 2; ++parity)
         for(auto& in : ram_inbox_[parity])
@@ -380,7 +386,14 @@ std::tuple<Partition_Backend::Field, p_id_t, idx_t> Partition_Backend::tier_entr
 
 bool Partition_Backend::charge(const std::size_t b, const Claim claim)
 {
-    if(!DYNAMIC_CONTENT)    // The content's tiers stay as planned, and the messages take free room only.
+#ifdef TESTS
+    if(refused())
+        return false;
+#endif
+    if(frozen_)
+        return false;
+
+    if(!dynamic_)   // The content's tiers stay as planned, and the messages take free room only.
         return claim == Claim::message && budget_.try_charge(b);
 
     if(budget_.try_charge(b))
@@ -403,6 +416,23 @@ bool Partition_Backend::charge(const std::size_t b, const Claim claim)
 
     budget_.uncharge(got >= b ? got - b : got); // The claim keeps what it needs; the rest frees up.
     return got >= b;
+}
+
+
+bool Partition_Backend::refused()
+{
+    if(CHARGE_REFUSAL <= 0.0)
+        return false;
+
+    const auto mix = [](uint64_t z) // SplitMix64's finalizer, over the draws' sequence.
+    {
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    };
+
+    const auto x = mix(refusal_seed_ + refusal_draw_.fetch_add(1, std::memory_order_relaxed) * 0x9E3779B97F4A7C15ull);
+    return static_cast<double>(x >> 11) * 0x1.0p-53 < CHARGE_REFUSAL;   // A uniform draw from `[0, 1)`.
 }
 
 

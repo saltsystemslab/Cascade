@@ -52,6 +52,9 @@ public:
     // RAM-tiers then get no budget either.
     bool force_spill() const { return force_spill_; }
 
+    // Returns whether the suffixes alone are placed, chunk-wise.
+    bool chunk_wise() const { return chunk_wise_; }
+
     // Returns the bytes of the partitions' data that are host-resident.
     auto data_resident() const { return data_resident_; }
 };
