@@ -7,6 +7,7 @@
 #include "Direct_File.hpp"
 #include "types.hpp"
 
+#include <cstddef>
 #include <vector>
 #include <string>
 
@@ -51,6 +52,7 @@ private:
 
     std::vector<std::string> drive_root_;   // Scratch roots (ideally one per NVMe) to stripe partitions across.
     std::string run_dir_;   // Run-scoped sub-directory path, created per each root.
+    std::vector<std::size_t> root_of_;  // Scratch root of each partition's spill-files, as an index into `drive_root_`.
 
 
     // Returns the file-name suffix for spill-role `role`.
@@ -62,6 +64,13 @@ public:
     // Creates directories `<root>/<run_dir>` under each root in `drive_roots`,
     // for a spill-store.
     Spill_Store(std::vector<std::string> drive_roots, const std::string& run_dir);
+
+    // Stripes the partitions' spill-files across the scratch roots by their
+    // filesystems' free space: largest first, each partition to the root whose
+    // filesystem has the most room left. The `p_id`'th partition's files take
+    // up at most `footprint[p_id]` bytes. Aborts unless each filesystem has
+    // room for its partitions' files. To be invoked before any file opens.
+    void stripe(const std::vector<std::size_t>& footprint);
 
     // Returns the path to the `p_id`'th partition's `role` file.
     std::string path(p_id_t p_id, Spill_Role role) const;

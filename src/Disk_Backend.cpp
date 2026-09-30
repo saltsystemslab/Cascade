@@ -17,6 +17,13 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
     , read_parity_(read_parity(0))
 {
     const auto p = P_cap_.size();
+
+    // The partitions' spill-files are striped across the scratch before any of them opens.
+    std::vector<std::size_t> footprint(p);
+    for(p_id_t p_id = 0; p_id < p; ++p_id)
+        footprint[p_id] = spill_footprint(P_cap_[p_id]);
+    spill_->stripe(footprint);
+
     for(std::size_t parity = 0; parity < 2; ++parity)   // Inbox-files are opened lazily, at their first write.
         msg_tgt_[parity].resize(p), msg_rank_[parity].resize(p),
         inbox_open_[parity] = std::make_unique<std::once_flag[]>(p);
@@ -24,6 +31,14 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
     for(p_id_t p_id = 0; p_id < p; ++p_id)  // The suffix-files with chunks spilled open upfront, off the scatter's path.
         if(plan.suf_ram(p_id) < plan.chunk_c(p_id))
             ensure_suf(p_id);
+}
+
+
+std::size_t Disk_Backend::spill_footprint(const idx_t cap)
+{
+    const auto inbox_cap = cap + MSG_ALIGN; // As the inbox-files preallocate.
+    return Direct_File::block_up(cap * sizeof(idx_t)) + Direct_File::block_up(cap * sizeof(p_sz_t)) +
+            2 * (Direct_File::block_up(inbox_cap * sizeof(idx_t)) + Direct_File::block_up(inbox_cap * sizeof(msg_rank_t)));
 }
 
 
