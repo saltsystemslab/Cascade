@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <climits>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -741,9 +742,9 @@ bool test_gpu_find()
 // Checks the pipeline on batches of many chunks, in the direct mode and in two
 // phases, sorted and not, and gathered in tiles that cross chunks: chunks
 // bounded by their queries and by their symbols, as the most for a chunk and as
-// its share of a batch split across the streams; queries longer than a chunk,
-// empty queries, offsets that start past the symbols' first, an empty batch,
-// and concurrent calls.
+// its share of a batch split across the streams, or whole if gathering; the
+// most's defaults; queries longer than a chunk, empty queries, offsets that
+// start past the symbols' first, an empty batch, and concurrent calls.
 bool test_pipeline()
 {
     std::mt19937_64 rng(17);
@@ -787,6 +788,18 @@ bool test_pipeline()
     fixture_queries(T, alpha, rng, 200000, off_l, sym_l);
     const auto want_l = oracle(off_l, sym_l);
 
+    // The most for a chunk picked by the brackets' source.
+    for(const Gather g : {Gather::never, Gather::always})
+    {
+        Query_Options opt;
+        opt.gather = g;
+        Query_Engine<uint16_t> eng;
+        CHECK(eng.load(dir.string(), opt, err), "%s", err.c_str());
+        const bool big = (g == Gather::always);
+        CHECK(eng.options().chunk_queries == (idx_t(1) << (big ? 24 : 18)) && eng.options().chunk_symbols == (idx_t(1) << (big ? 28 : 24)),
+              "chunks of gathered brackets must default to 2^24 queries and 2^28 symbols, others to 2^18 and 2^24");
+    }
+
     // The most for a chunk, and the least of its share of a batch.
     struct Chunk { idx_t queries, symbols, min_queries, min_symbols; };
     struct Mode { idx_t stride; uint32_t key_words; bool sort; Gather gather; };
@@ -807,9 +820,10 @@ bool test_pipeline()
                              Mode{16, 2, true, Gather::always}})
         {
             CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s", err.c_str());
-            const std::string what = "chunks of up to " + std::to_string(ch.queries) + " queries and " + std::to_string(ch.symbols) + " symbols, of at least "
-                                     + std::to_string(ch.min_queries) + " and " + std::to_string(ch.min_symbols) + ", stride " + std::to_string(md.stride)
-                                     + ", sort " + std::to_string(md.sort) + ", gather " + std::to_string(md.gather == Gather::always);
+            const std::string what = "chunks of up to " + std::to_string(eng.options().chunk_queries) + " queries and "
+                                     + std::to_string(eng.options().chunk_symbols) + " symbols, of at least " + std::to_string(ch.min_queries) + " and "
+                                     + std::to_string(ch.min_symbols) + ", stride " + std::to_string(md.stride) + ", sort " + std::to_string(md.sort)
+                                     + ", gather " + std::to_string(md.gather == Gather::always);
             if(!check_every_way(eng, off, sym, want, what) || !check_every_way(eng, off5, sym5, want, what + ", offsets from 5")
                 || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries")
                 || (ch.min_queries == dflt.min_chunk_queries && !check_every_way(eng, off_l, sym_l, want_l, what + ", 200000 queries")))
@@ -888,11 +902,14 @@ bool test_gpu_rejects()
     Query_Engine<uint8_t> narrow;
     CHECK(!narrow.load(dir.string(), Query_Options{}, err), "a symbol-width mismatch must be rejected");
     CHECK(!eng.load(dir.string(), Query_Options{Residency::pageable, Residency::device, 0}, err), "a host-only placement must be rejected");
-    for(const int k : {0, 1, 2, 3})
+    for(const int k : {0, 1, 2})
     {
         Query_Options opt;
-        (k == 0 ? opt.chunk_queries : (k == 1 ? opt.chunk_symbols : (k == 2 ? opt.min_chunk_queries : opt.min_chunk_symbols))) = 0;
-        CHECK(!eng.load(dir.string(), opt, err), "a chunking option of 0 must be rejected");
+        if(k == 0)
+            opt.chunk_queries = idx_t(INT_MAX) + 1;
+        else
+            (k == 1 ? opt.min_chunk_queries : opt.min_chunk_symbols) = 0;
+        CHECK(!eng.load(dir.string(), opt, err), "chunks of over INT_MAX queries, and least shares of 0, must be rejected");
     }
 
     {

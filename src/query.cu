@@ -45,10 +45,11 @@ R"(Usage:
       device memory, and end to end, from host memory through the pipeline, both
       pinned and pageable. Reports the load, transfer, search, and end-to-end
       times, and the counts' hash. The pipeline streams chunks of up to C
-      queries (default 2^18) of up to Y symbols (default 2^24) in all, two per
-      stream when their shares of the batch are at least C' queries (default
-      2^16) or Y' symbols (default 2^22); its intervals must equal those from
-      device memory. R is `device` (default) or `pinned`; --spot sets the
+      queries (default 2^18, or 2^24 if gathering at load) of up to Y symbols
+      (default 2^24, or 2^28) in all, two per stream when their shares of the
+      batch are at least C' queries (default 2^16) or Y' symbols (default
+      2^22), and whole chunks if gathering; its intervals must equal those
+      from device memory. R is `device` (default) or `pinned`; --spot sets the
       suffix-array order spot-checks at load (default 100000). The search runs
       in two phases over a sample table of stride S (default 32; 0 selects the
       direct mode) with keys of W words (1, 2, or 4; default 2, or 4 for 4-byte

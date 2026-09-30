@@ -53,9 +53,9 @@ struct Query_Options
     bool sort = false;  // Whether to sort every batch by its packed prefixes before searching.
     Gather gather = Gather::automatic;  // Where the two-phase search reads its brackets' suffix-array entries.
     idx_t gather_queries = idx_t(1) << 18;  // Queries whose brackets are gathered at a time, bounding the copies' device memory.
-    idx_t chunk_queries = idx_t(1) << 18;   // Queries per chunk of a host-side batch, at most.
-    idx_t chunk_symbols = idx_t(1) << 24;   // Symbols per chunk of a host-side batch, at most; a longer query is a chunk of its own.
-    idx_t min_chunk_queries = idx_t(1) << 16;   // Least queries of a chunk's share of a host-side batch, which splits into two chunks per stream.
+    idx_t chunk_queries = 0;    // Queries per chunk of a host-side batch, at most; `0` picks 2^18, or 2^24 if gathering.
+    idx_t chunk_symbols = 0;    // Symbols per chunk, at most; `0` picks 2^24, or 2^28 if gathering. A longer query is a chunk of its own.
+    idx_t min_chunk_queries = idx_t(1) << 16;   // Least queries of a chunk's share of a host-side batch, which splits into two chunks per stream unless gathering.
     idx_t min_chunk_symbols = idx_t(1) << 22;   // Least symbols of a chunk's share.
 };
 
@@ -162,10 +162,12 @@ public:
     // through the device in chunks, `CHUNKS_PER_STREAM` per stream: a chunk
     // ends at its share of the batch's queries or of its symbols, whichever
     // comes first, a share being no less than the options' least for a chunk
-    // and no more than their most. A batch in pinned memory is transferred
-    // directly, its chunks enqueued ahead from the calling thread; one with an
-    // array in pageable memory goes through pinned staging, from a thread per
-    // stream. Concurrent calls run one after another.
+    // and no more than their most. A batch whose brackets are gathered takes
+    // chunks of the most instead: its gathers gain more from sorting more
+    // queries together than from chunks overlapping. A batch in pinned memory
+    // is transferred directly, its chunks enqueued ahead from the calling
+    // thread; one with an array in pageable memory goes through pinned staging,
+    // from a thread per stream. Concurrent calls run one after another.
     void find(const uint64_t* off, const T_sym_* sym, idx_t q, SA_Interval* out) const;
 
     // Checks the intervals `I[0, q)` of the queries `sym[off[i], off[i + 1])`

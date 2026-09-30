@@ -435,9 +435,9 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
         return false;
     }
 
-    if(opt.chunk_queries == 0 || opt.chunk_queries > INT_MAX || opt.chunk_symbols == 0 || opt.min_chunk_queries == 0 || opt.min_chunk_symbols == 0)
+    if(opt.chunk_queries > INT_MAX || opt.min_chunk_queries == 0 || opt.min_chunk_symbols == 0)
     {
-        err = "a chunk needs 1 to " + std::to_string(INT_MAX) + " queries and room for a symbol, and its least share a query and a symbol";
+        err = "a chunk takes at most " + std::to_string(INT_MAX) + " queries, and its least share a query and a symbol";
         return false;
     }
 
@@ -463,7 +463,13 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
         return false;
 
     opt_ = opt;
-    if(!configure(opt.stride, opt.key_words, opt.sort, opt.gather, err) || !allocate_lanes(err))
+    const bool configured = configure(opt.stride, opt.key_words, opt.sort, opt.gather, err);
+    if(opt_.chunk_queries == 0) // Gathers gain from sorting large chunks.
+        opt_.chunk_queries = idx_t(1) << (opt_.gather == Gather::always ? 24 : 18);
+    if(opt_.chunk_symbols == 0)
+        opt_.chunk_symbols = idx_t(1) << (opt_.gather == Gather::always ? 28 : 24);
+
+    if(!configured || !allocate_lanes(err))
     {
         release_lanes();
         tab_.release();
@@ -642,10 +648,12 @@ void Query_Engine<T_sym_>::find(const uint64_t* const off, const T_sym_* const s
     std::lock_guard<std::mutex> guard(find_lock_);
 
     // The chunks: a chunk ends at the first of its share of the batch's queries and of its symbols, a share being at least the
-    // options' least for a chunk, and at most their most; a query longer than a chunk's share is a chunk of its own.
+    // options' least for a chunk, and at most their most; a query longer than a chunk's share is a chunk of its own. Gathered
+    // brackets take the most: sorted together, more queries gather denser.
     const idx_t chunk_c = CHUNKS_PER_STREAM * STREAM_C, sym_c = off[q] - off[0];
-    const idx_t share_q = std::min(opt_.chunk_queries, std::max(opt_.min_chunk_queries, (q + chunk_c - 1) / chunk_c));
-    const idx_t share_s = std::min(opt_.chunk_symbols, std::max(opt_.min_chunk_symbols, (sym_c + chunk_c - 1) / chunk_c));
+    const bool whole = (window_bytes_ > 0);
+    const idx_t share_q = (whole ? opt_.chunk_queries : std::min(opt_.chunk_queries, std::max(opt_.min_chunk_queries, (q + chunk_c - 1) / chunk_c)));
+    const idx_t share_s = (whole ? opt_.chunk_symbols : std::min(opt_.chunk_symbols, std::max(opt_.min_chunk_symbols, (sym_c + chunk_c - 1) / chunk_c)));
     std::vector<std::pair<idx_t, idx_t>> chunk;
     for(idx_t a = 0; a < q; )
     {
