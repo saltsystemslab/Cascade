@@ -288,6 +288,12 @@ public:
     // inbox is read or written onward, and no memory is claimed.
     void retire_messages();
 
+    // Retires the `p_id`'th partition's inbox for the current generation, once
+    // its slabs have all read it: its disk-part's files empty, so that their
+    // space frees up before the generation-parity is written again. Thread-
+    // safe for distinct partitions.
+    void retire_inbox(const p_id_t p_id) { disk_.retire_inbox(p_id); }
+
     // Retires the `p_id`'th partition's `c`'th chunk: releases the memory of
     // its RAM-resident fields, and returns their charges. To be invoked once
     // the chunk is read for the last time, with the claims frozen, so that no

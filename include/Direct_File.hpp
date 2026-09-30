@@ -62,6 +62,9 @@ public:
     // Preallocates the file to (block-rounded) `bytes`.
     void preallocate(std::size_t bytes);
 
+    // Empties the file, releasing its space; the file stays open.
+    void truncate();
+
     // Reads `bytes`-many bytes from the file-offset `off` into `buf`. `off` and
     // `buf` must be `DISK_BLOCK`-aligned, and `buf` must have `block_up(bytes)`
     // bytes of capacity, at least.

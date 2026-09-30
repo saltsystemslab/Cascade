@@ -739,13 +739,19 @@ void Partition_Backend::open_generation(const idx_t gen, const std::vector<idx_t
             std::cerr << "RAM-part of inbox " << p_id << " was left unread at the preceding generation. Aborting.\n";
             std::exit(EXIT_FAILURE);
         }
+
+        if(disk_.inbox_room(p_id) > 0)
+        {
+            std::cerr << "Disk-part of inbox " << p_id << " was left unretired at the preceding generation. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
 #endif
         release_inbox(in);
         msg_count_[parity][p_id] = 0, msg_written_[parity][p_id] = 0, msg_sum_[parity][p_id] = 0;
         ov_sz_[p_id] = 0;
 
         if(Active_sz[p_id] == 0)    // The partition is not processed at this generation, so its inbox is never read.
-            release_inbox(ram_inbox_[inbox_read_parity_][p_id].unwrap());
+            release_inbox(ram_inbox_[inbox_read_parity_][p_id].unwrap()), disk_.retire_inbox(p_id);
     }
 }
 

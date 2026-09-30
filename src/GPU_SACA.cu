@@ -1307,8 +1307,10 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
                         if(prev == 1)   // Last slab staged for this partition; chunked-assembly is ready for the device.
                         {
+                            const auto p_id = s->p_id();    // Read before the assembly, `s` in it, leaves for the device.
                             R.enqueue(&p_assembly);
                             admit.signal(p_assembly.slab.size());   // These slabs are guaranteed to return to the free-pool `F`, so early signalling is safe.
+                            backend_->retire_inbox(p_id);   // Its slabs have all read the inbox: the disk-part's space frees up.
                         }
                     }
                 }

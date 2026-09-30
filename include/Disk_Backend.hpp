@@ -83,6 +83,16 @@ public:
     // do. To be invoked before writing past their room. Thread-safe.
     void ensure_inbox_room(p_id_t p_id, p_sz_t msg_c);
 
+    // Returns the messages that the `p_id`'th partition's inbox-files for the
+    // generation-parity currently being written have room for.
+    p_sz_t inbox_room(const p_id_t p_id) const { return inbox_room_[write_parity_][p_id].load(std::memory_order_relaxed); }
+
+    // Retires the `p_id`'th partition's inbox for the current generation, once
+    // read whole: empties its inbox-files, so that their space frees up before
+    // the generation-parity is written again. Thread-safe for distinct
+    // partitions.
+    void retire_inbox(p_id_t p_id);
+
     // Retires the partitions' inbox-files of both the generation-parities.
     void retire_inboxes();
 

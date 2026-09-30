@@ -105,6 +105,14 @@ void Disk_Backend::ensure_inbox_room(const p_id_t p_id, const p_sz_t msg_c)
 }
 
 
+void Disk_Backend::retire_inbox(const p_id_t p_id)
+{
+    const auto parity = read_parity_;
+    msg_tgt_[parity][p_id].truncate(), msg_rank_[parity][p_id].truncate();  // No-op for inbox-files never opened.
+    inbox_room_[parity][p_id].store(0, std::memory_order_relaxed);  // Written again from empty, two generations on.
+}
+
+
 void Disk_Backend::retire_inboxes()
 {
     for(std::size_t parity = 0; parity < 2; ++parity)
