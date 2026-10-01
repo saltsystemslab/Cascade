@@ -12,7 +12,7 @@
 namespace gpu_saca::test
 {
 
-bool validate_partition_contents(const idx_t n, const idx_t ell, const p_id_t* const P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend)
+bool validate_partition_contents(const idx_t n, const idx_t ell, const Partition_ID_Map& P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend)
 {
     const auto p_ = P_sz.size();
 

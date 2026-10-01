@@ -5,6 +5,7 @@
 
 
 #include "types.hpp"
+#include "Partition_ID_Map.hpp"
 #include "cross-compile.hpp"
 
 #include <iostream>
@@ -91,7 +92,7 @@ CUDA_SPECIFIER inline idx_t retag(const idx_t w, const idx_t tag) { return pack(
 // tag-values for sources lying past the text's end. Reserved value decreases as
 // the source runs farther past, ordering the shorter of two such sources first.
 // In absence of a text-terminator, this keeps the ranking prefix-aware.
-inline idx_t fwd_tag(const p_id_t* const P_id, const idx_t tgt, const idx_t n, const idx_t ell)
+inline idx_t fwd_tag(const Partition_ID_Map& P_id, const idx_t tgt, const idx_t n, const idx_t ell)
 { return tgt < n ? static_cast<idx_t>(P_id[tgt]) + ell : (n + ell - 1 - tgt); }
 
 // Returns the suffix-index held in word `w`.

@@ -14,7 +14,7 @@
 namespace gpu_saca::test
 {
 
-bool validate_coherent_targets(const idx_t j_1, const idx_t r_1, const idx_t j_2, const idx_t r_2, const idx_t n, const idx_t stride, const idx_t ell, const p_id_t* const P_id)
+bool validate_coherent_targets(const idx_t j_1, const idx_t r_1, const idx_t j_2, const idx_t r_2, const idx_t n, const idx_t stride, const idx_t ell, const Partition_ID_Map& P_id)
 {
     const auto src_1 = bit_layout::suffix_of(j_1) + stride; // Secondary-source of `j_1`.
     const auto src_2 = bit_layout::suffix_of(j_2) + stride; // Secondary-source of `j_2`.
@@ -32,7 +32,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
 
     const auto n = self->n_;
     const auto ctx = self->ctx_;
-    const auto* const P_id = self->P_id;
+    const auto& P_id = self->P_id;
     const auto p_id = s.p_id();
     const auto P_sz_max = *std::max_element(self->P_cap.cbegin(), self->P_cap.cend());
 
@@ -169,7 +169,7 @@ uint64_t message_checksum(const idx_t* const tgt, const msg_rank_t* const rank, 
 }
 
 
-bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* const P_id, const idx_t n)
+bool validate_inbox_routing(const Staging_Slab& s, const Partition_ID_Map& P_id, const idx_t n)
 {
     bool is_valid = true;
 

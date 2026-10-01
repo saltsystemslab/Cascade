@@ -6,6 +6,7 @@
 
 #include "types.hpp"
 #include "Packed_Prefix.hpp"
+#include "Partition_ID_Map.hpp"
 #include "Partition_Backend.hpp"
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
@@ -69,7 +70,7 @@ private:
 
     std::vector<Pivot_Key> pivots;  // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
-    p_id_t* P_id;   // Partition-IDs of the suffixes.
+    Partition_ID_Map P_id;  // Partition-IDs of the suffixes.
 
     std::vector<idx_t> P_cap;   // Full initial sizes of the partitions.
     std::vector<idx_t> Active_sz;   // Active-set sizes of the suffix partitions.

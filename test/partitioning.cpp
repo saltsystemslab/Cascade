@@ -3,16 +3,14 @@
 
 #include "omp.h"
 
-#include <limits>
 #include <cstring>
-#include <algorithm>
 
 
 namespace gpu_saca::test
 {
 
 template <typename T_sym_>
-bool validate_partition_IDs(const T_sym_* const T, const idx_t n, const std::vector<Pivot_Key>& X, const p_id_t* const P_id)
+bool validate_partition_IDs(const T_sym_* const T, const idx_t n, const std::vector<Pivot_Key>& X, const Partition_ID_Map& P_id)
 {
     const p_id_t p = X.size() + 1;  // Number of partitions.
     bool valid = true;
@@ -96,9 +94,10 @@ T_sym_ universe_split_threshold(const T_sym_* T, const std::size_t n)
 
 
 // Template instantiations for the required instances.
-template bool validate_partition_IDs(const uint8_t*, idx_t, const std::vector<Pivot_Key>&, const p_id_t*);
-template bool validate_partition_IDs(const uint16_t*, idx_t, const std::vector<Pivot_Key>&, const p_id_t*);
-template bool validate_partition_IDs(const uint32_t*, idx_t, const std::vector<Pivot_Key>&, const p_id_t*);
+
+template bool validate_partition_IDs(const uint8_t*, idx_t, const std::vector<Pivot_Key>&, const Partition_ID_Map&);
+template bool validate_partition_IDs(const uint16_t*, idx_t, const std::vector<Pivot_Key>&, const Partition_ID_Map&);
+template bool validate_partition_IDs(const uint32_t*, idx_t, const std::vector<Pivot_Key>&, const Partition_ID_Map&);
 
 template uint8_t    universe_split_threshold(const uint8_t*, std::size_t);
 template uint16_t   universe_split_threshold(const uint16_t*, std::size_t);

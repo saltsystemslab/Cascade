@@ -6,6 +6,7 @@
 
 #include "types.hpp"
 #include "Packed_Prefix.hpp"
+#include "Partition_ID_Map.hpp"
 #include "Partition_Backend.hpp"
 #include "Staging_Slab.hpp"
 #include "bit-layout.hpp"
@@ -30,7 +31,7 @@ namespace gpu_saca::test
 // defined by the pivots `X`, match to the partition-IDs computed at the CPU-
 // side as reference.
 template <typename T_sym_>
-bool validate_partition_IDs(const T_sym_* T, idx_t n, const std::vector<Pivot_Key>& X, const p_id_t* P_id);
+bool validate_partition_IDs(const T_sym_* T, idx_t n, const std::vector<Pivot_Key>& X, const Partition_ID_Map& P_id);
 
 /*
 // Returns `true` iff the keys in `key` and their corresponding suffixes in
@@ -56,14 +57,14 @@ T_sym_ universe_split_threshold(const T_sym_* T, idx_t n);
 // (1) whether it landed in the partition expected by `P_id`, ie `P_id[s] == p`;
 // (2) that it is not duplicated anywhere; and (3) its forward tag is the
 // expected one.
-bool validate_partition_contents(idx_t n, idx_t ell, const p_id_t* P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
+bool validate_partition_contents(idx_t n, idx_t ell, const Partition_ID_Map& P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
 
 // Returns `true` iff the target coherence invariant holds for the suffixes
 // `j_1` and `j_2` with respective local ranks `r_1` and `r_2`: if tied, their
 // secondary-sources, `stride` ahead, must lie in the same partition as per the
 // partition-ID map `P_id`. There are `n` total suffixes, and the initial-
 // ranking context-size is `ell`. The suffixes must be from the same partition.
-bool validate_coherent_targets(idx_t j_1, idx_t r_1, idx_t j_2, idx_t r_2, idx_t n, idx_t stride, idx_t ell, const p_id_t* P_id);
+bool validate_coherent_targets(idx_t j_1, idx_t r_1, idx_t j_2, idx_t r_2, idx_t n, idx_t stride, idx_t ell, const Partition_ID_Map& P_id);
 
 // Returns `true` iff `SA` is a permutation of `[0, n)`.
 bool is_permutation(const idx_t* SA, idx_t n);
@@ -97,7 +98,7 @@ uint64_t message_checksum(const idx_t* tgt, const msg_rank_t* rank, idx_t n);
 // corresponding partition, i.e. their destination partition-IDs, computed from
 // `P_id`, equal to the slab's partition-ID. There are `n` possible recipient
 // suffixes.
-bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* P_id, idx_t n);
+bool validate_inbox_routing(const Staging_Slab& s, const Partition_ID_Map& P_id, idx_t n);
 
 // Returns `true` if the target coherence invariant holds for the packed keys
 // (in device) `key_1` and `key_2`. The corresponding suffixes must be from the
