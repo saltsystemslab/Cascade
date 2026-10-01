@@ -563,17 +563,30 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         // narrowest persisted element type (`p_sz_t`) governs it.
         static_assert(sizeof(p_sz_t) <= sizeof(idx_t) && sizeof(p_sz_t) <= sizeof(Prefix_Key), "`p_sz_t` must be the narrowest persisted element type.");
 
+        // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
+        constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
+        constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
+        static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
+        static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
+
         if(P_sz_max >= CHUNK_CAP)
             chunk_cap_ = CHUNK_CAP;
         else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
-        {
-            // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
-            constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
-            constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
-            static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
-            static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
             chunk_cap_ = ((P_sz_max + cap_granularity - 1) / cap_granularity) * cap_granularity;
+
+#ifdef TESTS
+        // Small slabs make even small inputs span many content-chunks per partition.
+        if(const auto cap = env::get_u64("GPU_SACA_CHUNK_CAP"); cap)
+        {
+            if(*cap == 0 || *cap % cap_granularity != 0)
+            {
+                std::cerr << "`GPU_SACA_CHUNK_CAP` must be a positive multiple of " << cap_granularity << ". Aborting.\n";
+                std::exit(EXIT_FAILURE);
+            }
+
+            chunk_cap_ = *cap;
         }
+#endif
     }
 
     // Set the reader- and writer-pool sizes.
@@ -687,12 +700,12 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             util::file::raise_open_files_limit(SPILL_ROLE_C * p_ + 64); // Spill-files of all partitions at once, plus slack for the rest of the process.
-            spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()));
+            spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()), op_path_, n_ * sizeof(idx_t));
             backend_ = std::make_unique<Partition_Backend>(P_cap, chunk_cap_, *spill_, host_budget, fixed_budget(), p_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
-                P_buf.emplace_back(Suffix_Buffer{backend_->resident_suf(p_id), backend_->spilled_suf(p_id)});
+                P_buf.emplace_back(Suffix_Buffer{*backend_, p_id});
         }
 
 
@@ -738,88 +751,6 @@ void GPU_SACA<T_sym_>::partition()
     }
 
     backend_->raise_cap(Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_));  // The scatter buffers' space now goes to the backend's RAM-tier.
-}
-
-
-template <typename T_sym_>
-void GPU_SACA<T_sym_>::probe_prefix_key_gather()
-{
-    p_id_t q = p_;  // ID of the largest host-resident partition.
-    idx_t q_sz = 0; // Size of the largest host-resident partition.
-    for(p_id_t i = 0; i < p_; ++i)
-        if(backend_->resident_suf(i) != nullptr && q_sz < P_cap[i])
-            q = i, q_sz = P_cap[i];
-
-    if(q == p_)
-    {
-        std::cerr << "Prefix-gather probe: no resident partition.\n";
-        return;
-    }
-
-    idx_t sample = std::min<idx_t>(q_sz, env::get_u64("GPU_SACA_PREFIX_GATHER_PROBE_N").value_or(idx_t(64) << 20));
-    auto* const flush_ord = util::checked_allocate<idx_t>(sample);  // Partition-layout produced by the scatter in partitioning.
-    auto* const text_ord = util::checked_allocate<idx_t>(sample);   // Partition-layout a counting-scatter would produce.
-
-    // Produce the layout orderings.
-    {
-        const auto* const suf = backend_->resident_suf(q);
-        #pragma omp parallel for schedule(static)
-        for(idx_t i = 0; i < sample; ++i)
-            flush_ord[i] = bit_layout::suffix_of(suf[i]);
-
-        idx_t c = 0;
-        for(idx_t i = 0; i < n_ && c < sample; ++i)
-            if(P_id[i] == q)
-                text_ord[c++] = i;
-
-        sample = c;
-    }
-
-
-    // Times `sample`-many prefix gathers from suffixes in `suf`, prefetching
-    // `D` iterations ahead. Returns (timing, sink-value).
-    const auto run = [&](const idx_t* const suf, const idx_t D)
-    {
-        const auto t_0 = timer::now();
-
-        uint64_t sink = 0;  // Redundant sink to accumulate data so that the next loop isn't optimized away.
-        #pragma omp parallel for schedule(static) num_threads(stager_c_) reduction(^ : sink)
-        for(idx_t i = 0; i < sample; ++i)
-        {
-            if(D > 0 && i + D < sample)
-                __builtin_prefetch(T_h_ + suf[i + D], 0, 0);
-
-            const auto pre_key = Prefix_Key::pack_prefix(T_h_ + suf[i]);
-            for(idx_t w = 0; w < ELL_WORDS; ++w)
-                sink ^= pre_key.word[w];
-        }
-
-        return std::pair<double, uint64_t>{timer::duration(timer::now() - t_0), sink};
-    };
-
-    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
-    const auto [rss, thp] = util::thp_coverage(T_h_);
-
-    std::cerr   << "Prefix-gather probe (p_id " << q << ", " << sample << " of " << q_sz << " suffixes,"
-                " ell = " << ell << " symbols, p = " << p_ << ", " << stager_c_ << " threads):\n"
-                << "\tT: " << GB(n_ * sizeof(T_sym_)) << "GBs mapped, " << GB(rss) << "GBs resident, "
-                << GB(thp) << "GBs in huge pages (" << (rss ? 100.0 * thp / rss : 0.0) << "%)\n"
-                << "\tD\torder\tns/gather\tM gathers/s\tprojected over n\n";
-
-    run(flush_ord, 32), run(text_ord, 32);  // Warmup runs.
-    for(const idx_t D : {idx_t(0), idx_t(8), idx_t(16), idx_t(32), idx_t(64), idx_t(128)})
-        for(const auto& [name, idx] : {std::pair<const char*, const idx_t*>{"flush", flush_ord},
-                                       std::pair<const char*, const idx_t*>{"text ", text_ord}})
-        {
-            const auto [s, sink] = run(idx, D);
-            std::cerr << "\t" << D << "\t" << name
-                      << "\t" << (s * 1e9 / sample)
-                      << "\t\t" << (sample / s / 1e6)
-                      << "\t\t" << (s * static_cast<double>(n_) / sample) << "s"
-                      << "\t(sink " << sink << ")\n";
-        }
-
-    util::deallocate(flush_ord), util::deallocate(text_ord);
 }
 
 
@@ -978,6 +909,13 @@ void GPU_SACA<T_sym_>::initial_rank()
 {
     INSTRUMENT(probe::P().begin_iteration(0, 0, n_));
 
+#ifdef TESTS
+    backend_->shuffle_tiers(0, Active_sz);
+#endif
+#ifdef STATS
+    backend_->log_barrier(0, Active_sz);
+#endif
+
     // Upload partitions to device in a triple-buffered manner, sort-and-rank based on the associated prefixes, and download the output to host.
     {
         PROFILE_SCOPE("sort_and_init_rank_dispatch");
@@ -995,6 +933,10 @@ void GPU_SACA<T_sym_>::initial_rank()
         CUDA_CHECK(cudaMemcpy(Active_sz.data(), active_set_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
     }
 
+#ifdef TESTS
+    backend_->shuffle_tiers(1, Active_sz);
+#endif
+
 
 #ifdef STATS
     {
@@ -1006,6 +948,7 @@ void GPU_SACA<T_sym_>::initial_rank()
         std::cerr   << "Number of partitions fully-sorted by context-size " << ell << ": " << sorted_part << "."
                     << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
         std::cerr << "Per-partition active-set sizes by context-size " << ell << ": " << util::join(Active_sz) << "\n";
+        backend_->log_barrier(1, Active_sz);
     }
 #endif
 
@@ -1194,6 +1137,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(backend_->active_slot(p_id), active_set_sz_d + p_id, sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));   // For the writers to mark the retired tails.
         CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
         const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
 
@@ -1363,8 +1307,10 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         INSTRUMENT(probe::P().track_assembly(prev, p_assembly.slab.size()));
                         if(prev == 1)   // Last slab staged for this partition; chunked-assembly is ready for the device.
                         {
+                            const auto p_id = s->p_id();    // Read before the assembly, `s` in it, leaves for the device.
                             R.enqueue(&p_assembly);
                             admit.signal(p_assembly.slab.size());   // These slabs are guaranteed to return to the free-pool `F`, so early signalling is safe.
+                            backend_->retire_inbox(p_id);   // Its slabs have all read the inbox: the disk-part's space frees up.
                         }
                     }
                 }
@@ -1450,9 +1396,6 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                             }
                         }
 #endif
-                        if constexpr(init_rank_)    // `p_id`'th partition's prefix content has been fully staged at the assembly's slabs; safe to retire those.
-                            backend_->open_key(p_id);
-
                         {
                             INSTRUMENT_TIMER(probe::P().me().device_ns);
                             if constexpr(init_rank_)    sort_and_init_rank_and_filter(p_id, *p_assembly, s_id);
@@ -1774,6 +1717,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+        CUDA_CHECK(cudaMemcpyAsync(backend_->active_slot(p_id), active_set_sz_d + p_id, sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));   // For the writers to mark the retired tails.
         CUDA_CHECK(cudaStreamSynchronize(stream[buf_id]));
         const idx_t outbox_sz = backend_->msg_off(p_id)[p_ - 1];
 
@@ -1867,6 +1811,8 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             CUDA_CHECK(cudaMemcpy(&pill_c_h, pill_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
             std::cerr << "Active suffixes with poison-pill received for generation " << gen << ": " << pill_c_h << ".\n";
         }
+
+        backend_->shuffle_tiers(gen + 1, Active_sz);
 #endif
 
         const auto t_1 = gpu_saca::timer::now();
@@ -1883,6 +1829,7 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             std::cerr   << "Number of partitions fully-sorted by context-size " << (k * 2) << ": " << sorted_part << ". Time taken in iteration: " << gpu_saca::timer::duration(t_1 - t_0) << "s."
                         << " Out of " << n_ << " suffixes, " << unsorted << " (" << (unsorted * 100.0 / n_) << "%) still need more resolution.\n";
             std::cerr << "Per-partition active-set sizes by context-size " << (k * 2) << ": " << util::join(Active_sz) << "\n";
+            backend_->log_barrier(gen + 1, Active_sz);
 #endif
 
             INSTRUMENT(probe::P().report_log());
@@ -2044,6 +1991,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
                         s->assign(rt.p_id, rt.off, rt.sz, rt.msg_off, rt.msg_sz);
                         backend_->read_keys(*s);
+                        backend_->retire_chunk(rt.p_id, rt.chunk_idx);  // Read for the last time: its memory goes now.
 
                         auto& p_assembly = part_assembly[rt.p_id];
                         p_assembly.slab[rt.chunk_idx] = s;  // Add the slab to the partition's assembly / chain.
@@ -2144,6 +2092,14 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
         INSTRUMENT(probe::P().stop_sampler());
     }
+
+#ifdef TESTS
+    if(backend_->budget().used() != 0)  // Every chunk is retired, and every charge returned.
+    {
+        std::cerr << "The host-memory budget has " << backend_->budget().used() << " bytes charged past the concatenation. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+#endif
 
 
     // Close the output file.

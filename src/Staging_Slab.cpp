@@ -1,9 +1,6 @@
 
 #include "Staging_Slab.hpp"
-#include "Direct_File.hpp"
 #include "utility.cuh"
-
-#include <cstdlib>
 
 
 namespace gpu_saca
@@ -15,34 +12,24 @@ Staging_Slab::Staging_Slab():
     , beta_(nullptr)
     , msg_target_(nullptr)
     , msg_rank_(nullptr)
+    , alloc_{}
 {}
 
 
 Staging_Slab::~Staging_Slab()
 {
-    CUDA_CHECK(deallocate_host(key_));
-    CUDA_CHECK(deallocate_host(suf_));
-    CUDA_CHECK(deallocate_host(beta_));
-    CUDA_CHECK(deallocate_host(msg_target_));
-    CUDA_CHECK(deallocate_host(msg_rank_));
+    for(auto* const alloc : alloc_)
+        CUDA_CHECK(deallocate_host(alloc));
 }
 
 
 void Staging_Slab::allocate(idx_t sz)
 {
-    // TODO: fix the following allocations by disk-block-aligning them and omit the failure-mode exit.
-    CUDA_CHECK(pinned_allocate_host(key_, sz));
-    CUDA_CHECK(pinned_allocate_host(suf_, sz));
-    CUDA_CHECK(pinned_allocate_host(beta_, sz));
-    CUDA_CHECK(pinned_allocate_host(msg_target_, 2 * sz));  // Outbox can have twice the size of active set, in the worst-case.
-    CUDA_CHECK(pinned_allocate_host(msg_rank_, 2 * sz));
-
-    const auto aligned = [](const auto* const addr){ return Direct_File::is_block_aligned(addr); };
-    if(!aligned(key_) || !aligned(suf_) || !aligned(msg_target_) || !aligned(msg_rank_))
-    {
-        std::cerr << "Staging slabs' allocations are not disk-block aligned. Aborting.\n";
-        std::exit(EXIT_FAILURE);
-    }
+    pinned_allocate_aligned_host(key_, alloc_[0], sz);
+    pinned_allocate_aligned_host(suf_, alloc_[1], sz);
+    pinned_allocate_aligned_host(beta_, alloc_[2], sz);
+    pinned_allocate_aligned_host(msg_target_, alloc_[3], 2 * sz);  // Outbox can have twice the size of active set, in the worst-case.
+    pinned_allocate_aligned_host(msg_rank_, alloc_[4], 2 * sz);
 }
 
 

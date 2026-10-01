@@ -38,7 +38,9 @@ private:
 
     std::atomic<chunk_t> carved_;   // Count of chunks carved from the reservation so far.
     std::vector<chunk_t> free_; // Free chunks still resident, in LIFO order.
-    util::Spin_Lock free_lock_; // Mutually-exclusive lock to `free_`.
+    std::vector<chunk_t> released_; // Free chunks whose memory went back to the kernel: to be taken anew.
+    std::atomic<chunk_t> released_c_;   // Size of `released_`, readable outside the lock.
+    util::Spin_Lock free_lock_; // Mutually-exclusive lock to `free_` and `released_`.
 
 public:
 
@@ -60,15 +62,24 @@ public:
     // Returns the count of chunks carved from the reservation so far.
     auto carved() const { return carved_.load(std::memory_order_relaxed); }
 
+    // Returns the count of chunks released, and not taken anew since.
+    auto released() const { return released_c_.load(std::memory_order_relaxed); }
+
     // Returns a free chunk still resident, or `NIL` if there is none.
     chunk_t take_free();
 
-    // Returns a chunk never carved before, or `NIL` if the reservation is
-    // exhausted. Its memory must have been charged beforehand separately.
+    // Returns a chunk not resident: a released one if any, else one never
+    // carved before; `NIL` if the reservation is exhausted. Its memory must
+    // have been charged beforehand separately.
     chunk_t take_new();
 
     // Returns the chunk `c` to the free-list; its memory stays resident.
     void give_back(chunk_t c);
+
+    // Releases the memory of free chunks, until `b` bytes of it at least, or no
+    // free chunk left; the released chunks are to be taken anew. Returns the
+    // bytes released.
+    std::size_t release_free(std::size_t b);
 
     // Returns the message-targets of the chunk `c`.
     idx_t* tgt(const chunk_t c) const { return reinterpret_cast<idx_t*>(base_ + c * chunk_bytes_); }

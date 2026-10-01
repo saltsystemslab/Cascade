@@ -119,6 +119,15 @@ namespace math
     {
         return x <= 1 ? 0 : 64 - __builtin_clzll(x - 1);
     }
+
+    // Returns `sz` rounded up to the closest multiple of `BLK`, which needs to
+    // be a power of 2.
+    template <uint64_t BLK>
+    inline uint64_t block_up(const uint64_t sz)
+    {
+        static_assert(BLK > 0 && (BLK & (BLK - 1)) == 0, "BLK must be a power of 2!");
+        return (sz + BLK - 1) & ~(BLK - 1);
+    }
 }
 
 
@@ -204,6 +213,9 @@ void prepage(T_* const ptr, const std::size_t size)
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
 
+// Returns the process' resident set size, in bytes; `0` if not found.
+std::size_t resident_memory();
+
 // Returns a reservation of `bytes` bytes of address-space, `HUGE_PAGE_SIZE`-
 // aligned and backed by physical memory only when touched; `nullptr` for empty
 // reservations. The reservation opts into transparent huge pages iff the env
@@ -212,6 +224,11 @@ void* reserve_memory(std::size_t bytes);
 
 // Releases the reservation `ptr` of `bytes` bytes, made with `reserve_memory`.
 void unreserve_memory(void* ptr, std::size_t bytes);
+
+// Returns the physical memory backing the range `[ptr, ptr + bytes)` of a
+// reservation made with `reserve_memory`; `ptr` must be page-aligned. The range
+// stays reserved, and reads back as zeros.
+void release_memory(void* ptr, std::size_t bytes);
 
 // Returns from `/proc/self/smaps` (pseudo-file with memory consumption metrics
 // for each memory mapping), for the memory mapping containing the address `p`,

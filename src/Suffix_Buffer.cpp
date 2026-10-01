@@ -1,5 +1,6 @@
 
 #include "Suffix_Buffer.hpp"
+#include "Partition_Backend.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
@@ -14,9 +15,9 @@
 namespace gpu_saca
 {
 
-Suffix_Buffer::Suffix_Buffer(idx_t* const suf_mem, Direct_File* const suf_file):
-      suf_mem_(suf_mem)
-    , suf_file_(suf_file)
+Suffix_Buffer::Suffix_Buffer(Partition_Backend& backend, const p_id_t p_id):
+      backend_(&backend)
+    , p_id_(p_id)
     , w_suf_base_(nullptr)
     , w_fill_(omp_get_max_threads())
     , flushed_(0)
@@ -34,15 +35,14 @@ Suffix_Buffer::Suffix_Buffer(idx_t* const suf_mem, Direct_File* const suf_file):
 
 
 Suffix_Buffer::Suffix_Buffer(Suffix_Buffer&& rhs):
-      suf_mem_(rhs.suf_mem_)
-    , suf_file_(rhs.suf_file_)
+      backend_(rhs.backend_)
+    , p_id_(rhs.p_id_)
     , w_suf_base_(rhs.w_suf_base_)
     , w_fill_(std::move(rhs.w_fill_))
     , flushed_(rhs.flushed_.load(std::memory_order_relaxed))
     , worker_c_(rhs.worker_c_)
 {
-    rhs.suf_mem_ = nullptr;
-    rhs.suf_file_ = nullptr;
+    rhs.backend_ = nullptr;
     rhs.w_suf_base_ = nullptr;
 }
 
@@ -83,8 +83,8 @@ void Suffix_Buffer::flush()
 
 void Suffix_Buffer::sink(const idx_t off, const idx_t sz, const idx_t* suf)
 {
-    suf_mem_ != nullptr ?   (void) std::memcpy(suf_mem_ + off, suf, sz * sizeof(idx_t)) :
-                            suf_file_->write_at(suf, sz * sizeof(idx_t), off * sizeof(idx_t));
+    // Full buffers land at multiples of `w_buf_cap`; only the tails' flush, the partition's last, ends past a disk-block.
+    backend_->write_suffixes(p_id_, off, sz, suf);
 }
 
 }
