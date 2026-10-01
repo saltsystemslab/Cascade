@@ -283,6 +283,11 @@ int main(const int argc, char** const argv)
                 "\nt_prewarm=%.3f\nt_load=%.3f\n",
                 dir.c_str(), shards, tok_cnt, mode.c_str(), load.c_str(), prefetch, threads, prewarm_bytes, t_prewarm, t_load);
     std::fflush(stdout);
+    if(tok_cnt == 0)    // The engine finds no shard in a directory without its files, and would count every query as absent.
+    {
+        std::fprintf(stderr, "error: no infini-gram index in %s\n", dir.c_str());
+        return 1;
+    }
 
     // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`.
     int rc = 0;
