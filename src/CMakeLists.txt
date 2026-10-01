@@ -6,6 +6,7 @@
 # Bundle the core source files into a variable.
 set(PROJECT_SRC
         GPU_SACA.cu
+        Partition_ID_Map.cpp
         Suffix_Buffer.cpp
         Staging_Slab.cpp
         Direct_File.cpp
