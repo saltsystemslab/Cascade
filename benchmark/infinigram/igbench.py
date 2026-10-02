@@ -643,6 +643,28 @@ def cmd_run(a):
     sys.exit(0 if status == "ok" else 1)
 
 
+# Appends this invocation to the campaign's manifest, the only thing that tells
+# "never requested" apart from "requested but died" (summarize.py:278-291).
+# Appended, not overwritten: several jobs accumulate into one directory.
+def cmd_manifest(a):
+    pairs = [x.split(":") for x in a.corpora.split()]
+    rows = [row(a.corpus_root, lab, tok) for lab, tok in pairs]
+    path = os.path.join(a.results_dir, "manifest.json")
+    m = json.load(open(path)) if os.path.exists(path) else []
+    m.append({"submitted_utc": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
+              "corpora": [lab for lab, _ in pairs],
+              "tokenizer": ":".join(dict.fromkeys(t for _, t in pairs)),
+              "methods": ["infinigram"], "ours_tag": "",
+              "reps": a.reps, "runs_expected": a.reps * len(pairs),
+              "corpus_root": a.corpus_root, "results": a.results_dir,
+              "sizes_bytes": [r["bytes"] for r in rows],
+              "commit": os.environ.get("IG_COMMIT", "unknown")})
+    with open(path, "w") as f:
+        json.dump(m, f, indent=2)
+        f.write("\n")
+    print(f"  manifest    {len(m)} invocation(s), {sum(i['runs_expected'] for i in m)} runs expected")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     # Shared via parents= so they may follow the subcommand, which is where
@@ -668,6 +690,12 @@ def main():
     q.add_argument("--tokenizer")
     q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
     q.set_defaults(fn=cmd_stage)
+
+    q = s.add_parser("manifest", parents=[common], help="append this job to the campaign manifest")
+    q.add_argument("corpora", help="space-separated label:tokenizer pairs")
+    q.add_argument("--results-dir", required=True)
+    q.add_argument("--reps", type=int, default=1)
+    q.set_defaults(fn=cmd_manifest)
 
 
     q = s.add_parser("kappa", help="reference table; byte-identity check against theirs")

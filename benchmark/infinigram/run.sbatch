@@ -51,6 +51,8 @@ CPUS="${CPUS:-}"
 mkdir -p "${RESULTS}"
 [ -r "${HERE}/pin" ] && cp "${HERE}/pin" "${RESULTS}/pin"
 echo "host $(hostname)  cpus ${CPUS:-<igbench default>}  temp ${IG_TEMP_ROOT}  results ${RESULTS}"
+python3 "${HERE}/igbench.py" manifest "${CORPORA:?CORPORA required}" \
+        --results-dir "${RESULTS}" --reps "${REPS:-1}"
 [ -r /proc/meminfo ] && awk '/^Mem(Total|Available):/ {print "  " $1 " " $2 " " $3}' /proc/meminfo
 
 for pair in ${CORPORA:?CORPORA required}; do
