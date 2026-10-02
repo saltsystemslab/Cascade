@@ -36,7 +36,8 @@
 # Environment (all optional):
 #   TM_STAGE        node-local directory to stage the indexes and the batches
 #                   under, kept for later runs; default /tmp/${USER}/query-stage;
-#                   `none` reads the indexes in place
+#                   `none` reads the indexes in place. STAGE_STREAMS sets the
+#                   pieces copied at a time (see stage.sh)
 #   TM_RUNS         default main,batch,ablation,threads,variants
 #   TM_IG_LOAD      infini-gram's index in the main, batch, and thread runs: mmap,
 #                   mapped as its engine defaults to (default), or ram, read into
@@ -178,59 +179,20 @@ stamp "build"
     || { stamp "FATAL: build failed; see ${OUT}/build.log"; exit 1; }
 stamp "build: $(grep -c -i warning "${OUT}/build.log") warnings"
 
-# Copies the files "${@:2}" into the directory $1 in parallel, keeping the
-# copies already there of the same size and time.
-stage_files()
-{
-    local d="$1" f p rc=0 pids=()
-    shift
-    mkdir -p "${d}" || return 1
-    for f in "$@"; do
-        rsync -a --copy-links "${f}" "${d}/" &
-        pids+=($!)
-    done
-    for p in "${pids[@]}"; do
-        wait "${p}" || rc=1
-    done
-    return ${rc}
-}
-
-meta() { sed -n "s/^$1=//p" "${IDX}/index.meta" | head -1; }
+# shellcheck source=stage.sh
+. "${REPO}/benchmark/query/stage.sh"
 
 SIDX="${IDX}"
 SIG="${IG}"
 BQ="${OUT}/batch-qry"
 if [ "${STAGE}" != none ]; then
     stamp "stage: ${STAGE}"
-    s_ours="${STAGE}/ours-$(basename "${IDX}")"
-    s_ig="${STAGE}/ig-$(basename "${IG}")"
-    ours_files=("$(meta text)")
-    parts=$(meta sa_part_c)
-    for ((i = 0; i < ${parts:-0}; ++i)); do
-        ours_files+=("$(meta "sa_part_${i}")")
-    done
-    ig_files=()
-    for f in "${IG}"/*; do
-        [ -f "${f}" ] && ig_files+=("${f}")
-    done
-
-    stage_files "${s_ours}" "${ours_files[@]}" &
-    p_ours=$!
-    stage_files "${s_ig}" "${ig_files[@]}" &
-    p_ig=$!
-    ok=1
-    wait "${p_ours}" || ok=0
-    wait "${p_ig}" || ok=0
-    sync
-    if [ "${ok}" -eq 1 ]; then
-        # Our index's metadata, with its files' paths into the staged copies.
-        awk -F= -v d="${s_ours}" 'BEGIN { OFS = "=" } $1 == "text" || $1 ~ /^sa_part_[0-9]+$/ { n = split($2, p, "/"); $2 = d "/" p[n] } { print }' \
-            "${IDX}/index.meta" > "${s_ours}/index.meta"
-        SIDX="${s_ours}"
-        SIG="${s_ig}"
+    if stage_indexes "${IDX}" "${IG}" "${STAGE}"; then
         BQ="${STAGE}/batch-qry-$(basename "${IDX}")"
-        stamp "stage: done; $(du -shL "${s_ours}" | cut -f1) ours, $(du -shL "${s_ig}" | cut -f1) infini-gram"
+        stamp "stage: done; $(du -shL "${SIDX}" | cut -f1) ours, $(du -shL "${SIG}" | cut -f1) infini-gram"
     else
+        SIDX="${IDX}"
+        SIG="${IG}"
         stamp "WARN: staging failed; the indexes are read in place"
     fi
 fi

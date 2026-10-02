@@ -26,6 +26,9 @@
 #   XC_RES          tier of both arrays: device (default) or pinned
 #   XC_TEXT_RES     tier of the text; default XC_RES
 #   XC_SA_RES       tier of the suffix array; default XC_RES
+#   XC_STAGE        node-local directory to stage both indexes and the held-out
+#                   text under first, as timed.sbatch does, and to keep them for
+#                   later runs; default none: they are read in place
 #   XC_SPOT         suffix-array order spot-checks at load; default 100000
 #   XC_ARCH         CUDA architecture of the in-job build; default 120-real
 #   XC_THREADS      infini-gram's pool size; default the job's CPUs
@@ -92,10 +95,29 @@ stamp "build"
     && cmake --build "${B}" -j "${THREADS}" --target query bench_infinigram_query; } > "${OUT}/build.log" 2>&1 \
     || { stamp "FATAL: build failed; see ${OUT}/build.log"; exit 1; }
 
+# shellcheck source=stage.sh
+. "${REPO}/benchmark/query/stage.sh"
+
+SIDX="${IDX}"
+SIG="${IG}"
+HELDOUT="${XC_HELDOUT:-}"
+if [ "${XC_STAGE:-none}" != none ]; then
+    stamp "stage: ${XC_STAGE}"
+    if stage_indexes "${IDX}" "${IG}" "${XC_STAGE}" && { [ -z "${HELDOUT}" ] || stage_file "${HELDOUT}" "${XC_STAGE}/heldout"; }; then
+        [ -n "${HELDOUT}" ] && HELDOUT="${XC_STAGE}/heldout/$(basename "${HELDOUT}")"
+        stamp "stage: done; $(du -shL "${SIDX}" | cut -f1) ours, $(du -shL "${SIG}" | cut -f1) infini-gram"
+    else
+        SIDX="${IDX}"
+        SIG="${IG}"
+        HELDOUT="${XC_HELDOUT:-}"
+        stamp "WARN: staging failed; the inputs are read in place"
+    fi
+fi
+
 # Workloads: name, kind, length, count, seed, and extra options of `query gen`.
 gen()
 {
-    "${B}/src/query" gen --index "${IDX}" --out "${OUT}/qry/$1.qry" --kind "$2" --len "$3" --q "$4" --seed "$5" "${@:6}" > /dev/null \
+    "${B}/src/query" gen --index "${SIDX}" --out "${OUT}/qry/$1.qry" --kind "$2" --len "$3" --q "$4" --seed "$5" "${@:6}" > /dev/null \
         || stamp "gen failed: $1"
 }
 
@@ -107,14 +129,14 @@ for m in 2 5 10; do gen "mutated-m${m}" mutated ${m} "${Q}" $((seed++)); done
 for m in 100 1000; do gen "mutated-m${m}" mutated ${m} $((Q / 10)) $((seed++)); done
 for m in 1 2 5 10; do gen "random-m${m}" random ${m} "${Q}" $((seed++)); done
 gen unigram unigram 1 1 $((seed++))
-if [ -n "${XC_HELDOUT:-}" ]; then
-    gen heldout-m10 substring 10 "${Q}" $((seed++)) --source "${XC_HELDOUT}"
-    gen heldout-m100 substring 100 $((Q / 10)) $((seed++)) --source "${XC_HELDOUT}"
+if [ -n "${HELDOUT}" ]; then
+    gen heldout-m10 substring 10 "${Q}" $((seed++)) --source "${HELDOUT}"
+    gen heldout-m100 substring 100 $((Q / 10)) $((seed++)) --source "${HELDOUT}"
 fi
 files=$(ls "${OUT}"/qry/*.qry | paste -sd, -)
 
 stamp "ours"
-"${B}/src/query" find --index "${IDX}" --queries "${files}" --text-res "${TEXT_RES}" --sa-res "${SA_RES}" --spot "${XC_SPOT:-100000}" \
+"${B}/src/query" find --index "${SIDX}" --queries "${files}" --text-res "${TEXT_RES}" --sa-res "${SA_RES}" --spot "${XC_SPOT:-100000}" \
     --stride "${XC_STRIDE:-0,32}" --sort "${XC_SORT:-0}" --validate --reps 1 --cnt-dir "${OUT}/ours" > "${OUT}/ours/find.log" 2>&1
 stamp "ours: rc=$?"
 
@@ -122,7 +144,7 @@ stamp "infini-gram"
 first=1
 for f in "${OUT}"/qry/*.qry; do
     s=$(basename "${f}" .qry)
-    "${B}/benchmark/bench_infinigram_query" --index "${IG}" --queries "${f}" --mode direct --threads "${THREADS}" --reps 1 \
+    "${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${f}" --mode direct --threads "${THREADS}" --reps 1 \
         --prewarm ${first} --cnt-out "${OUT}/ig/${s}.cnt" > "${OUT}/ig/${s}.log" 2>&1 || stamp "infini-gram failed: ${s}"
     first=0
 done
