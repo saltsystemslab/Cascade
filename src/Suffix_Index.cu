@@ -165,6 +165,26 @@ idx_t spot_check_device(const T_sym_* const T, const idx_t n, const uint8_t* con
     return static_cast<idx_t>(bad);
 }
 
+
+// Checks the pairs of `spot_check_kernel` on the host's cores, over host-side
+// arrays. Returns the smallest bad rank found, or `n` if none.
+template <typename T_sym_>
+idx_t spot_check_host(const T_sym_* const T, const idx_t n, const uint8_t* const SA, const idx_t samples, const bool exhaustive)
+{
+    idx_t bad = n;
+
+    #pragma omp parallel for schedule(static) reduction(min : bad)
+    for(idx_t k = 0; k < samples; ++k)
+    {
+        const idx_t r = (exhaustive ? k : (k == 0 ? 0 : (k == 1 ? n - 2 : mix(SPOT_SEED ^ k) % (n - 1))));
+        const idx_t i = sa40::load(SA, r), j = sa40::load(SA, r + 1);
+        if(i >= n || j >= n || i == j || ref::cmp_suffixes(T, n, i, j, SPOT_MAX_CMP) > 0)
+            bad = std::min(bad, r);
+    }
+
+    return bad;
+}
+
 }
 
 
@@ -452,47 +472,34 @@ bool Suffix_Index::spot_check(const idx_t spot, std::string& err)
     const auto t0 = std::chrono::steady_clock::now();
     const bool exhaustive = (spot + 2 >= n - 1);
     const idx_t samples = (exhaustive ? n - 1 : spot + 2);
+    std::string e;
+    idx_t bad = n;
     if(device_accessible())
-    {
-        std::string e;
-        idx_t bad = n;
         switch(meta_.sym_bytes)
         {
         case 1: bad = spot_check_device(text<uint8_t>(), n, sa(), samples, exhaustive, e); break;
         case 2: bad = spot_check_device(text<uint16_t>(), n, sa(), samples, exhaustive, e); break;
         default:    bad = spot_check_device(text<uint32_t>(), n, sa(), samples, exhaustive, e);
         }
-
-        if(!e.empty())
-        {
-            err = e;
-            return false;
-        }
-
-        if(bad < n)
-        {
-            err = "suffix-array order spot-check failed at ranks " + std::to_string(bad) + " and " + std::to_string(bad + 1)
-                + "; expected numeric symbol order with shorter suffixes first";
-            return false;
-        }
-    }
     else
-    {
-        const auto at = [this](const idx_t r) { return sa40::load(host_sa(), r); };
-        std::string why;
-        bool ok = true;
         switch(meta_.sym_bytes)
         {
-        case 1: ok = ref::spot_check_sa_order(host_text<uint8_t>(), n, at, spot, SPOT_MAX_CMP, SPOT_SEED, why); break;
-        case 2: ok = ref::spot_check_sa_order(host_text<uint16_t>(), n, at, spot, SPOT_MAX_CMP, SPOT_SEED, why); break;
-        default:    ok = ref::spot_check_sa_order(host_text<uint32_t>(), n, at, spot, SPOT_MAX_CMP, SPOT_SEED, why);
+        case 1: bad = spot_check_host(host_text<uint8_t>(), n, host_sa(), samples, exhaustive); break;
+        case 2: bad = spot_check_host(host_text<uint16_t>(), n, host_sa(), samples, exhaustive); break;
+        default:    bad = spot_check_host(host_text<uint32_t>(), n, host_sa(), samples, exhaustive);
         }
 
-        if(!ok)
-        {
-            err = "suffix-array order spot-check failed: " + why;
-            return false;
-        }
+    if(!e.empty())
+    {
+        err = e;
+        return false;
+    }
+
+    if(bad < n)
+    {
+        err = "suffix-array order spot-check failed at ranks " + std::to_string(bad) + " and " + std::to_string(bad + 1)
+            + "; expected numeric symbol order with shorter suffixes first";
+        return false;
     }
 
     stats_.t_spot = seconds_since(t0);
