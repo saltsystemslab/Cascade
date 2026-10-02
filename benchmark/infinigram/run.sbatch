@@ -46,7 +46,7 @@ else
     echo "WARN: no ${HERE}/pin; records will say commit=unknown"
 fi
 
-# igbench defaults to 64; set CPUS to override.
+# igbench defaults to 128; set CPUS to override.
 CPUS="${CPUS:-}"
 mkdir -p "${RESULTS}"
 [ -r "${HERE}/pin" ] && cp "${HERE}/pin" "${RESULTS}/pin"
