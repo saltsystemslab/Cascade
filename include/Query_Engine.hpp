@@ -8,6 +8,7 @@
 #include "query-file.hpp"
 #include "Suffix_Index.hpp"
 #include "Sample_Table.hpp"
+#include "Host_Search.hpp"
 
 #include <cuda_runtime.h>
 
@@ -16,6 +17,8 @@
 #include <array>
 #include <mutex>
 #include <string>
+#include <utility>
+#include <vector>
 
 
 // Batched exact-match queries over a query index: `find` returns the SA-interval
@@ -23,12 +26,15 @@
 // prefix among the keys of a sample table, which brackets the interval's
 // boundaries within a stride of ranks, and then binary-searches the suffix
 // array within the brackets. Without a table, the direct mode binary-searches
-// the whole suffix array: the table-free baseline, correct for any placement
-// the device can access. With the suffix array in pinned host memory, the
-// search gathers the brackets' entries into device memory first, in whole
-// words: a transfer per query, rather than one per probe. A host-side batch
-// streams through the device in chunks, over several streams: the transfers of
-// some chunks overlap the searches of others.
+// the whole suffix array: the table-free baseline, correct for any placement.
+// With the suffix array in pinned host memory, the search gathers the
+// brackets' entries into device memory first, in whole words: a transfer per
+// query, rather than one per probe. A host-side batch streams through the
+// device in chunks, over several streams: the transfers of some chunks overlap
+// the searches of others. With both arrays in host memory and either pageable,
+// the host searches: the device ranks a chunk's patterns in the table, and the
+// host's cores search the brackets over the arrays, while the device ranks the
+// next chunks.
 
 namespace gpu_saca
 {
@@ -36,7 +42,7 @@ namespace gpu_saca
 // Where the two-phase search reads the suffix-array entries of its brackets.
 enum class Gather
 {
-    automatic,  // As `always` if the suffix array is in pinned host memory, else as `never`.
+    automatic,  // As `always` if the suffix array is in pinned host memory and the device searches, else as `never`.
     never,  // From the suffix array, a probe at a time.
     always, // From copies in device memory, gathered per batch.
 };
@@ -57,6 +63,8 @@ struct Query_Options
     idx_t chunk_symbols = 0;    // Symbols per chunk, at most; `0` picks 2^24, or 2^28 if gathering. A longer query is a chunk of its own.
     idx_t min_chunk_queries = idx_t(1) << 16;   // Least queries of a chunk's share of a host-side batch, which splits into two chunks per stream unless gathering.
     idx_t min_chunk_symbols = idx_t(1) << 22;   // Least symbols of a chunk's share.
+    unsigned host_threads = 0;  // Threads of the host's search, if it searches; `0` takes OpenMP's default, every core.
+    unsigned host_lanes = 32;   // Boundary searches each such thread interleaves.
 };
 
 
@@ -91,6 +99,8 @@ private:
         uint64_t* off_h = nullptr;  // Pinned staging of the offsets, for a batch in pageable memory.
         T_sym_* sym_h = nullptr;    // Of the symbols.
         SA_Interval* out_h = nullptr;   // Of the intervals.
+        Rank_Range* br_h = nullptr; // Pinned: the chunk's brackets, if the host searches.
+        uint32_t* ids_h = nullptr;  // Pinned: the batch position of each of its sorted places.
         Search_Buffers space;   // Of the chunk's two-phase search, in any mode.
     };
 
@@ -129,6 +139,19 @@ private:
     void search(const uint64_t* off, const T_sym_* sym, uint64_t off0, idx_t q, SA_Interval* out, const Search_Buffers& space,
                 cudaStream_t s) const;
 
+    // Returns the chunks `[a, b)` that the host-side batch of the `q` queries of
+    // the offsets `off` streams through the device in, as `find` splits it.
+    std::vector<std::pair<idx_t, idx_t>> split(const uint64_t* off, idx_t q) const;
+
+    // Copies the queries `[a, b)` of the host-side batch `off`, `sym` into the
+    // device buffers of the lane `l`, asynchronously on its stream; the arrays
+    // not in pinned memory, per `pinned`, through the lane's staging, copied
+    // into it with the host search's threads if `parallel`, and else with the
+    // calling thread. Returns the device address of the chunk's symbols: the
+    // lane's, or pool scratch for a query longer than a chunk, which the caller
+    // frees on the stream.
+    T_sym_* upload(const Lane& l, const uint64_t* off, const T_sym_* sym, idx_t a, idx_t b, const Pinned_Arrays& pinned, bool parallel) const;
+
     // Finds the SA-intervals of the queries `[a, b)` of the host-side batch
     // `off`, `sym` into `out[a, b)` through the lane `l`. The arrays not in
     // pinned memory, per `pinned`, go through the lane's staging, and then the
@@ -136,6 +159,19 @@ private:
     // stream.
     void find_chunk(const Lane& l, const uint64_t* off, const T_sym_* sym, idx_t a, idx_t b, SA_Interval* out,
                     const Pinned_Arrays& pinned) const;
+
+    // Enqueues on the lane `l` the device's part of the host's search of the
+    // queries `[a, b)` of the host-side batch `off`, `sym`: ranks them in the
+    // sample table, and copies their brackets, and their sorted order if
+    // sorting, into the lane's pinned buffers. The arrays not in pinned memory,
+    // per `pinned`, go through the lane's staging.
+    void rank_chunk(const Lane& l, const uint64_t* off, const T_sym_* sym, idx_t a, idx_t b, const Pinned_Arrays& pinned) const;
+
+    // Finds the SA-intervals of the host-side batch `off`, `sym` of `q` queries
+    // into `out[0, q)`, with the host searching: in chunks, each ranked on the
+    // device through a lane while the host searches an earlier one's brackets.
+    // The caller holds `find_lock_`.
+    void find_host(const uint64_t* off, const T_sym_* sym, idx_t q, SA_Interval* out) const;
 
 
 public:
@@ -146,8 +182,8 @@ public:
     Query_Engine& operator=(const Query_Engine&) = delete;
 
     // Loads the index-directory `dir` as `opt` places it. The index must be of
-    // symbols of `T_sym_`, placed device-accessibly. Returns `false` with a
-    // reason in `err` on failure.
+    // symbols of `T_sym_`, with both arrays accessible from the device, or both
+    // from the host. Returns `false` with a reason in `err` on failure.
     bool load(const std::string& dir, const Query_Options& opt, std::string& err);
 
     // Switches the loaded engine's search mode to the `stride`, `key_words`,
@@ -158,6 +194,7 @@ public:
 
     // Finds the SA-intervals of the queries `sym[off[i], off[i + 1])`, `i < q`,
     // into `out[0, q)`; all device-side arrays, asynchronously on the stream `s`.
+    // If the host searches, the batch goes there and back, synchronously.
     void find_async(const uint64_t* off, const T_sym_* sym, idx_t q, SA_Interval* out, cudaStream_t s) const;
 
     // Finds the SA-intervals of the queries `sym[off[i], off[i + 1])`, `i < q`,
@@ -170,15 +207,22 @@ public:
     // queries together than from chunks overlapping. A batch in pinned memory
     // is transferred directly, its chunks enqueued ahead from the calling
     // thread; one with an array in pageable memory goes through pinned staging,
-    // from a thread per stream. Concurrent calls run one after another.
+    // from a thread per stream. If the host searches, it searches every chunk's
+    // brackets from the calling thread, with its own threads; the direct mode
+    // takes no chunks. Concurrent calls run one after another.
     void find(const uint64_t* off, const T_sym_* sym, idx_t q, SA_Interval* out) const;
 
     // Checks the intervals `I[0, q)` of the queries `sym[off[i], off[i + 1])`
     // with the certificate of `ref::certify`: adds the count of failing queries
     // to `*fail_c` and lowers `*first` to the first failing one. All device-side
-    // arrays, asynchronously on the stream `s`.
+    // arrays, asynchronously on the stream `s`; if the host searches, it checks,
+    // with the arrays copied to it synchronously.
     void certify_async(const uint64_t* off, const T_sym_* sym, idx_t q, const SA_Interval* I, unsigned long long* fail_c,
                        unsigned long long* first, cudaStream_t s) const;
+
+    // Returns `true` iff the host searches the loaded index: its arrays are in
+    // host memory, and the device cannot access either.
+    bool host_searches() const { return idx_.loaded() && !idx_.device_accessible(); }
 
     // Returns the loaded index.
     const Suffix_Index& index() const { return idx_; }
