@@ -72,6 +72,24 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 }
 
 
+// Packs the partition-IDs `P_id` of `n` suffixes into the words `word`, at
+// `bits` bits per ID, in the layout of `Partition_ID_Map`.
+// Grid organization: one thread per group of `Partition_ID_Map::GROUP_SZ`
+// suffixes.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void pack_partition_IDs_kernel(const p_id_t* const __restrict__ P_id, const idx_t n, const uint32_t bits, uint64_t* const __restrict__ word)
+{
+    constexpr auto GROUP_SZ = Partition_ID_Map::GROUP_SZ;
+
+    const idx_t g = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;    // Group of this thread.
+    const idx_t off = g * GROUP_SZ; // Offset of the group's first suffix.
+    if(off < n)
+        Partition_ID_Map::pack(P_id + off, (n - off < GROUP_SZ ? n - off : GROUP_SZ), bits, word + g * bits);
+}
+
+
 // Fills `I[0, n)` with the identity permutation.
 // Grid organization: one thread per index.
 // Shared memory layout: no usage.

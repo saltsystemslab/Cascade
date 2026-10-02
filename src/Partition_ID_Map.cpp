@@ -1,6 +1,8 @@
 
 #include "Partition_ID_Map.hpp"
 
+#include <cstring>
+
 
 namespace gpu_saca
 {
@@ -52,27 +54,9 @@ Partition_ID_Map::~Partition_ID_Map()
 }
 
 
-void Partition_ID_Map::store(const idx_t off, const idx_t sz, const p_id_t* const src)
+void Partition_ID_Map::store_packed(const idx_t off, const idx_t sz, const uint64_t* const src)
 {
-    // The IDs fill the words least-significant bits first; an ID straddling two words leaves its high bits in the next.
-    auto* w = word_ + (off / GROUP_SZ) * bits_;
-    uint64_t acc = 0;   // Bits of the word being filled.
-    uint32_t fill = 0;  // Count of the bits filled.
-    for(idx_t i = 0; i < sz; ++i)
-    {
-        const uint64_t id = src[i];
-        acc |= id << fill;
-        fill += bits_;
-        if(fill >= 64)
-        {
-            *w++ = acc;
-            fill -= 64;
-            acc = (fill > 0 ? id >> (bits_ - fill) : 0);
-        }
-    }
-
-    if(fill > 0)    // The map's last word, partially filled.
-        *w = acc;
+    std::memcpy(word_ + (off / GROUP_SZ) * bits_, src, packed_word_c(sz, bits_) * sizeof(uint64_t));
 }
 
 

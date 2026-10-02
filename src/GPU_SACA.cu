@@ -764,8 +764,9 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
     T_sym_* T_buf[STREAM_C];    // The text-chunk buffers.
     p_id_t* P_id_buf[STREAM_C]; // The partition-ID buffers.
+    uint64_t* P_id_word_buf[STREAM_C];  // The packed partition-ID buffers.
     T_sym_* T_stage[STREAM_C];  // Staging buffer for the text-chunks' uploads, per stream.
-    p_id_t* P_id_stage[STREAM_C];   // Staging buffer for the partition-IDs' downloads, per stream.
+    uint64_t* P_id_stage[STREAM_C]; // Staging buffer for the packed partition-IDs' downloads, per stream.
 
     idx_t* P_sz_d;  // Global partition-size histogram at the device.
     {
@@ -779,7 +780,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
 
         const std::size_t budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total memory for the chunk buffers.
-        const std::size_t per_idx_mem = STREAM_C * (sizeof(T_sym_) + sizeof(p_id_t));   // Space required per-index across the three sets of buffers.
+        const std::size_t per_idx_mem = STREAM_C * (sizeof(T_sym_) + 2 * sizeof(p_id_t));   // Space required per-index across the three sets of buffers; the packed IDs are no wider.
         CHUNK_SZ = std::min<idx_t>(PID_CHUNK_CAP, budget / per_idx_mem);
         CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
         if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
@@ -791,12 +792,14 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         const auto buf_sz = std::min(CHUNK_SZ, n_);
         const std::size_t text_buf_bytes = (buf_sz + K - 1) * sizeof(T_sym_);
         const std::size_t p_id_buf_bytes = buf_sz * sizeof(p_id_t);
+        const auto p_id_word_c = Partition_ID_Map::packed_word_c(buf_sz, P_id.bits());
         for(std::size_t b = 0; b < STREAM_C; ++b)
         {
             CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
             CUDA_CHECK(cudaMalloc(P_id_buf + b, p_id_buf_bytes));
+            CUDA_CHECK(cudaMalloc(P_id_word_buf + b, p_id_word_c * sizeof(uint64_t)));
             CUDA_CHECK(pinned_allocate_host(T_stage[b], buf_sz + K - 1));
-            CUDA_CHECK(pinned_allocate_host(P_id_stage[b], buf_sz));
+            CUDA_CHECK(pinned_allocate_host(P_id_stage[b], p_id_word_c));
         }
     }
 
@@ -829,11 +832,17 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
                             (T_buf[s_id], chunk_suf_count, pivots_d, P_id_buf[s_id], p_, P_sz_d);
                         CUDA_CHECK(cudaGetLastError());
 
-                        // Asynchronously download this chunk's partition-IDs to staging space, and drain those to `P_id`, packing them.
+                        // Pack this chunk's partition-IDs, asynchronously download those to staging space, and drain them to `P_id`.
                         // The chunks start at multiples of `BLOCK_SZ`, so their packed IDs take up disjoint words.
-                        CUDA_CHECK(cudaMemcpyAsync(P_id_stage[s_id], P_id_buf[s_id], chunk_suf_count * sizeof(p_id_t), cudaMemcpyDeviceToHost, stream[s_id]));
+                        const auto group_count = (chunk_suf_count + Partition_ID_Map::GROUP_SZ - 1) / Partition_ID_Map::GROUP_SZ;
+                        pack_partition_IDs_kernel<BLOCK_SZ> <<< (group_count + BLOCK_SZ - 1) / BLOCK_SZ, BLOCK_SZ, 0, stream[s_id] >>>
+                            (P_id_buf[s_id], chunk_suf_count, P_id.bits(), P_id_word_buf[s_id]);
+                        CUDA_CHECK(cudaGetLastError());
+
+                        const auto word_count = Partition_ID_Map::packed_word_c(chunk_suf_count, P_id.bits());
+                        CUDA_CHECK(cudaMemcpyAsync(P_id_stage[s_id], P_id_word_buf[s_id], word_count * sizeof(uint64_t), cudaMemcpyDeviceToHost, stream[s_id]));
                         CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-                        P_id.store(chunk_off, chunk_suf_count, P_id_stage[s_id]);
+                        P_id.store_packed(chunk_off, chunk_suf_count, P_id_stage[s_id]);
                     }
                 }
             );
@@ -848,6 +857,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     {
         CUDA_CHECK(cudaFree(T_buf[b]));
         CUDA_CHECK(cudaFree(P_id_buf[b]));
+        CUDA_CHECK(cudaFree(P_id_word_buf[b]));
         CUDA_CHECK(deallocate_host(T_stage[b]));
         CUDA_CHECK(deallocate_host(P_id_stage[b]));
     }

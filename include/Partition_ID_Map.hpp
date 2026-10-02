@@ -6,11 +6,11 @@
 
 #include "types.hpp"
 #include "utility.hpp"
+#include "cross-compile.hpp"
 
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
-#include <utility>
 #include <algorithm>
 
 
@@ -61,13 +61,26 @@ public:
     // Returns the bytes of a map of `n` suffixes across `p` partitions.
     static std::size_t bytes(const idx_t n, const p_id_t p) { return word_c(n, bits_for(p)) * sizeof(uint64_t); }
 
+    // Returns the count of words that the partition-IDs of `sz` consecutive
+    // suffixes take up, packed at `bits` bits per ID from a group's start.
+    CUDA_SPECIFIER static std::size_t packed_word_c(const idx_t sz, const uint32_t bits) { return (sz * bits + 63) / 64; }
+
+    // Packs the partition-IDs `src` of `sz` consecutive suffixes, from a
+    // group's start, into the words `dst` at `bits` bits per ID, in the map's
+    // layout.
+    CUDA_SPECIFIER static void pack(const p_id_t* src, idx_t sz, uint32_t bits, uint64_t* dst);
+
+    // Returns the bits per partition-ID.
+    uint32_t bits() const { return bits_; }
+
     // Returns the partition-ID of the `i`'th suffix.
     p_id_t operator[](idx_t i) const;
 
-    // Stores the partition-IDs `src` of the `sz` suffixes from the `off`'th one
-    // on. Both `off` and `off + sz` must be multiples of `GROUP_SZ`, unless the
-    // latter is the count of suffixes. Thread-safe for disjoint ranges.
-    void store(idx_t off, idx_t sz, const p_id_t* src);
+    // Stores the partition-IDs of the `sz` suffixes from the `off`'th one on,
+    // packed per `pack` in `src`. Both `off` and `off + sz` must be multiples
+    // of `GROUP_SZ`, unless the latter is the count of suffixes. Thread-safe
+    // for disjoint ranges.
+    void store_packed(idx_t off, idx_t sz, const uint64_t* src);
 
     // Prepages the map.
     void prepage();
@@ -75,6 +88,29 @@ public:
     // Returns the bytes of the map.
     std::size_t bytes() const { return word_c_ * sizeof(uint64_t); }
 };
+
+
+CUDA_SPECIFIER inline void Partition_ID_Map::pack(const p_id_t* const src, const idx_t sz, const uint32_t bits, uint64_t* dst)
+{
+    // The IDs fill the words least-significant bits first; an ID straddling two words leaves its high bits in the next.
+    uint64_t acc = 0;   // Bits of the word being filled.
+    uint32_t fill = 0;  // Count of the bits filled.
+    for(idx_t i = 0; i < sz; ++i)
+    {
+        const uint64_t id = src[i];
+        acc |= id << fill;
+        fill += bits;
+        if(fill >= 64)
+        {
+            *dst++ = acc;
+            fill -= 64;
+            acc = (fill > 0 ? id >> (bits - fill) : 0);
+        }
+    }
+
+    if(fill > 0)    // The last word, partially filled.
+        *dst = acc;
+}
 
 
 inline p_id_t Partition_ID_Map::operator[](const idx_t i) const
