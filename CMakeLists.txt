@@ -260,6 +260,7 @@ target_compile_options(sa_convert PRIVATE ${COMPILE_FLAGS})
 target_compile_options(test_query PRIVATE ${COMPILE_FLAGS})
 target_compile_options(test_query PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
 target_compile_options(query_core PRIVATE ${COMPILE_FLAGS})
+target_compile_options(query_core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
 target_compile_options(query PRIVATE ${COMPILE_FLAGS})
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
@@ -281,6 +282,7 @@ target_link_libraries(query_core PRIVATE CUDA::cudart)
 # Link to OpenMP for host-side parallel tasks.
 target_link_libraries(core PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(tests PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(query_core PRIVATE OpenMP::OpenMP_CXX)
 
 # Link to the tester.
 target_link_libraries(core PRIVATE tests)

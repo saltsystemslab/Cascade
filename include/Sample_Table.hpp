@@ -48,9 +48,9 @@ public:
     double t_build() const { return t_build_; }
 
     // Builds the table of the suffixes at ranks `0, stride, 2 stride, ...` of the
-    // device-accessible index `idx`, with keys of `key_words` 64-bit words: 1,
-    // 2, or 4. Returns `false` with a reason in `err` on failure, leaving the
-    // table empty.
+    // index `idx`, with keys of `key_words` 64-bit words: 1, 2, or 4. The host
+    // builds it if both arrays are in host memory, and the device otherwise.
+    // Returns `false` with a reason in `err` on failure, leaving the table empty.
     bool build(const Suffix_Index& idx, idx_t stride, uint32_t key_words, std::string& err);
 
     // Frees the table.

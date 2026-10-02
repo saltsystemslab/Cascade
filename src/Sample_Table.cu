@@ -15,6 +15,9 @@ namespace gpu_saca
 namespace
 {
 
+constexpr idx_t HOST_PIECE_KEYS = idx_t(1) << 22;   // Keys the host packs at a time, into a pinned buffer.
+
+
 // Writes into `tab[0, J)` the packed prefixes of the suffixes at ranks
 // `0, stride, 2 stride, ...` of the suffix array `SA` over the text `T`; the
 // text's zero padding pads the prefixes of its last suffixes.
@@ -52,6 +55,73 @@ cudaError_t build(const Suffix_Index& idx, const idx_t stride, const idx_t J, co
     }
 }
 
+
+// Writes into `tab[0, j1 - j0)` the packed prefixes of the suffixes at ranks
+// `j stride`, `j0 <= j < j1`, of the host-side suffix array `SA` over the text
+// `T`, with the host's threads.
+template <typename T_sym_, idx_t W_>
+void pack_on_host(const T_sym_* const T, const uint8_t* const SA, const idx_t stride, const idx_t j0, const idx_t j1, Packed_Prefix<W_>* const tab)
+{
+    #pragma omp parallel for schedule(static)
+    for(idx_t j = j0; j < j1; ++j)
+        tab[j - j0] = Packed_Prefix<W_>::pack_prefix(T + sa40::load(SA, j * stride));
+}
+
+
+// Builds the `J` keys of `W_` words of the table of stride `stride` over the
+// host-accessible index `idx` into the device's `tab`, on the host, a piece at
+// a time through two pinned buffers: packing a piece overlaps copying the one
+// before.
+template <typename T_sym_, idx_t W_>
+cudaError_t build_on_host(const Suffix_Index& idx, const idx_t stride, const idx_t J, void* const tab)
+{
+    static_assert(W_ * sizeof(uint64_t) <= TEXT_PAD_BYTES, "a key must not read past the text's padding");
+
+    const idx_t piece = std::min(J, HOST_PIECE_KEYS);
+    Packed_Prefix<W_>* stage = nullptr;
+    cudaStream_t s = nullptr;
+    cudaEvent_t copied[2] = {nullptr, nullptr};
+    cudaError_t e = cudaHostAlloc(reinterpret_cast<void**>(&stage), 2 * piece * sizeof(Packed_Prefix<W_>), cudaHostAllocDefault);
+    if(e == cudaSuccess)    e = cudaStreamCreateWithFlags(&s, cudaStreamNonBlocking);
+    for(auto& ev : copied)
+        if(e == cudaSuccess)    e = cudaEventCreateWithFlags(&ev, cudaEventDisableTiming);
+
+    for(idx_t j0 = 0, k = 0; e == cudaSuccess && j0 < J; j0 += piece, ++k)
+    {
+        const idx_t j1 = std::min(J, j0 + piece);
+        Packed_Prefix<W_>* const buf = stage + (k & 1) * piece;
+        e = cudaEventSynchronize(copied[k & 1]);    // The buffer's previous piece is copied; returns at once before its first.
+        if(e != cudaSuccess)
+            break;
+
+        pack_on_host<T_sym_, W_>(idx.host_text<T_sym_>(), idx.host_sa(), stride, j0, j1, buf);
+        e = cudaMemcpyAsync(static_cast<Packed_Prefix<W_>*>(tab) + j0, buf, (j1 - j0) * sizeof(Packed_Prefix<W_>), cudaMemcpyHostToDevice, s);
+        if(e == cudaSuccess)    e = cudaEventRecord(copied[k & 1], s);
+    }
+
+    const cudaError_t done = (s != nullptr ? cudaStreamSynchronize(s) : cudaSuccess);
+    for(const auto ev : copied)
+        if(ev != nullptr)
+            cudaEventDestroy(ev);
+    if(s != nullptr)
+        cudaStreamDestroy(s);
+    cudaFreeHost(stage);
+    return e != cudaSuccess ? e : done;
+}
+
+
+// Dispatches `build_on_host` over the key width `W`.
+template <typename T_sym_>
+cudaError_t build_on_host(const Suffix_Index& idx, const idx_t stride, const idx_t J, const uint32_t W, void* const tab)
+{
+    switch(W)
+    {
+    case 1: return build_on_host<T_sym_, 1>(idx, stride, J, tab);
+    case 2: return build_on_host<T_sym_, 2>(idx, stride, J, tab);
+    default:    return build_on_host<T_sym_, 4>(idx, stride, J, tab);
+    }
+}
+
 }
 
 
@@ -85,9 +155,9 @@ Sample_Table& Sample_Table::operator=(Sample_Table&& o) noexcept
 bool Sample_Table::build(const Suffix_Index& idx, const idx_t stride, const uint32_t key_words, std::string& err)
 {
     release();
-    if(!idx.loaded() || !idx.device_accessible())
+    if(!idx.loaded() || (!idx.device_accessible() && !idx.host_accessible()))
     {
-        err = "the sample table needs a loaded, device-accessible index";
+        err = "the sample table needs a loaded index that the device or the host can access";
         return false;
     }
 
@@ -107,11 +177,13 @@ bool Sample_Table::build(const Suffix_Index& idx, const idx_t stride, const uint
         return false;
     }
 
+    // Built on the host if it can: its cores read the text faster than the device's random reads of host memory do.
+    const bool on_host = idx.host_accessible();
     switch(idx.sym_bytes())
     {
-    case 1: e = gpu_saca::build<uint8_t>(idx, stride, J, key_words, keys); break;
-    case 2: e = gpu_saca::build<uint16_t>(idx, stride, J, key_words, keys); break;
-    default:    e = gpu_saca::build<uint32_t>(idx, stride, J, key_words, keys);
+    case 1: e = (on_host ? build_on_host<uint8_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint8_t>(idx, stride, J, key_words, keys)); break;
+    case 2: e = (on_host ? build_on_host<uint16_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint16_t>(idx, stride, J, key_words, keys)); break;
+    default:    e = (on_host ? build_on_host<uint32_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint32_t>(idx, stride, J, key_words, keys));
     }
 
     if(e != cudaSuccess)
