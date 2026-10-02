@@ -28,6 +28,9 @@
 #   variants  on the TM_SWEEP workloads, infini-gram's own `find`, its
 #             prefetching (on a prefix of 1e5 queries, the index mapped), and
 #             its index in the other placement
+#   host      if the host searches our index, on the TM_SWEEP workloads in the
+#             direct mode and in two phases, over the searches each thread
+#             interleaves, TM_LANES, and over the threads, TM_HOST_THREADS
 #
 # Results in OUT_DIR: env.txt (provenance), ours/ and ig/ (logs, and the counts
 # of the first main replicate), compare.txt (count files: same or DIFFERENT),
@@ -38,7 +41,8 @@
 #                   under, kept for later runs; default /tmp/${USER}/query-stage;
 #                   `none` reads the indexes in place. STAGE_STREAMS sets the
 #                   pieces copied at a time (see stage.sh)
-#   TM_RUNS         default main,batch,ablation,threads,variants
+#   TM_RUNS         default main,batch,ablation,threads,variants,host; host runs
+#                   only if the host searches our index
 #   TM_IG_LOAD      infini-gram's index in the main, batch, and thread runs: mmap,
 #                   mapped as its engine defaults to (default), or ram, read into
 #                   the heap
@@ -60,8 +64,10 @@
 #   TM_BATCHES      default 1000,10000,100000,1000000,10000000,100000000
 #   TM_STRIDES      strides of the ablation; default 8,16,32,64,128,256
 #   TM_THREADS      pool sizes of the thread sweep; default 1,2,4,8,16,32,64,96,128,256
-#   TM_SWEEP        workloads of the thread sweep and the variants; default
-#                   present-m5,present-m10,present-m100,random-m5
+#   TM_SWEEP        workloads of the thread sweep, the variants, and our host
+#                   search's sweeps; default present-m5,present-m10,present-m100,random-m5
+#   TM_LANES        our host search's lanes per thread; default 1,4,8,16,32,64
+#   TM_HOST_THREADS our host search's threads; default 8,16,32,64,96,128
 #   TM_ARCH         CUDA architecture of the in-job build; default 120-real
 #   TM_CMAKE_ARGS   extra configure arguments, e.g. FETCHCONTENT_SOURCE_DIR_* offline
 #   INFINIGRAM_DIR  infini-gram checkout at v2.6.0; default ~/infini-gram
@@ -110,7 +116,7 @@ fi
 
 OUT="${4:-${RESULTS_ROOT:-${HOME}/gpu-saca-results}/timed-$(basename "${IDX}")-$(date -u +%Y%m%dT%H%M%SZ)}"
 STAGE="${TM_STAGE:-/tmp/${USER}/query-stage}"
-RUNS=",${TM_RUNS:-main,batch,ablation,threads,variants},"
+RUNS=",${TM_RUNS:-main,batch,ablation,threads,variants,host},"
 REPS="${TM_REPS:-6}"
 REPL="${TM_REPLICATES:-3}"
 BATCHES="${TM_BATCHES:-1000,10000,100000,1000000,10000000,100000000}"
@@ -120,6 +126,10 @@ TEXT_RES="${TM_TEXT_RES:-device}"
 SA_RES="${TM_SA_RES:-device}"
 OURS_NUMA="${TM_NUMA:-gpu}"
 IG_NUMA="${TM_IG_NUMA:-none}"
+HOST=0  # Whether the host searches our index: both arrays in host memory, either pageable.
+if [ "${TEXT_RES}" != device ] && [ "${SA_RES}" != device ] && { [ "${TEXT_RES}" = pageable ] || [ "${SA_RES}" = pageable ]; }; then
+    HOST=1
+fi
 read -r -a MAIN_MODES <<< "${TM_MAIN_MODES:---stride 0,32 --key-words 2 --sort 0}"
 read -r -a BATCH_MODES <<< "${TM_BATCH_MODES:---stride 0,32 --key-words 2 --sort 0,1}"
 if [ "${IG_LOAD}" != mmap ] && [ "${IG_LOAD}" != ram ]; then
@@ -171,6 +181,7 @@ fi
     echo "ig_numactl=${IG_NUMACTL[*]:-none}"
     echo "ours_text_res=${TEXT_RES}"
     echo "ours_sa_res=${SA_RES}"
+    echo "ours_host_search=${HOST}"
     echo "ours_main_modes=${MAIN_MODES[*]}"
     echo "ours_batch_modes=${BATCH_MODES[*]}"
     echo "kernel=$(uname -r)"
@@ -314,6 +325,18 @@ if want variants; then
         --q 100000 --reps 3
     ig "${OUT}/ig/placement/${other}.log" "${sweep_files}" --mode direct --threads "${T_ALL}" --load "${other}" --prewarm 0
     stamp "infini-gram variants: done"
+fi
+
+# Our host search's lanes and threads, a process each, if the host searches; infini-gram's pool sizes are its threads run's.
+if want host && [ "${HOST}" -eq 1 ]; then
+    lanes="${TM_LANES:-1,4,8,16,32,64}"
+    for l in ${lanes//,/ }; do
+        ours "${OUT}/ours/host-l${l}.log" "${sweep_files}" --stride 0,32 --key-words 2 --sort 0 --host-lanes "${l}"
+    done
+    host_threads="${TM_HOST_THREADS:-8,16,32,64,96,128}"
+    for t in ${host_threads//,/ }; do
+        ours "${OUT}/ours/host-t${t}.log" "${sweep_files}" --stride 0,32 --key-words 2 --sort 0 --host-threads "${t}"
+    done
 fi
 
 # The first main replicates' count files must be byte-identical; summarize.py
