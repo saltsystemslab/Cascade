@@ -326,6 +326,32 @@ def kernel_counters():
     return c
 
 
+# Free bytes across every node, zone and order, and the share of those sitting
+# in 2 MiB-or-larger blocks (bench.hpp:220-256). Absolute at run start, not a
+# delta: summarize.py reads it against peak_rss to tell a fragmented node from
+# a full one.
+def buddyinfo():
+    c = {"buddy_free": -1, "buddy_free_huge": -1}
+    page = os.sysconf("SC_PAGE_SIZE")
+    huge = 0
+    while (page << huge) < (2 << 20):
+        huge += 1
+    try:
+        for line in open("/proc/buddyinfo"):
+            z = line.find("zone")
+            if z < 0:
+                continue
+            for order, blocks in enumerate(map(int, line[z + 4:].split()[1:])):
+                b = blocks * (1 << order) * page
+                c["buddy_free"] = max(c["buddy_free"], 0) + b
+                if order >= huge:
+                    c["buddy_free_huge"] = max(c["buddy_free_huge"], 0) + b
+    except OSError:
+        pass
+
+    return c
+
+
 # Node memory low-water at 1 Hz. Runs are --exclusive, so this is the whole
 # build; a single-process peak does not exist here (make-part is `cpus`
 # subprocesses, ru_maxrss is a max not a sum, no memory cgroup on this node).
@@ -463,7 +489,7 @@ def cmd_run(a):
     real = os.path.join(stage_dir, "tokenized.0")
     log = os.path.join(a.results_dir, rid + ".log")
     r0 = resource.getrusage(resource.RUSAGE_CHILDREN)
-    k0 = kernel_counters()
+    k0, buddy = kernel_counters(), buddyinfo()
     s = MemSampler()
     s.start()
     with open(log, "wb") as lf:
@@ -541,7 +567,7 @@ def cmd_run(a):
     # `bench.hpp`'s field set. The fault and switch counters come from RUSAGE_CHILDREN,
     # not RUSAGE_SELF: their pipeline is a subprocess tree, and these counters sum across children.
     rec = {
-        "schema_version": 5, "run_id": rid, "method": "infinigram",
+        "schema_version": 6, "run_id": rid, "method": "infinigram",
         "build_type": "Release",
         "method_version": PIN_TAG,
         "commit": os.environ.get("IG_COMMIT", "unknown"),
@@ -567,7 +593,13 @@ def cmd_run(a):
         "cpu_sys": round(r1.ru_stime - r0.ru_stime, 6),
         "minflt": r1.ru_minflt - r0.ru_minflt, "majflt": r1.ru_majflt - r0.ru_majflt,
         "nvcsw": r1.ru_nvcsw - r0.ru_nvcsw, "nivcsw": r1.ru_nivcsw - r0.ru_nivcsw,
-        **kd,
+        **kd, **buddy,
+        # bench.hpp emits GPU_SACA's phase timers for every method; libsais
+        # leaves them at -1 and so does this.
+        **{k: -1.0 for k in ("t_prepage_pid", "t_pivots", "t_partition",
+                             "t_device_setup", "t_initial_rank",
+                             "t_exponentiate", "t_concatenate")},
+        "n_partitions": -1, "n_generations": -1,
         "exe_hash": int(sha256(binary)[:16], 16),
         "env_tuning": ";".join(sorted(f"{k}={v}" for k, v in os.environ.items()
                                       if k.startswith(("OMP_", "GPU_SACA_")))),
