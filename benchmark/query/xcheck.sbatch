@@ -23,9 +23,12 @@
 #                   for longer ones; default 1000000
 #   XC_STRIDE       search modes, as `query find --stride`; default 0,32
 #   XC_SORT         batch orders of the modes, as `query find --sort`; default 0
-#   XC_RES          tier of both arrays: device (default) or pinned
+#   XC_RES          tier of both arrays: device (default), pinned, or pageable
 #   XC_TEXT_RES     tier of the text; default XC_RES
 #   XC_SA_RES       tier of the suffix array; default XC_RES
+#   XC_NUMA         our process's NUMA placement: none (default), or interleave,
+#                   its memory interleaved over every node, as the host's search
+#                   wants
 #   XC_STAGE        node-local directory to stage both indexes and the held-out
 #                   text under first, as timed.sbatch does, and to keep them for
 #                   later runs; default none: they are read in place
@@ -83,10 +86,12 @@ TEXT_RES="${XC_TEXT_RES:-${RES}}"
 SA_RES="${XC_SA_RES:-${RES}}"
 THREADS="${XC_THREADS:-${SLURM_CPUS_PER_TASK:-$(nproc)}}"
 B="${REPO}/build-xcheck-sm${ARCH%%-*}"
+NUMA=()
+[ "${XC_NUMA:-none}" = interleave ] && command -v numactl > /dev/null && NUMA=(numactl --interleave=all)
 mkdir -p "${OUT}/qry" "${OUT}/ours" "${OUT}/ig"
 
 stamp() { echo "[$(date -u +%FT%TZ)] $*"; }
-stamp "start: $(hostname), $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1), commit $(git -C "${REPO}" rev-parse --short HEAD)$(git -C "${REPO}" diff --quiet HEAD || echo -dirty), text ${TEXT_RES}, suffix array ${SA_RES}, results ${OUT}"
+stamp "start: $(hostname), $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1), commit $(git -C "${REPO}" rev-parse --short HEAD)$(git -C "${REPO}" diff --quiet HEAD || echo -dirty), text ${TEXT_RES}, suffix array ${SA_RES}, numa ${NUMA[*]:-none}, results ${OUT}"
 
 stamp "build"
 # shellcheck disable=SC2086
@@ -136,7 +141,7 @@ fi
 files=$(ls "${OUT}"/qry/*.qry | paste -sd, -)
 
 stamp "ours"
-"${B}/src/query" find --index "${SIDX}" --queries "${files}" --text-res "${TEXT_RES}" --sa-res "${SA_RES}" --spot "${XC_SPOT:-100000}" \
+"${NUMA[@]}" "${B}/src/query" find --index "${SIDX}" --queries "${files}" --text-res "${TEXT_RES}" --sa-res "${SA_RES}" --spot "${XC_SPOT:-100000}" \
     --stride "${XC_STRIDE:-0,32}" --sort "${XC_SORT:-0}" --validate --reps 1 --cnt-dir "${OUT}/ours" > "${OUT}/ours/find.log" 2>&1
 stamp "ours: rc=$?"
 

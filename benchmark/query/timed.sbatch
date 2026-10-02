@@ -42,8 +42,15 @@
 #   TM_IG_LOAD      infini-gram's index in the main, batch, and thread runs: mmap,
 #                   mapped as its engine defaults to (default), or ram, read into
 #                   the heap
-#   TM_TEXT_RES     tier of our text: device (default) or pinned
-#   TM_SA_RES       tier of our suffix array: device (default) or pinned
+#   TM_TEXT_RES     tier of our text: device (default), pinned, or pageable
+#   TM_SA_RES       tier of our suffix array: device (default), pinned, or
+#                   pageable; with both in host memory and either pageable, the
+#                   host searches our index
+#   TM_NUMA         our process's NUMA placement: gpu, on the GPU's node
+#                   (default); interleave, its memory interleaved over every
+#                   node and its threads on every core, as the host's search
+#                   wants; or none
+#   TM_IG_NUMA      infini-gram's: none (default) or interleave
 #   TM_MAIN_MODES   our modes of the main runs, as `query find` options; default
 #                   `--stride 0,32 --key-words 2 --sort 0`
 #   TM_BATCH_MODES  our modes of the batch runs; default `--stride 0,32 --key-words
@@ -111,10 +118,16 @@ SWEEP="${TM_SWEEP:-present-m5,present-m10,present-m100,random-m5}"
 IG_LOAD="${TM_IG_LOAD:-mmap}"
 TEXT_RES="${TM_TEXT_RES:-device}"
 SA_RES="${TM_SA_RES:-device}"
+OURS_NUMA="${TM_NUMA:-gpu}"
+IG_NUMA="${TM_IG_NUMA:-none}"
 read -r -a MAIN_MODES <<< "${TM_MAIN_MODES:---stride 0,32 --key-words 2 --sort 0}"
 read -r -a BATCH_MODES <<< "${TM_BATCH_MODES:---stride 0,32 --key-words 2 --sort 0,1}"
 if [ "${IG_LOAD}" != mmap ] && [ "${IG_LOAD}" != ram ]; then
     echo "FATAL: TM_IG_LOAD must be mmap or ram, not '${IG_LOAD}'"
+    exit 1
+fi
+if [[ ! "${OURS_NUMA}" =~ ^(gpu|interleave|none)$ ]] || [[ ! "${IG_NUMA}" =~ ^(interleave|none)$ ]]; then
+    echo "FATAL: TM_NUMA must be gpu, interleave, or none, and TM_IG_NUMA interleave or none"
     exit 1
 fi
 ARCH="${TM_ARCH:-120-real}"
@@ -126,12 +139,18 @@ cp "$0" "${OUT}/timed.sbatch" 2> /dev/null   # The script as submitted.
 stamp() { echo "[$(date -u +%FT%TZ)] $*"; }
 want() { [[ "${RUNS}" == *",$1,"* ]]; }
 
-# Our process runs on the GPU's NUMA node; infini-gram's pool spans the machine.
+# Our process runs on the GPU's NUMA node, or over every node; infini-gram's pool spans the machine, its memory as placed or interleaved.
 bdf=$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader | head -1)
 node=$(cat "/sys/bus/pci/devices/$(echo "0000:${bdf#*:}" | tr 'A-F' 'a-f')/numa_node" 2> /dev/null || echo -1)
 NUMA=()
-if [ "${node}" -ge 0 ] 2> /dev/null && command -v numactl > /dev/null; then
-    NUMA=(numactl --cpunodebind="${node}" --membind="${node}")
+IG_NUMACTL=()
+if command -v numactl > /dev/null; then
+    if [ "${OURS_NUMA}" = gpu ] && [ "${node}" -ge 0 ] 2> /dev/null; then
+        NUMA=(numactl --cpunodebind="${node}" --membind="${node}")
+    elif [ "${OURS_NUMA}" = interleave ]; then
+        NUMA=(numactl --interleave=all)
+    fi
+    [ "${IG_NUMA}" = interleave ] && IG_NUMACTL=(numactl --interleave=all)
 fi
 
 {
@@ -149,6 +168,7 @@ fi
     echo "ig_load=${IG_LOAD}"
     echo "gpu_numa_node=${node}"
     echo "ours_numactl=${NUMA[*]:-none}"
+    echo "ig_numactl=${IG_NUMACTL[*]:-none}"
     echo "ours_text_res=${TEXT_RES}"
     echo "ours_sa_res=${SA_RES}"
     echo "ours_main_modes=${MAIN_MODES[*]}"
@@ -216,7 +236,7 @@ ig()
 {
     local log="$1" files="$2"
     shift 2
-    "${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${files}" --reps "${REPS}" "$@" > "${log}" 2>&1 \
+    "${IG_NUMACTL[@]}" "${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${files}" --reps "${REPS}" "$@" > "${log}" 2>&1 \
         || stamp "infini-gram failed: ${log}"
 }
 
