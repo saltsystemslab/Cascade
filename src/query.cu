@@ -38,8 +38,8 @@ R"(Usage:
   query find --index DIR --queries Q1.qry[,Q2.qry,...] [--q N] [--text-res R] [--sa-res R]
              [--spot N] [--stride S,...] [--key-words W,...] [--sort 0|1,...] [--gather 0|1,...]
              [--gather-queries G] [--reps K] [--chunk-queries C] [--chunk-symbols Y]
-             [--min-chunk-queries C'] [--min-chunk-symbols Y'] [--itv-out F] [--cnt-out F]
-             [--cnt-dir D] [--validate]
+             [--min-chunk-queries C'] [--min-chunk-symbols Y'] [--host-threads H] [--host-lanes L]
+             [--itv-out F] [--cnt-out F] [--cnt-dir D] [--validate]
       Loads the index once, and finds the SA-intervals of the first N (default:
       all) queries of every query file, K times (default 3) each way: from
       device memory, and end to end, from host memory through the pipeline, both
@@ -49,15 +49,21 @@ R"(Usage:
       (default 2^24, or 2^28) in all, two per stream when their shares of the
       batch are at least C' queries (default 2^16) or Y' symbols (default
       2^22), and whole chunks if gathering; its intervals must equal those
-      from device memory. R is `device` (default) or `pinned`; --spot sets the
-      suffix-array order spot-checks at load (default 100000). The search runs
-      in two phases over a sample table of stride S (default 32; 0 selects the
-      direct mode) with keys of W words (1, 2, or 4; default 2, or 4 for 4-byte
-      symbols), with every batch sorted by its packed prefixes if --sort 1, and
-      its brackets' suffix-array entries gathered into device memory, G queries
-      at a time (default 2^18), if --gather 1 (default: iff the suffix array is
-      pinned); lists run every combination as a mode, on the index loaded once.
-      --validate checks every interval with the O(m) certificate on the device.
+      from device memory. R is `device` (default), `pinned`, or `pageable`;
+      --spot sets the suffix-array order spot-checks at load (default 100000).
+      The search runs in two phases over a sample table of stride S (default
+      32; 0 selects the direct mode) with keys of W words (1, 2, or 4; default
+      2, or 4 for 4-byte symbols), with every batch sorted by its packed
+      prefixes if --sort 1, and its brackets' suffix-array entries gathered
+      into device memory, G queries at a time (default 2^18), if --gather 1
+      (default: iff the suffix array is pinned); lists run every combination as
+      a mode, on the index loaded once. With both arrays in host memory and
+      either pageable, the host searches: the device ranks every chunk in the
+      table, and H threads (default: every core) search its brackets, each
+      interleaving L searches (default 32); the direct mode runs on the host
+      alone, and from device memory means there and back. --validate checks
+      every interval with the O(m) certificate on the device, or on the host
+      if it searches.
       The counts of a single query file and mode go to --cnt-out, or those of
       each to D/<stem>.cnt, or D/<stem>@s<S>w<W>o<sort>g<gather>.cnt for several
       modes.
@@ -355,12 +361,13 @@ int run_find(const Args& a)
 {
     std::string err;
     Query_Options opt;
-    uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3;
+    uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3, host_threads = opt.host_threads, host_lanes = opt.host_lanes;
     std::vector<uint64_t> strides = {opt.stride}, key_words = {0}, sorts = {0}, gathers;
     if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
         || !get_u64(a, "chunk-queries", opt.chunk_queries, err) || !get_u64(a, "chunk-symbols", opt.chunk_symbols, err)
         || !get_u64(a, "min-chunk-queries", opt.min_chunk_queries, err) || !get_u64(a, "min-chunk-symbols", opt.min_chunk_symbols, err)
         || !get_u64(a, "gather-queries", opt.gather_queries, err)
+        || !get_u64(a, "host-threads", host_threads, err) || !get_u64(a, "host-lanes", host_lanes, err)
         || !get_u64_list(a, "stride", strides, err) || !get_u64_list(a, "key-words", key_words, err) || !get_u64_list(a, "sort", sorts, err)
         || !get_u64_list(a, "gather", gathers, err)
         || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
@@ -409,6 +416,8 @@ int run_find(const Args& a)
     }
 
     opt.spot = spot;
+    opt.host_threads = static_cast<unsigned>(std::min<uint64_t>(host_threads, std::numeric_limits<unsigned>::max()));
+    opt.host_lanes = static_cast<unsigned>(std::min<uint64_t>(host_lanes, std::numeric_limits<unsigned>::max()));   // Too many is rejected at load.
     reps = std::max<uint64_t>(reps, 1);
 
     Query_Engine<T_sym_> eng;
@@ -426,6 +435,7 @@ int run_find(const Args& a)
     std::printf("streams=%zu\nchunk_queries=%" PRIu64 "\nchunk_symbols=%" PRIu64 "\nmin_chunk_queries=%" PRIu64 "\nmin_chunk_symbols=%" PRIu64
                 "\ngather_queries=%" PRIu64 "\n", eng.streams(), eng.options().chunk_queries, eng.options().chunk_symbols,
                 eng.options().min_chunk_queries, eng.options().min_chunk_symbols, eng.options().gather_queries);
+    std::printf("host_search=%d\nhost_threads=%u\nhost_lanes=%u\n", eng.host_searches(), eng.options().host_threads, eng.options().host_lanes);
 
     // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`; to `<stem>@<mode>.cnt` if several modes.
     int rc = 0;
