@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <numeric>
 #include <random>
 #include <string>
 #include <thread>
@@ -448,6 +449,123 @@ bool test_spot_check()
 }
 
 
+// Checks the host's search against the oracle on the fixture text `T` of the
+// symbols `alpha`, with some queries repeated: over the whole suffix array, and
+// within brackets of random widths around the true boundaries, some wider than
+// a window of entries; in the batch's order, and sorted with identical queries
+// adjacent; over several counts of lanes and threads. Checks also that the
+// host's certificate accepts the intervals and rejects perturbed ones.
+template <typename T_sym_>
+bool check_host_search(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const char* const what)
+{
+    const idx_t n = T.size();
+    const auto SA = test::build_sa40(T);
+    std::mt19937_64 rng(seed);
+    std::vector<uint64_t> off;
+    std::vector<T_sym_> sym;
+    fixture_queries(T, alpha, rng, 400, off, sym);
+    for(int k = 0; k < 200; ++k)
+    {
+        const idx_t i = rng() % 400;
+        const std::vector<T_sym_> P(sym.begin() + off[i], sym.begin() + off[i + 1]);
+        sym.insert(sym.end(), P.begin(), P.end());
+        off.push_back(sym.size());
+    }
+
+    const idx_t q = off.size() - 1;
+    std::vector<SA_Interval> want(q);
+    for(idx_t i = 0; i < q; ++i)
+        want[i] = ref::find_one(T.data(), n, SA.data(), sym.data() + off[i], off[i + 1] - off[i]);
+
+    const auto around = [&](const idx_t x)
+    {
+        const idx_t w = (rng() % 4 == 0 ? 1000 : 40);
+        return Rank_Range{x - std::min<idx_t>(x, rng() % w), x + std::min<idx_t>(n - x, rng() % w)};
+    };
+
+    std::vector<uint32_t> ids(q);
+    std::iota(ids.begin(), ids.end(), 0);
+    std::sort(ids.begin(), ids.end(), [&](const uint32_t i, const uint32_t j)
+    {
+        return std::lexicographical_compare(sym.begin() + off[i], sym.begin() + off[i + 1], sym.begin() + off[j], sym.begin() + off[j + 1]);
+    });
+
+    std::vector<Rank_Range> br(2 * q), br_sorted(2 * q);
+    for(idx_t i = 0; i < q; ++i)
+        br[2 * i] = around(want[i].lo), br[2 * i + 1] = around(want[i].hi);
+    for(idx_t g = 0; g < q; ++g)
+        br_sorted[2 * g] = br[2 * ids[g]], br_sorted[2 * g + 1] = br[2 * ids[g] + 1];
+
+    const char* const how[] = {"over the whole suffix array", "within brackets", "sorted, within brackets"};
+    for(const unsigned lanes : {1u, 2u, 5u, 16u, 64u})
+        for(const unsigned threads : {1u, 3u})
+            for(int k = 0; k < 3; ++k)
+            {
+                std::vector<SA_Interval> got(q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
+                host_search::find(T.data(), n, SA.data(), off.data(), sym.data(), q, k == 0 ? nullptr : (k == 1 ? br.data() : br_sorted.data()),
+                                  k == 2 ? ids.data() : nullptr, got.data(), threads, lanes);
+                for(idx_t i = 0; i < q; ++i)
+                    CHECK(same(got[i], want[i]), "%s, %u lanes, %u threads, %s: query %" PRIu64 " (m = %" PRIu64 "): [%" PRIu64 ", %" PRIu64
+                          ") vs oracle [%" PRIu64 ", %" PRIu64 ")", what, lanes, threads, how[k], i, off[i + 1] - off[i], got[i].lo, got[i].hi,
+                          want[i].lo, want[i].hi);
+            }
+
+    unsigned long long fail_c = 0, first = q;
+    host_search::certify(T.data(), n, SA.data(), off.data(), sym.data(), q, want.data(), fail_c, first, 3);
+    CHECK(fail_c == 0 && first == q, "%s: the host certificate rejects correct intervals", what);
+
+    auto wrong = want;
+    idx_t perturbed = 0, first_wrong = q;
+    for(idx_t i = 0; i < q; ++i)
+        if(wrong[i].hi < n)
+        {
+            ++wrong[i].hi, ++perturbed;
+            first_wrong = std::min(first_wrong, i);
+        }
+
+    host_search::certify(T.data(), n, SA.data(), off.data(), sym.data(), q, wrong.data(), fail_c, first, 3);
+    CHECK(fail_c == perturbed && first == first_wrong, "%s: the host certificate accepts perturbed intervals", what);
+
+    return true;
+}
+
+
+bool test_host_search()
+{
+    std::mt19937_64 rng(19);
+    for(const idx_t n : {1, 2, 3, 15, 16, 17, 1000, 20000})
+    {
+        for(const idx_t sigma : {2, 4, 65536})
+        {
+            std::vector<uint16_t> alpha;
+            for(idx_t s = 0; s < sigma; ++s)
+                alpha.push_back(static_cast<uint16_t>(sigma == 65536 ? s : (s * 65535) / (sigma - 1)));
+            const auto T = random_text<uint16_t>(n, alpha, 0xFFFF, 50, rng);
+            const std::string what = "u16 n=" + std::to_string(n) + " sigma=" + std::to_string(sigma);
+            if(!check_host_search(T, alpha, rng(), what.c_str()))  return false;
+        }
+
+        {
+            const std::vector<uint8_t> alpha = {0, 1, 2, 0x7F, 0x80, 0xFE, 0xFF};
+            const auto T = random_text<uint8_t>(n, alpha, 0xFF, 40, rng);
+            if(!check_host_search(T, alpha, rng(), ("u8 n=" + std::to_string(n)).c_str()))  return false;
+        }
+        {
+            const std::vector<uint32_t> alpha = {0, 1, 0x7FFFFFFFu, 0x80000000u, 0x80000001u, 0xFFFFFFFEu};
+            const auto T = random_text<uint32_t>(n, alpha, 0xFFFFFFFFu, 40, rng);
+            if(!check_host_search(T, alpha, rng(), ("u32 n=" + std::to_string(n)).c_str()))  return false;
+        }
+    }
+
+    // Periodic text: deep common prefixes, and long matches.
+    std::vector<uint16_t> T;
+    for(int i = 0; i < 3000; ++i)
+        T.push_back(static_cast<uint16_t>(i % 2 ? 7 : 3));
+
+    return check_host_search(T, {3, 7}, 23, "u16 periodic (ab)^k");
+}
+
+
 // Returns `true` iff a CUDA device is available.
 bool gpu_available()
 {
@@ -601,13 +719,14 @@ bool check_every_way(const Query_Engine<T_sym_>& eng, const std::vector<uint64_t
 }
 
 
-// Checks the device engine against the oracle on the fixture text `T` of the
-// symbols `alpha`, in every device-accessible placement, with the suffix array
-// in `parts` parts: in the direct mode, and in two phases over every stride of
-// `{1, 2, 3, 16, 64, n + 5}`, key width, batch order, and bracket source; every
+// Checks the engine against the oracle on the fixture text `T` of the symbols
+// `alpha`, in every placement, with the suffix array in `parts` parts: in the
+// direct mode, and in two phases over every stride of `{1, 2, 3, 16, 64, n +
+// 5}`, key width, batch order, and bracket source the placement allows; every
 // way the engine finds, with chunks of a few queries, so that the pipeline
-// crosses chunks and keeps long queries alone, and gathers of fewer still.
-// Checks also that the placement picks the bracket source, and that the device
+// crosses chunks and keeps long queries alone, and gathers of fewer still; and
+// the host's search over several counts of lanes. Checks also that the
+// placement picks the searcher and the bracket source, and that the
 // certificate accepts the intervals and rejects perturbed ones.
 template <typename T_sym_>
 bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const idx_t parts,
@@ -635,37 +754,52 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
                 for(const Gather gather : {Gather::never, Gather::always})
                     modes.push_back({stride, key_words, sort, gather});
 
-    for(const auto text_res : {Residency::device, Residency::pinned})
-        for(const auto sa_res : {Residency::device, Residency::pinned})
+    // Placements, and the lanes of each thread of the host's search, if the host searches.
+    struct Placement { Residency text_res, sa_res; unsigned lanes; };
+    for(const Placement pl : {Placement{Residency::device, Residency::device, 16}, Placement{Residency::device, Residency::pinned, 16},
+                              Placement{Residency::pinned, Residency::device, 16}, Placement{Residency::pinned, Residency::pinned, 16},
+                              Placement{Residency::pageable, Residency::pageable, 3}, Placement{Residency::pinned, Residency::pageable, 16},
+                              Placement{Residency::pageable, Residency::pinned, 1}})
+    {
+        const std::string where = std::string(what) + " (text " + residency_name(pl.text_res) + ", suffix array " + residency_name(pl.sa_res) + ")";
+        const bool host = (pl.text_res == Residency::pageable || pl.sa_res == Residency::pageable);
+        Query_Engine<T_sym_> eng;
+        Query_Options opt{pl.text_res, pl.sa_res, 100000, 0};
+        opt.chunk_queries = 7;
+        opt.chunk_symbols = 23;
+        opt.gather_queries = 5;
+        opt.host_threads = 4;
+        opt.host_lanes = pl.lanes;
+        CHECK(eng.load(dir.string(), opt, err), "%s: %s", where.c_str(), err.c_str());
+        CHECK(eng.host_searches() == host, "%s: the placement must pick the searcher", where.c_str());
+        CHECK(eng.options().gather == (pl.sa_res == Residency::pinned && !host ? Gather::always : Gather::never),
+              "%s: the placement must pick the bracket source", where.c_str());
+        for(const auto& md : modes)
         {
-            const std::string where = std::string(what) + " (text " + residency_name(text_res) + ", suffix array " + residency_name(sa_res) + ")";
-            Query_Engine<T_sym_> eng;
-            Query_Options opt{text_res, sa_res, 100000, 0};
-            opt.chunk_queries = 7;
-            opt.chunk_symbols = 23;
-            opt.gather_queries = 5;
-            CHECK(eng.load(dir.string(), opt, err), "%s: %s", where.c_str(), err.c_str());
-            CHECK(eng.options().gather == (sa_res == Residency::pinned ? Gather::always : Gather::never),
-                  "%s: the placement must pick the bracket source", where.c_str());
-            for(const auto& md : modes)
+            if(host && md.gather == Gather::always)
             {
-                CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s: %s", where.c_str(), err.c_str());
-                const std::string mode = where + ", stride " + std::to_string(md.stride) + ", key words " + std::to_string(md.key_words)
-                                         + ", sort " + std::to_string(md.sort) + ", gather " + std::to_string(md.gather == Gather::always);
-                if(!check_every_way(eng, off, sym, want, mode))
-                    return false;
+                CHECK(!eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s: gathering must be rejected if the host searches",
+                      where.c_str());
+                continue;
             }
 
-            eng.find(off.data(), sym.data(), q, got.data());
-
-            CHECK(device_certify(eng, off, sym, got) == 0, "%s: the device certificate rejects correct intervals", where.c_str());
-            auto wrong = got;
-            idx_t perturbed = 0;
-            for(auto& I : wrong)
-                if(I.hi < n)
-                    ++I.hi, ++perturbed;
-            CHECK(device_certify(eng, off, sym, wrong) == perturbed, "%s: the device certificate accepts perturbed intervals", where.c_str());
+            CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s: %s", where.c_str(), err.c_str());
+            const std::string mode = where + ", stride " + std::to_string(md.stride) + ", key words " + std::to_string(md.key_words)
+                                     + ", sort " + std::to_string(md.sort) + ", gather " + std::to_string(md.gather == Gather::always);
+            if(!check_every_way(eng, off, sym, want, mode))
+                return false;
         }
+
+        eng.find(off.data(), sym.data(), q, got.data());
+
+        CHECK(device_certify(eng, off, sym, got) == 0, "%s: the certificate rejects correct intervals", where.c_str());
+        auto wrong = got;
+        idx_t perturbed = 0;
+        for(auto& I : wrong)
+            if(I.hi < n)
+                ++I.hi, ++perturbed;
+        CHECK(device_certify(eng, off, sym, wrong) == perturbed, "%s: the certificate accepts perturbed intervals", where.c_str());
+    }
 
     return true;
 }
@@ -673,7 +807,7 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
 
 // Checks that the sample table the engine builds for the fixture text `T` holds
 // the zero-padded packed prefixes of every `stride`-th suffix, for keys of `W_`
-// words.
+// words: built on the device, and on the host from either of its tiers.
 template <typename T_sym_, idx_t W_>
 bool check_sample_table(const std::vector<T_sym_>& T, const idx_t stride, const char* const what)
 {
@@ -682,21 +816,23 @@ bool check_sample_table(const std::vector<T_sym_>& T, const idx_t stride, const 
     std::string err;
     CHECK(write_index(dir, T, SA, 1, err), "%s: %s", what, err.c_str());
 
-    Query_Engine<T_sym_> eng;
-    CHECK(eng.load(dir.string(), Query_Options{Residency::device, Residency::device, 0, stride, static_cast<uint32_t>(W_)}, err),
-          "%s: %s", what, err.c_str());
-    const auto& tab = eng.table();
     const idx_t n = T.size(), J = (n + stride - 1) / stride;
-    CHECK(tab.size() == J && tab.stride() == stride && tab.key_words() == W_ && tab.key_symbols() == W_ * 8 / sizeof(T_sym_),
-          "%s: unexpected table shape", what);
-
-    std::vector<Packed_Prefix<W_>> got(J);
-    CUDA_CHECK(cudaMemcpy(got.data(), tab.template keys<W_>(), J * sizeof(Packed_Prefix<W_>), cudaMemcpyDeviceToHost));
     std::vector<T_sym_> padded(T);
     padded.resize(n + W_ * 8 / sizeof(T_sym_), 0);
-    for(idx_t j = 0; j < J; ++j)
-        CHECK(got[j] == Packed_Prefix<W_>::pack_prefix(padded.data() + sa40::load(SA.data(), j * stride)),
-              "%s: key %" PRIu64 " of stride %" PRIu64 " differs from the host's", what, j, stride);
+    for(const Residency res : {Residency::device, Residency::pinned, Residency::pageable})
+    {
+        Query_Engine<T_sym_> eng;
+        CHECK(eng.load(dir.string(), Query_Options{res, res, 0, stride, static_cast<uint32_t>(W_)}, err), "%s: %s", what, err.c_str());
+        const auto& tab = eng.table();
+        CHECK(tab.size() == J && tab.stride() == stride && tab.key_words() == W_ && tab.key_symbols() == W_ * 8 / sizeof(T_sym_),
+              "%s, %s arrays: unexpected table shape", what, residency_name(res));
+
+        std::vector<Packed_Prefix<W_>> got(J);
+        CUDA_CHECK(cudaMemcpy(got.data(), tab.template keys<W_>(), J * sizeof(Packed_Prefix<W_>), cudaMemcpyDeviceToHost));
+        for(idx_t j = 0; j < J; ++j)
+            CHECK(got[j] == Packed_Prefix<W_>::pack_prefix(padded.data() + sa40::load(SA.data(), j * stride)),
+                  "%s, %s arrays: key %" PRIu64 " of stride %" PRIu64 " differs from the host's", what, residency_name(res), j, stride);
+    }
 
     return true;
 }
@@ -740,12 +876,13 @@ bool test_gpu_find()
 
 
 // Checks the pipeline on batches of many chunks, in the direct mode and in two
-// phases, sorted and not, and gathered in tiles that cross chunks: chunks
-// bounded by their queries and by their symbols, as the most for a chunk and as
-// its share of a batch split across the streams, or whole if gathering; the
-// most's defaults; queries longer than a chunk, empty queries, runs of
-// identical queries and their near twins, offsets that start past the symbols'
-// first, an empty batch, and concurrent calls.
+// phases, sorted and not, and gathered in tiles that cross chunks, with the
+// device searching and with the host: chunks bounded by their queries and by
+// their symbols, as the most for a chunk and as its share of a batch split
+// across the streams, or whole if gathering; the most's defaults; queries
+// longer than a chunk, empty queries, runs of identical queries and their near
+// twins, offsets that start past the symbols' first, an empty batch, and
+// concurrent calls.
 bool test_pipeline()
 {
     std::mt19937_64 rng(17);
@@ -836,45 +973,61 @@ bool test_pipeline()
               "chunks of gathered brackets must default to 2^24 queries and 2^28 symbols, others to 2^18 and 2^24");
     }
 
-    // The most for a chunk, and the least of its share of a batch.
+    {
+        Query_Options opt;
+        opt.text_res = opt.sa_res = Residency::pageable;
+        Query_Engine<uint16_t> eng;
+        CHECK(eng.load(dir.string(), opt, err), "%s", err.c_str());
+        CHECK(eng.host_searches() && eng.options().chunk_queries == (idx_t(1) << 18) && eng.options().chunk_symbols == (idx_t(1) << 24),
+              "chunks of the host's search must default to 2^18 queries and 2^24 symbols");
+    }
+
+    // The most for a chunk, and the least of its share of a batch; with the device searching, and the host.
     struct Chunk { idx_t queries, symbols, min_queries, min_symbols; };
     struct Mode { idx_t stride; uint32_t key_words; bool sort; Gather gather; };
     const Query_Options dflt;
-    for(const Chunk ch : {Chunk{dflt.chunk_queries, dflt.chunk_symbols, dflt.min_chunk_queries, dflt.min_chunk_symbols}, Chunk{1000, 5000, 1000, 5000},
-                          Chunk{3, 2, 3, 2}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1000, 5000}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1, 1},
-                          Chunk{700, 3000, 1, 1}})
+    for(const Residency res : {Residency::device, Residency::pageable})
     {
-        Query_Options opt;
-        opt.chunk_queries = ch.queries;
-        opt.chunk_symbols = ch.symbols;
-        opt.min_chunk_queries = ch.min_queries;
-        opt.min_chunk_symbols = ch.min_symbols;
-        opt.gather_queries = 777;
-        Query_Engine<uint16_t> eng;
-        CHECK(eng.load(dir.string(), opt, err), "%s", err.c_str());
-        for(const Mode md : {Mode{0, 0, false, Gather::never}, Mode{16, 2, false, Gather::never}, Mode{16, 2, true, Gather::never},
-                             Mode{16, 2, true, Gather::always}})
+        for(const Chunk ch : {Chunk{dflt.chunk_queries, dflt.chunk_symbols, dflt.min_chunk_queries, dflt.min_chunk_symbols}, Chunk{1000, 5000, 1000, 5000},
+                              Chunk{3, 2, 3, 2}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1000, 5000}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1, 1},
+                              Chunk{700, 3000, 1, 1}})
         {
-            CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s", err.c_str());
-            const std::string what = "chunks of up to " + std::to_string(eng.options().chunk_queries) + " queries and "
-                                     + std::to_string(eng.options().chunk_symbols) + " symbols, of at least " + std::to_string(ch.min_queries) + " and "
-                                     + std::to_string(ch.min_symbols) + ", stride " + std::to_string(md.stride) + ", sort " + std::to_string(md.sort)
-                                     + ", gather " + std::to_string(md.gather == Gather::always);
-            if(!check_every_way(eng, off, sym, want, what) || !check_every_way(eng, off5, sym5, want, what + ", offsets from 5")
-                || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries")
-                || !check_every_way(eng, off_d, sym_d, want_d, what + ", runs of identical queries")
-                || (ch.min_queries == dflt.min_chunk_queries && !check_every_way(eng, off_l, sym_l, want_l, what + ", 200000 queries")))
-                return false;
+            Query_Options opt;
+            opt.text_res = opt.sa_res = res;
+            opt.chunk_queries = ch.queries;
+            opt.chunk_symbols = ch.symbols;
+            opt.min_chunk_queries = ch.min_queries;
+            opt.min_chunk_symbols = ch.min_symbols;
+            opt.gather_queries = 777;
+            Query_Engine<uint16_t> eng;
+            CHECK(eng.load(dir.string(), opt, err), "%s", err.c_str());
+            for(const Mode md : {Mode{0, 0, false, Gather::never}, Mode{16, 2, false, Gather::never}, Mode{16, 2, true, Gather::never},
+                                 Mode{16, 2, true, Gather::always}})
+            {
+                if(eng.host_searches() && md.gather == Gather::always)  // Rejected; see `check_gpu_fixture`.
+                    continue;
 
-            eng.find(off.data(), sym.data(), 0, nullptr);   // No queries: nothing to touch.
+                CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s", err.c_str());
+                const std::string what = std::string(residency_name(res)) + " arrays, chunks of up to " + std::to_string(eng.options().chunk_queries)
+                                         + " queries and " + std::to_string(eng.options().chunk_symbols) + " symbols, of at least "
+                                         + std::to_string(ch.min_queries) + " and " + std::to_string(ch.min_symbols) + ", stride " + std::to_string(md.stride)
+                                         + ", sort " + std::to_string(md.sort) + ", gather " + std::to_string(md.gather == Gather::always);
+                if(!check_every_way(eng, off, sym, want, what) || !check_every_way(eng, off5, sym5, want, what + ", offsets from 5")
+                    || !check_every_way(eng, off_e, std::vector<uint16_t>(), want_e, what + ", empty queries")
+                    || !check_every_way(eng, off_d, sym_d, want_d, what + ", runs of identical queries")
+                    || (ch.min_queries == dflt.min_chunk_queries && !check_every_way(eng, off_l, sym_l, want_l, what + ", 200000 queries")))
+                    return false;
 
-            // Concurrent calls take their turns.
-            std::vector<SA_Interval> got_a(want.size()), got_b(want.size());
-            std::thread other([&] { eng.find(off5.data(), sym5.data(), want.size(), got_b.data()); });
-            eng.find(off.data(), sym.data(), want.size(), got_a.data());
-            other.join();
-            for(idx_t i = 0; i < want.size(); ++i)
-                CHECK(same(got_a[i], want[i]) && same(got_b[i], want[i]), "%s: concurrent calls: query %" PRIu64 " differs", what.c_str(), i);
+                eng.find(off.data(), sym.data(), 0, nullptr);   // No queries: nothing to touch.
+
+                // Concurrent calls take their turns.
+                std::vector<SA_Interval> got_a(want.size()), got_b(want.size());
+                std::thread other([&] { eng.find(off5.data(), sym5.data(), want.size(), got_b.data()); });
+                eng.find(off.data(), sym.data(), want.size(), got_a.data());
+                other.join();
+                for(idx_t i = 0; i < want.size(); ++i)
+                    CHECK(same(got_a[i], want[i]) && same(got_b[i], want[i]), "%s: concurrent calls: query %" PRIu64 " differs", what.c_str(), i);
+            }
         }
     }
 
@@ -938,7 +1091,8 @@ bool test_gpu_rejects()
     CHECK(eng.load(dir.string(), Query_Options{}, err), "%s", err.c_str());
     Query_Engine<uint8_t> narrow;
     CHECK(!narrow.load(dir.string(), Query_Options{}, err), "a symbol-width mismatch must be rejected");
-    CHECK(!eng.load(dir.string(), Query_Options{Residency::pageable, Residency::device, 0}, err), "a host-only placement must be rejected");
+    CHECK(!eng.load(dir.string(), Query_Options{Residency::pageable, Residency::device, 0}, err),
+          "a placement split between device and pageable memory must be rejected");
     for(const int k : {0, 1, 2})
     {
         Query_Options opt;
@@ -953,6 +1107,19 @@ bool test_gpu_rejects()
         Query_Options opt;
         opt.gather_queries = 0;
         CHECK(!eng.load(dir.string(), opt, err), "gathers of 0 queries must be rejected");
+    }
+
+    for(const unsigned lanes : {0u, host_search::MAX_LANES + 1})
+    {
+        Query_Options opt;
+        opt.host_lanes = lanes;
+        CHECK(!eng.load(dir.string(), opt, err), "host searches of %u lanes must be rejected", lanes);
+    }
+
+    {
+        Query_Options opt{Residency::pageable, Residency::pageable, 0};
+        opt.gather = Gather::always;
+        CHECK(!eng.load(dir.string(), opt, err), "gathering must be rejected if the host searches");
     }
 
     std::filesystem::resize_file(dir / "sa.u40.part0", SA_WIDTH * T.size() - 1);
@@ -1013,6 +1180,7 @@ int main()
         {"oracle vs brute force",   test_oracle_random,         false},
         {"edge cases",              test_edge_cases,            false},
         {"order spot-check",        test_spot_check,            false},
+        {"host search vs oracle",   test_host_search,           false},
         {"index load, host tiers",  test_index_host_tiers,      false},
         {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
