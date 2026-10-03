@@ -5,6 +5,7 @@
 
 
 #include "types.hpp"
+#include "lane.hpp"
 #include "Spin_Lock.hpp"
 
 #include <cstdint>
@@ -19,8 +20,8 @@ namespace gpu_saca
 
 // Pool of fixed-size message-chunks for the RAM-tier of the inboxes, carved from
 // a single reservation of address-space. A chunk holds `chunk_cap` messages: all
-// their targets, followed by all their ranks. The pool only stores and charging
-// the host-budget for the chunks is up to its users.
+// their target-lanes, followed by all their ranks. The pool only stores and
+// charging the host-budget for the chunks is up to its users.
 class Message_Pool
 {
 public:
@@ -81,11 +82,11 @@ public:
     // bytes released.
     std::size_t release_free(std::size_t b);
 
-    // Returns the message-targets of the chunk `c`.
-    idx_t* tgt(const chunk_t c) const { return reinterpret_cast<idx_t*>(base_ + c * chunk_bytes_); }
+    // Returns the message-target lanes of the chunk `c`.
+    uint8_t* tgt(const chunk_t c) const { return reinterpret_cast<uint8_t*>(base_ + c * chunk_bytes_); }
 
     // Returns the message-ranks of the chunk `c`.
-    msg_rank_t* rank(const chunk_t c) const { return reinterpret_cast<msg_rank_t*>(base_ + c * chunk_bytes_ + chunk_cap_ * sizeof(idx_t)); }
+    msg_rank_t* rank(const chunk_t c) const { return reinterpret_cast<msg_rank_t*>(base_ + c * chunk_bytes_ + lane::bytes(chunk_cap_)); }
 };
 
 }

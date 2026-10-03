@@ -5,6 +5,7 @@
 #include "Staging_Slab.hpp"
 #include "bit-layout.hpp"
 #include "message.hpp"
+#include "lane.hpp"
 
 #include "omp.h"
 
@@ -51,7 +52,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
             // In the following checks, for a poison-pill message, it is impossible
             // to detect whether the pill was a direct push or a forward.
 
-            const auto target = bit_layout::suffix_of(msg_target[i]);
+            const auto target = bit_layout::suffix_of(lane::load(msg_target, i));
 
             // Sender check: the sender of this message must belong to this partition.
             {
@@ -152,7 +153,7 @@ bool validate_inbox_mass(const Partition_Backend& backend)
 }
 
 
-uint64_t message_checksum(const idx_t* const tgt, const msg_rank_t* const rank, const idx_t n)
+uint64_t message_checksum(const uint8_t* const tgt, const msg_rank_t* const rank, const idx_t n)
 {
     const auto mix = [](uint64_t z) // SplitMix64's finalizer, as the per-message hash.
     {
@@ -163,7 +164,7 @@ uint64_t message_checksum(const idx_t* const tgt, const msg_rank_t* const rank, 
 
     uint64_t sum = 0;   // Wrapping sum of the messages' hashes: independent of their order.
     for(idx_t i = 0; i < n; ++i)
-        sum += mix(mix(tgt[i]) + rank[i]);
+        sum += mix(mix(lane::load(tgt, i)) + rank[i]);
 
     return sum;
 }
@@ -176,7 +177,7 @@ bool validate_inbox_routing(const Staging_Slab& s, const Partition_ID_Map& P_id,
     #pragma omp parallel for schedule(static) reduction(&& : is_valid)
     for(p_sz_t i = 0; i < s.inbox_sz(); ++i)
     {
-        const auto tgt = bit_layout::suffix_of(s.msg_target()[i]);
+        const auto tgt = bit_layout::suffix_of(lane::load(s.msg_target(), i));
         if(tgt >= n || P_id[tgt] != s.p_id())
             is_valid = false;
     }

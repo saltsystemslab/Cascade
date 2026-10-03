@@ -89,10 +89,10 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* self, cons
 // Returns `true` iff the sender-recipient message volumes agree at `backend`.
 bool validate_inbox_mass(const Partition_Backend& backend);
 
-// Returns an order-independent checksum of the `n` messages with targets `tgt`
-// and ranks `rank`: equal multisets of messages have equal checksums, and the
-// checksum of a union of disjoint collections is the sum of theirs.
-uint64_t message_checksum(const idx_t* tgt, const msg_rank_t* rank, idx_t n);
+// Returns an order-independent checksum of the `n` messages with target-lanes
+// `tgt` and ranks `rank`: equal multisets of messages have equal checksums, and
+// the checksum of a union of disjoint collections is the sum of theirs.
+uint64_t message_checksum(const uint8_t* tgt, const msg_rank_t* rank, idx_t n);
 
 // Returns `true` iff all the messages in the slab `s` are addressed to `s`'s
 // corresponding partition, i.e. their destination partition-IDs, computed from
