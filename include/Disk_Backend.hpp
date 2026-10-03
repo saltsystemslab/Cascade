@@ -124,8 +124,9 @@ public:
     void read_key(p_id_t p_id, idx_t off, idx_t sz, p_sz_t* dst) const;
 
     // Reads `sz`-many messages of the `p_id`'th partition's inbox for the
-    // current generation, from its offset `off`, into `tgt` and `rank`.
-    void read_messages(p_id_t p_id, p_sz_t off, p_sz_t sz, idx_t* tgt, msg_rank_t* rank) const;
+    // current generation, from its offset `off`, into the lanes `tgt` and into
+    // `rank`.
+    void read_messages(p_id_t p_id, p_sz_t off, p_sz_t sz, uint8_t* tgt, msg_rank_t* rank) const;
 
     // Writes `sz`-many suffixes of the `p_id`'th partition, at its offset
     // `off`, from the lanes `src`.

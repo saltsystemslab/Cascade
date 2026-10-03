@@ -80,7 +80,7 @@ Partition_Backend::Partition_Backend(const std::vector<idx_t>& P_cap, const idx_
     }
 
     for(idx_t p_id = 0; p_id < p_; ++p_id)
-        ov_tgt_[p_id] = util::aligned_allocate<idx_t>(OV_CAP, Direct_File::DISK_BLOCK),
+        ov_tgt_[p_id] = util::aligned_allocate<uint8_t>(lane::bytes(OV_CAP), Direct_File::DISK_BLOCK),
         ov_rank_[p_id] = util::aligned_allocate<msg_rank_t>(OV_CAP, Direct_File::DISK_BLOCK);
 }
 
@@ -97,7 +97,7 @@ Partition_Backend::~Partition_Backend()
 
 std::size_t Partition_Backend::fixed_budget(const p_id_t p)
 {
-    return p * OV_CAP * (sizeof(idx_t) + sizeof(msg_rank_t));
+    return p * OV_CAP * MESSAGE_BYTES;
 }
 
 
@@ -251,7 +251,7 @@ void Partition_Backend::read_messages(Staging_Slab& s)
     {
         const auto c = in.chunk[from / msg_chunk_cap_];
         const auto len = std::min<p_sz_t>(std::min(hi, n_r) - from, msg_chunk_cap_);
-        std::memcpy(s.msg_target() + (from - lo), pool_->tgt(c), len * sizeof(idx_t));
+        std::memcpy(s.msg_target() + lane::bytes(from - lo), pool_->tgt(c), lane::bytes(len));
         std::memcpy(s.msg_rank() + (from - lo), pool_->rank(c), len * sizeof(msg_rank_t));
 
         release_msg_chunk(c), in.chunk[from / msg_chunk_cap_] = Message_Pool::NIL;
@@ -266,7 +266,7 @@ void Partition_Backend::read_messages(Staging_Slab& s)
 #ifdef STATS
         disk_read_.fetch_add((hi - from) * MESSAGE_BYTES, std::memory_order_relaxed);
 #endif
-        disk_.read_messages(p_id, from - n_r, hi - from, s.msg_target() + (from - lo), s.msg_rank() + (from - lo));
+        disk_.read_messages(p_id, from - n_r, hi - from, s.msg_target() + lane::bytes(from - lo), s.msg_rank() + (from - lo));
     }
 }
 
@@ -540,7 +540,7 @@ void Partition_Backend::write_messages(const Staging_Slab& s)
         if(l < r)
         {
 #ifdef TESTS
-            msg_sum_[inbox_write_parity_][q].fetch_add(test::message_checksum(s.msg_target() + (l - l_slab), s.msg_rank() + (l - l_slab), r - l), std::memory_order_relaxed);
+            msg_sum_[inbox_write_parity_][q].fetch_add(test::message_checksum(s.msg_target() + lane::bytes(l - l_slab), s.msg_rank() + (l - l_slab), r - l), std::memory_order_relaxed);
 #endif
             const p_sz_t in_ram = (to_ram ? append_ram(q, s, l, r, spare) : 0);  // Prefix of the slice appended to the RAM-part.
             if(l + in_ram < r)
@@ -604,7 +604,7 @@ void Partition_Backend::copy_in(const RAM_Inbox& in, p_sz_t pos, const Staging_S
         const auto c = in.chunk[pos / msg_chunk_cap_];
         const p_sz_t o = pos % msg_chunk_cap_;
         const auto len = std::min<p_sz_t>(sz, msg_chunk_cap_ - o);
-        std::memcpy(pool_->tgt(c) + o, s.msg_target() + (from - base), len * sizeof(idx_t));
+        std::memcpy(pool_->tgt(c) + lane::bytes(o), s.msg_target() + lane::bytes(from - base), lane::bytes(len));
         std::memcpy(pool_->rank(c) + o, s.msg_rank() + (from - base), len * sizeof(msg_rank_t));
 
         pos += len, from += len, sz -= len;
@@ -662,7 +662,7 @@ void Partition_Backend::append_messages(const p_id_t p_id, const Staging_Slab& s
         const auto to_write = a_r - a_l;
         const auto write_off = msg_written_[parity][p_id].fetch_add(to_write, std::memory_order_relaxed);
         disk_.ensure_inbox_room(p_id, write_off + to_write);
-        disk_.msg_tgt(p_id).write_at(s.msg_target() + (a_l - base), to_write * sizeof(idx_t), write_off * sizeof(idx_t));
+        disk_.msg_tgt(p_id).write_at(s.msg_target() + lane::bytes(a_l - base), lane::bytes(to_write), lane::bytes(write_off));
         disk_.msg_rank(p_id).write_at(s.msg_rank() + (a_l - base), to_write * sizeof(msg_rank_t), write_off * sizeof(msg_rank_t));
     }
     else    // Degenerate case of too short message-block.
@@ -684,7 +684,7 @@ void Partition_Backend::buffer_overhang(const p_id_t p_id, const Staging_Slab& s
     const auto base = s.outbox_off();   // `s` contains the index-range `[base, base + s.outbox_sz())` of the source-partition's outbox.
     const std::lock_guard<util::Spin_Lock> lock(ov_lock_[p_id]);    // Lock the inbox's block-overflow buffer.
 
-    std::memcpy(ov_tgt_[p_id] + ov_sz_[p_id], s.msg_target() + (l - base), (r - l) * sizeof(idx_t));
+    std::memcpy(ov_tgt_[p_id] + lane::bytes(ov_sz_[p_id]), s.msg_target() + lane::bytes(l - base), lane::bytes(r - l));
     std::memcpy(ov_rank_[p_id] + ov_sz_[p_id], s.msg_rank() + (l - base), (r - l) * sizeof(msg_rank_t));
 
     ov_sz_[p_id] += (r - l);
@@ -704,13 +704,13 @@ void Partition_Backend::flush_overflow(const p_id_t p_id, const bool final)
     const auto parity = inbox_write_parity_;
     const auto write_off = msg_written_[parity][p_id].fetch_add(to_write, std::memory_order_relaxed);
     disk_.ensure_inbox_room(p_id, write_off + to_write);
-    disk_.msg_tgt(p_id).write_at(ov_tgt_[p_id], to_write * sizeof(idx_t), write_off * sizeof(idx_t));
+    disk_.msg_tgt(p_id).write_at(ov_tgt_[p_id], lane::bytes(to_write), lane::bytes(write_off));
     disk_.msg_rank(p_id).write_at(ov_rank_[p_id], to_write * sizeof(msg_rank_t), write_off * sizeof(msg_rank_t));
 
     const auto rem = (to_write < ov_sz_[p_id] ? ov_sz_[p_id] - to_write : 0);
     if(rem > 0)
     {
-        std::memmove(ov_tgt_[p_id], ov_tgt_[p_id] + to_write, rem * sizeof(idx_t));
+        std::memmove(ov_tgt_[p_id], ov_tgt_[p_id] + lane::bytes(to_write), lane::bytes(rem));
         std::memmove(ov_rank_[p_id], ov_rank_[p_id] + to_write, rem * sizeof(msg_rank_t));
     }
 
@@ -773,7 +773,7 @@ void Partition_Backend::close_generation()
             const auto from = in.count - trail;
             const auto c = in.chunk[from / msg_chunk_cap_];
             const p_sz_t o = from % msg_chunk_cap_;
-            std::memcpy(ov_tgt_[p_id] + ov_sz_[p_id], pool_->tgt(c) + o, trail * sizeof(idx_t));
+            std::memcpy(ov_tgt_[p_id] + lane::bytes(ov_sz_[p_id]), pool_->tgt(c) + lane::bytes(o), lane::bytes(trail));
             std::memcpy(ov_rank_[p_id] + ov_sz_[p_id], pool_->rank(c) + o, trail * sizeof(msg_rank_t));
             ov_sz_[p_id] += trail, msg_count_[parity][p_id] += trail, in.count = from;
 

@@ -114,7 +114,7 @@ private:
         std::vector<std::atomic<p_sz_t>> msg_written_[2];   // Messages actually written to the backend, per destination; per generation-parity.
         std::vector<std::atomic<uint64_t>> msg_sum_[2]; // Order-independent checksum of each destination-partition's inbox, per generation-parity.
 
-        std::vector<idx_t*> ov_tgt_;    // Block-overflow buffers for message-targets, per destination.
+        std::vector<uint8_t*> ov_tgt_;  // Block-overflow buffers for message-target lanes, per destination.
         std::vector<msg_rank_t*> ov_rank_;  // Rank-buffers, parallel to `ov_tgt_`.
         std::vector<p_sz_t> ov_sz_; // Messages currently buffered (due to block-alignment overhanging), per destination.
         std::vector<util::Spin_Lock> ov_lock_;  // Mutually-exclusive lock to the overflow buffers, per destination.

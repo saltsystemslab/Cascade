@@ -48,7 +48,7 @@ std::size_t Disk_Backend::content_footprint(const idx_t cap)
 std::size_t Disk_Backend::inbox_footprint(const idx_t cap)
 {
     const auto inbox_cap = cap + MSG_ALIGN; // As far as the inbox-files grow.
-    return Direct_File::block_up(inbox_cap * sizeof(idx_t)) + Direct_File::block_up(inbox_cap * sizeof(msg_rank_t));
+    return Direct_File::block_up(lane::bytes(inbox_cap)) + Direct_File::block_up(inbox_cap * sizeof(msg_rank_t));
 }
 
 
@@ -105,7 +105,7 @@ void Disk_Backend::ensure_inbox_room(const p_id_t p_id, const p_sz_t msg_c)
     // a message per suffix of its partition, padded to `MSG_ALIGN`.
     const idx_t cap = P_cap_[p_id] + MSG_ALIGN;
     const auto to = std::max<idx_t>(msg_c, std::min<idx_t>(cap, idx_t(r) + std::max<idx_t>(r / 4, INBOX_GROWTH)));
-    msg_tgt_[parity][p_id].preallocate(to * sizeof(idx_t));
+    msg_tgt_[parity][p_id].preallocate(lane::bytes(to));
     msg_rank_[parity][p_id].preallocate(to * sizeof(msg_rank_t));
     room.store(static_cast<p_sz_t>(to), std::memory_order_release);
 }
@@ -138,7 +138,7 @@ std::pair<std::size_t, std::size_t> Disk_Backend::allocated() const
         for(std::size_t parity = 0; parity < 2; ++parity)
         {
             const std::size_t room = inbox_room_[parity][p_id].load(std::memory_order_relaxed);
-            inboxes += Direct_File::block_up(room * sizeof(idx_t)) + Direct_File::block_up(room * sizeof(msg_rank_t));
+            inboxes += Direct_File::block_up(lane::bytes(room)) + Direct_File::block_up(room * sizeof(msg_rank_t));
         }
     }
 
@@ -158,9 +158,9 @@ void Disk_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, 
 }
 
 
-void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz_t sz, idx_t* const tgt, msg_rank_t* const rank) const
+void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz_t sz, uint8_t* const tgt, msg_rank_t* const rank) const
 {
-    msg_tgt_[read_parity_][p_id].read_at(tgt, sz * sizeof(idx_t), off * sizeof(idx_t));
+    msg_tgt_[read_parity_][p_id].read_at(tgt, lane::bytes(sz), lane::bytes(off));
     msg_rank_[read_parity_][p_id].read_at(rank, sz * sizeof(msg_rank_t), off * sizeof(msg_rank_t));
 }
 

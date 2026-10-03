@@ -24,7 +24,7 @@ private:
     Prefix_Key* key_;   // Keys; typed to the largest-width type used in sort (which is in initial-ranking).
     uint8_t* suf_;  // Suffixes, in lanes.
     beta_t* beta_;  // Backward routing tags.
-    idx_t* msg_target_; // Target recipients of the rank-propagation messages.
+    uint8_t* msg_target_;   // Target recipients of the rank-propagation messages, in lanes.
     msg_rank_t* msg_rank_;  // Ranks carried within the rank-propagation messages.
     void* alloc_[5];    // Pinned allocations holding the buffers above, in order, each disk-block aligned within its allocation.
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
@@ -62,10 +62,10 @@ public:
     // Returns the backward routing tags of the staged slab.
     auto beta() { return beta_; }
 
-    // Returns target recipients of the staged slab's rank-propagation messages.
+    // Returns the target-lanes of the staged slab's rank-propagation messages.
     auto msg_target() const { return msg_target_; }
 
-    // Returns target recipients of the staged slab's rank-propagation messages.
+    // Returns the target-lanes of the staged slab's rank-propagation messages.
     auto msg_target() { return msg_target_; }
 
     // Returns ranks carried within the staged slab's rank-propagation messages.
