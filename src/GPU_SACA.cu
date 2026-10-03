@@ -44,6 +44,10 @@
 namespace gpu_saca
 {
 
+// The device's uploads and downloads of the suffixes move their lanes as words.
+static_assert(LANE_BYTES == sizeof(idx_t), "The device takes the suffix-lanes as words.");
+
+
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_path):
       host_budget(env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>((1 - MEM_SAFETY_MARGIN) * util::available_memory())))
@@ -552,12 +556,11 @@ void GPU_SACA<T_sym_>::setup_staging_config()
 
     // Sets the capacity of each staging-slab.
     {
-        // A chunk-boundary `c * chunk_cap_` must be disk-block aligned, and the
-        // narrowest persisted element type (`p_sz_t`) governs it.
-        static_assert(sizeof(p_sz_t) <= sizeof(idx_t) && sizeof(p_sz_t) <= sizeof(Prefix_Key), "`p_sz_t` must be the narrowest persisted element type.");
+        // A chunk-boundary `c * chunk_cap_` must be disk-block aligned in each
+        // persisted field: the suffix-lanes, and the keys (`p_sz_t`).
+        constexpr idx_t elems_per_disk_blk = std::max<idx_t>(lane::ALIGN, Direct_File::DISK_BLOCK / sizeof(p_sz_t));
 
         // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
-        constexpr idx_t elems_per_disk_blk = Direct_File::DISK_BLOCK / sizeof(p_sz_t);
         constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
         static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
         static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
@@ -648,7 +651,7 @@ void GPU_SACA<T_sym_>::setup_staging()
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 {
-    return slab_c_ * chunk_cap_ * (sizeof(idx_t) + sizeof(Prefix_Key) + sizeof(beta_t) + 2 * MESSAGE_BYTES);
+    return slab_c_ * chunk_cap_ * (LANE_BYTES + sizeof(Prefix_Key) + sizeof(beta_t) + 2 * MESSAGE_BYTES);
 }
 
 
@@ -979,7 +982,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         for(auto* s : p_assembly.slab)
         {
             CUDA_CHECK(cudaMemcpyAsync(key.Current() + s->off(), s->key(), s->size() * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
@@ -1154,7 +1157,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
                 CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -1452,7 +1455,7 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
 
         // Suffixes tied after generation `t - 1` must draw their secondaries at generation `t` from the same partition.
         for(idx_t i = 1; i < sz; ++i)
-            if(!test::validate_coherent_targets(suf[i - 1], key[i - 1], suf[i], key[i], n_, stride, ell, P_id))
+            if(!test::validate_coherent_targets(lane::load(suf, i - 1), key[i - 1], lane::load(suf, i), key[i], n_, stride, ell, P_id))
             {
                 std::cerr << "Target coherence invariant broken. Aborting.\n";
                 std::exit(EXIT_FAILURE);
@@ -1464,12 +1467,12 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
     auto* const key = s.key();
     for(idx_t i = 0; i < sz; ++i)
     {
-        const auto j = bit_layout::suffix_of(suf[i]);
+        const auto j = bit_layout::suffix_of(lane::load(suf, i));
 
         if constexpr(init_rank_)
         {
             if(i + PREFIX_KEY_GATHER_PREFETCH_D < sz)
-                __builtin_prefetch(T_h_ + bit_layout::suffix_of(suf[i + PREFIX_KEY_GATHER_PREFETCH_D]), 0, 0);
+                __builtin_prefetch(T_h_ + bit_layout::suffix_of(lane::load(suf, i + PREFIX_KEY_GATHER_PREFETCH_D)), 0, 0);
 
             key[i] = Prefix_Key::pack_prefix(T_h_ + j);
         }
@@ -1505,7 +1508,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         for(auto* s : p_assembly.slab)
         {
             CUDA_CHECK(cudaMemcpyAsync(primary + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
@@ -1734,7 +1737,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
                 CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -1861,7 +1864,7 @@ void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assemb
     {
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(suf + s->off(), s->suf(), s->size() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf + s->off(), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(rank + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
