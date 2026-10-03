@@ -94,7 +94,10 @@ private:
     // in the inbox-files, at file-offsets `[0, n_d)`. With a disk-part present,
     // `n_r` is `MSG_ALIGN`-aligned, so that the disk-part's reads stay aligned.
     // {
-        static constexpr p_sz_t OV_CAP = 64 * MSG_ALIGN;        // Capacity of a destination-partition's block-overflow buffer, in messages.
+        static constexpr p_sz_t OV_CAP = 1 << 16;   // Capacity of a destination-partition's block-overflow buffer, in messages.
+
+        // A flush leaves less than `MSG_ALIGN` messages buffered, and the buffer keeps `2 * MSG_ALIGN` free past any addition.
+        static_assert(OV_CAP >= 3 * MSG_ALIGN, "Block-overflow buffers must hold `3 * MSG_ALIGN` messages.");
 
         std::size_t inbox_write_parity_;    // Inbox-parity this generation writes to.
         std::size_t inbox_read_parity_; // Inbox-parity this generation reads from.
