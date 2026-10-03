@@ -251,8 +251,8 @@ private:
 public:
 
     // Constructs a GPU-SACA object for the input text at path `ip_path`, to
-    // output the suffix array to the file at path `op_path`. An empty `op_path`
-    // constructs the suffix array without dumping it.
+    // output the suffix array in index-lanes to the file at path `op_path`. An
+    // empty `op_path` constructs the suffix array without dumping it.
     GPU_SACA(const std::string& ip_path, const std::string& op_path);
 
     ~GPU_SACA();

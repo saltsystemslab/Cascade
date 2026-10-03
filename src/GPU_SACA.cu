@@ -692,7 +692,7 @@ void GPU_SACA<T_sym_>::partition()
 
             setup_staging_config();
             util::file::raise_open_files_limit(SPILL_ROLE_C * p_ + 64); // Spill-files of all partitions at once, plus slack for the rest of the process.
-            spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()), op_path_, n_ * sizeof(idx_t));
+            spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()), op_path_, lane::bytes(n_));
             backend_ = std::make_unique<Partition_Backend>(P_cap, chunk_cap_, *spill_, host_budget, fixed_budget(), p_);
 
             P_buf.reserve(p_);
@@ -1889,11 +1889,14 @@ void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assemb
     PROFILE_SCOPE_FMT("scatter_to_rank_order_p%d", static_cast<int>(p_id));
 
     static_assert(DEV_KEY_BYTES >= sizeof(p_sz_t), "Current device floor-plan requires at least one local-rank per entry.");
-    static_assert(LANE_BYTES == sizeof(idx_t), "The suffix-array's entries are staged in the slabs' suffix-lanes.");
     uint8_t* const suf = reinterpret_cast<uint8_t*>(suf_buf[buf_id][0]);    // Lanes of the suffixes.
     p_sz_t* const rank = reinterpret_cast<p_sz_t*>(key_buf[buf_id][0]);
     idx_t* const SA_local = suf_buf[buf_id][1]; // The partition's slice of the suffix array.
+    uint8_t* const SA_lanes = suf;  // Lanes of the slice, for the output; over the suffix-lanes scattered by then.
     const auto part_sz = P_cap[p_id];
+
+    constexpr std::size_t BLOCK_SZ = 256;
+    const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
 
     // Asynchronously upload this partition's chunks of suffixes and their ranks to the device.
     {
@@ -1907,11 +1910,16 @@ void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assemb
 
     // Shuffle the suffixes into their rank-order.
     {
-        constexpr std::size_t BLOCK_SZ = 256;
-        const auto block_count = (part_sz + BLOCK_SZ - 1) / BLOCK_SZ;
-
         scatter_suffixes_to_rank_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
             (suf, rank, SA_local, part_sz);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
+    // Pack the rank-ordered suffixes into lanes for the output.
+    {
+        pack_lanes_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_local, part_sz, SA_lanes);
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1919,7 +1927,7 @@ void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assemb
     // Asynchronously download the rank-ordered partition in a chunked manner to host slabs.
     {
         for(auto* s : p_assembly.slab)
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_local + s->off(), s->size() * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_lanes + lane::bytes(s->off()), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
     }
 }
 
@@ -1953,7 +1961,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
         if(fd < 0)
             util::file::exit_on_io_failure("open", op);
 
-        if(::fallocate(fd, 0, 0, n_ * sizeof(idx_t)) != 0)
+        if(::fallocate(fd, 0, 0, lane::bytes(n_)) != 0)
             util::file::exit_on_io_failure("fallocate", op);
     }
 
@@ -2073,12 +2081,12 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
                         {
                             INSTRUMENT_TIMER(probe::P().me().io_ns);
-                            INSTRUMENT(probe::P().me().bytes += s->size() * sizeof(idx_t));
-                            INSTRUMENT(probe::P().me().disk_bytes += (dump ? s->size() * sizeof(idx_t) : 0));
+                            INSTRUMENT(probe::P().me().bytes += lane::bytes(s->size()));
+                            INSTRUMENT(probe::P().me().disk_bytes += (dump ? lane::bytes(s->size()) : 0));
 
                             // Drain the slab's suffixes.
                             if(dump)
-                                util::file::write_and_flush(fd, op, s->suf(), s->size() * sizeof(idx_t), (P_off[s->p_id()] + s->off()) * sizeof(idx_t));
+                                util::file::write_and_flush(fd, op, s->suf(), lane::bytes(s->size()), lane::bytes(P_off[s->p_id()] + s->off()));
                         }
 
                         F.enqueue(s);   // This slab is free now.

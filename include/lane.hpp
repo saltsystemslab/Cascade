@@ -17,7 +17,8 @@ namespace gpu_saca
 {
 
 // Bytes per index-lane: the width at which the suffix-indices and the message-
-// targets are persisted and staged, in host and in disk.
+// targets are persisted and staged, in host and in disk, and at which the
+// suffix array is output.
 #ifndef IDX_LANE_BYTES
     constexpr std::size_t LANE_BYTES = 8;
 #else
