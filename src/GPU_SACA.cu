@@ -44,8 +44,9 @@
 namespace gpu_saca
 {
 
-// The device's uploads and downloads of the suffixes move their lanes as words.
-static_assert(LANE_BYTES == sizeof(idx_t), "The device takes the suffix-lanes as words.");
+// The device's uploads and downloads of the suffixes and of the message-targets
+// move their lanes as words.
+static_assert(LANE_BYTES == sizeof(idx_t), "The device takes the suffix- and target-lanes as words.");
 
 
 template <typename T_sym_>
@@ -1160,7 +1161,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, lane::bytes(chunk_outbox_sz), cudaMemcpyDeviceToHost, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             }
         }
@@ -1576,7 +1577,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         for(auto* s : p_assembly.slab)
             if(s->inbox_sz() > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->inbox_off(), s->msg_target(), s->inbox_sz() * sizeof(idx_t), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->inbox_off(), s->msg_target(), lane::bytes(s->inbox_sz()), cudaMemcpyHostToDevice, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->inbox_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
             }
     }
@@ -1740,7 +1741,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, chunk_outbox_sz * sizeof(idx_t), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, lane::bytes(chunk_outbox_sz), cudaMemcpyDeviceToHost, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             }
         }
