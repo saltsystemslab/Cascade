@@ -91,6 +91,10 @@ if(PIVOT_WORDS)
     add_compile_definitions(PIVOT_WORDS=${PIVOT_WORDS})
 endif()
 
+if(IDX_LANE_BYTES)
+    add_compile_definitions(IDX_LANE_BYTES=${IDX_LANE_BYTES})
+endif()
+
 if(TESTS)
     add_compile_definitions(TESTS)
 endif()

@@ -8,6 +8,7 @@
 #include "Packed_Prefix.hpp"
 #include "bit-layout.hpp"
 #include "message.hpp"
+#include "lane.hpp"
 #include "tests.hpp"
 
 
@@ -87,6 +88,48 @@ void pack_partition_IDs_kernel(const p_id_t* const __restrict__ P_id, const idx_
     const idx_t off = g * GROUP_SZ; // Offset of the group's first suffix.
     if(off < n)
         Partition_ID_Map::pack(P_id + off, (n - off < GROUP_SZ ? n - off : GROUP_SZ), bits, word + g * bits);
+}
+
+
+// Unpacks the `n` index-lanes `lanes` into the words `word`.
+// Grid organization: one thread per index.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void unpack_lanes_kernel(const uint8_t* const __restrict__ lanes, const idx_t n, idx_t* const __restrict__ word)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        word[i] = lane::load(lanes, i);
+}
+
+
+// Unpacks the `n` suffix-lanes `lanes` of generation 0 into the words `SA`,
+// each packed with its forward tag: the high half of its backward routing tag-
+// pair in `beta`.
+// Grid organization: one thread per suffix.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void unpack_tagged_lanes_kernel(const uint8_t* const __restrict__ lanes, const beta_t* const __restrict__ beta, const idx_t n, idx_t* const __restrict__ SA)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        SA[i] = bit_layout::pack(bit_layout::value_of(lane::load(lanes, i)), bit_layout::beta_prev_gen(beta[i]));
+}
+
+
+// Packs the `n` words `word` into the index-lanes `lanes`: the low `lane::BITS`
+// bits of each.
+// Grid organization: one thread per index.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void pack_lanes_kernel(const idx_t* const __restrict__ word, const idx_t n, uint8_t* const __restrict__ lanes)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        lane::store(lanes, i, word[i]);
 }
 
 
