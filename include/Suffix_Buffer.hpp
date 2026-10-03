@@ -4,8 +4,9 @@
 
 
 
-#include "Direct_File.hpp"
 #include "types.hpp"
+#include "Direct_File.hpp"
+#include "lane.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
@@ -26,24 +27,26 @@ class Suffix_Buffer
 {
 private:
 
-    static constexpr std::size_t w_buf_cap = 32 * 1024llu / sizeof(idx_t);  // Worker-local buffers flush at reaching 32 KBs worth of suffixes.
+    // Worker-local buffers flush at reaching 32 KBs worth of suffix-lanes, rounded up to whole disk-block groups of lanes.
+    static constexpr std::size_t w_buf_cap = (32 * 1024llu / LANE_BYTES + lane::ALIGN - 1) / lane::ALIGN * lane::ALIGN;
 
-    static_assert((w_buf_cap * sizeof(idx_t)) % Direct_File::DISK_BLOCK == 0);
+    static_assert(lane::bytes(w_buf_cap) % Direct_File::DISK_BLOCK == 0);
 
     Partition_Backend* backend_;    // Backend sinking the suffixes.
     p_id_t p_id_;   // ID of the partition the suffixes belong to.
 
-    idx_t* w_suf_base_; // Flattened collection of worker-local suffix buffers.
+    uint8_t* w_suf_base_;   // Flattened collection of worker-local suffix-lane buffers.
     std::vector<util::Padded<idx_t>> w_fill_;   // Fill count of the worker-local buffers.
 
     std::atomic<idx_t> flushed_;    // Number of suffixes reserved / written to the sink files.
     const idx_t worker_c_;  // Worker count.
 
 
-    auto w_suf(const idx_t w) { return w_suf_base_ + w * w_buf_cap; }   // Returns the `w`'th worker's suffix-buffer.
+    auto w_suf(const idx_t w) { return w_suf_base_ + lane::bytes(w * w_buf_cap); }  // Returns the `w`'th worker's suffix-buffer.
 
-    // Sinks `sz`-many suffixes from `suf`, at the partition-offset `off`.
-    void sink(idx_t off, idx_t sz, const idx_t* suf);
+    // Sinks `sz`-many suffixes from the lanes `suf`, at the partition-offset
+    // `off`.
+    void sink(idx_t off, idx_t sz, const uint8_t* suf);
 
 public:
 
@@ -80,7 +83,7 @@ inline void Suffix_Buffer::add(const idx_t suf)
     auto& fill = w_fill_[w_id].unwrap();
     auto suf_buf = w_suf(w_id);
 
-    suf_buf[fill] = suf;
+    lane::store(suf_buf, fill, suf);
     if(++fill == w_buf_cap)
     {
         const auto off = flushed_.fetch_add(w_buf_cap, std::memory_order_relaxed);

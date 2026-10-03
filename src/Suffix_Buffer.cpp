@@ -23,7 +23,7 @@ Suffix_Buffer::Suffix_Buffer(Partition_Backend& backend, const p_id_t p_id):
     , flushed_(0)
     , worker_c_(omp_get_max_threads())
 {
-    w_suf_base_ = util::aligned_allocate<idx_t>(worker_c_ * w_buf_cap, Direct_File::DISK_BLOCK);
+    w_suf_base_ = util::aligned_allocate<uint8_t>(lane::bytes(worker_c_ * w_buf_cap), Direct_File::DISK_BLOCK);
     if(w_suf_base_ == nullptr)
     {
         std::cerr << "Error in aligned-allocating scatter buffers of partitions. Aborting.\n";
@@ -55,7 +55,7 @@ Suffix_Buffer::~Suffix_Buffer()
 
 std::size_t Suffix_Buffer::scatter_buffer_memory(const std::size_t worker_c, const std::size_t p)
 {
-    return p * (worker_c * w_buf_cap * sizeof(idx_t));
+    return p * lane::bytes(worker_c * w_buf_cap);
 }
 
 
@@ -67,7 +67,7 @@ void Suffix_Buffer::flush()
     for(idx_t w_id = 1; w_id < worker_c_; ++w_id)
     {
         auto& tail_w = w_fill_[w_id].unwrap();
-        std::memmove(w_suf_base_ + total_tail, w_suf(w_id), tail_w * sizeof(idx_t));
+        std::memmove(w_suf_base_ + lane::bytes(total_tail), w_suf(w_id), lane::bytes(tail_w));
 
         total_tail += tail_w;
         tail_w = 0;
@@ -81,7 +81,7 @@ void Suffix_Buffer::flush()
 }
 
 
-void Suffix_Buffer::sink(const idx_t off, const idx_t sz, const idx_t* suf)
+void Suffix_Buffer::sink(const idx_t off, const idx_t sz, const uint8_t* suf)
 {
     // Full buffers land at multiples of `w_buf_cap`; only the tails' flush, the partition's last, ends past a disk-block.
     backend_->write_suffixes(p_id_, off, sz, suf);
