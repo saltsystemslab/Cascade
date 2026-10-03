@@ -1,6 +1,5 @@
 
 #include "tests.hpp"
-#include "bit-layout.hpp"
 #include "lane.hpp"
 #include "utility.hpp"
 
@@ -13,7 +12,7 @@
 namespace gpu_saca::test
 {
 
-bool validate_partition_contents(const idx_t n, const idx_t ell, const Partition_ID_Map& P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend)
+bool validate_partition_contents(const idx_t n, const Partition_ID_Map& P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend)
 {
     const auto p_ = P_sz.size();
 
@@ -37,13 +36,11 @@ bool validate_partition_contents(const idx_t n, const idx_t ell, const Partition
         #pragma omp parallel for schedule(static) reduction(&& : content_match)
         for(idx_t i = 0; i < sz; ++i)
         {
-            const auto w = lane::load(suf_buf, i);
-            const auto j = bit_layout::suffix_of(w);
-            const auto phi = bit_layout::fwd_tag(P_id, j + ell, n, ell);
-            if(j >= n || P_id[j] != p_id || present[j] || bit_layout::tag_of(w) != phi)
+            const auto j = lane::load(suf_buf, i);  // A bare suffix-index: any tag-bits put it out of range.
+            if(j >= n || P_id[j] != p_id || present[j])
                 content_match = false;
-
-            present[j] = 1;
+            else
+                present[j] = 1;
         }
     }
 

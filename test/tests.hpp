@@ -54,10 +54,9 @@ T_sym_ universe_split_threshold(const T_sym_* T, idx_t n);
 // Returns `true` iff for a text of size `n`, the initial partition content
 // defined by the spill-store `spill` (of files of the partitions with sizes
 // `P_sz`) is correct: for each suffix `s` in the `p`'th partition, checks
-// (1) whether it landed in the partition expected by `P_id`, ie `P_id[s] == p`;
-// (2) that it is not duplicated anywhere; and (3) its forward tag is the
-// expected one.
-bool validate_partition_contents(idx_t n, idx_t ell, const Partition_ID_Map& P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
+// (1) whether it is a bare suffix-index, and landed in the partition expected
+// by `P_id`, ie `P_id[s] == p`; and (2) that it is not duplicated anywhere.
+bool validate_partition_contents(idx_t n, const Partition_ID_Map& P_id, const std::vector<idx_t>& P_sz, const Partition_Backend& backend);
 
 // Returns `true` iff the target coherence invariant holds for the suffixes
 // `j_1` and `j_2` with respective local ranks `r_1` and `r_2`: if tied, their
