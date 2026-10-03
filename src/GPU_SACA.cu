@@ -724,10 +724,9 @@ void GPU_SACA<T_sym_>::partition()
             #pragma omp parallel for schedule(static)
             for(idx_t i = 0; i < n_; ++i)
             {
-                const auto phi = bit_layout::fwd_tag(P_id, i + ell, n_, ell);   // Forward tag for generation 0.
                 // TODO: skip staging for generation 0 this way:
                 // const p_id_t beta = (i >= ell ? P_id[i - ell] : 0);  // Backward tag for generation 0.
-                P_buf[P_id[i]].unwrap().add(bit_layout::pack(i, phi));  // Suffix packed with its forward tag, seeded at generation 0.
+                P_buf[P_id[i]].unwrap().add(i);
             }
 
             #pragma omp parallel for schedule(static)
@@ -976,6 +975,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
     cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
     cub::DoubleBuffer<beta_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
+    uint8_t* const suf_lanes = reinterpret_cast<uint8_t*>(suf.Alternate()); // Lanes of the suffixes, uploaded for unpacking.
 
 
     // Asynchronously upload this partition's chunks of suffixes and their prefix-keys to the device.
@@ -983,7 +983,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
         for(auto* s : p_assembly.slab)
         {
             CUDA_CHECK(cudaMemcpyAsync(key.Current() + s->off(), s->key(), s->size() * sizeof(Prefix_Key), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf_lanes + lane::bytes(s->off()), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
@@ -1007,6 +1007,14 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
     p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
     p_sz_t* local_rank = nullptr;   // Final primary ranks computed.
+
+
+    // Unpack the suffixes, each packed with its forward tag in its backward tag-pair.
+    {
+        unpack_tagged_lanes_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (suf_lanes, beta.Current(), part_sz, suf.Current());
+        CUDA_CHECK(cudaGetLastError());
+    }
 
 
     // Sort the partition by the (packed-prefix, forward-tag): two-phase radix-sort.
@@ -1478,8 +1486,9 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
             key[i] = Prefix_Key::pack_prefix(T_h_ + j);
         }
 
+        // At generation 0, which forwards no pills, the pair's high half carries the forward tag instead.
         beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
-                                        init_rank_ || j < stride ? 0 : P_id[j - stride]);
+                                        init_rank_ ? bit_layout::fwd_tag(P_id, j + ell, n_, ell) : (j < stride ? 0 : P_id[j - stride]));
     }
 }
 

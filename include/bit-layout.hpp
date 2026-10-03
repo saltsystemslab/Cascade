@@ -14,7 +14,7 @@
 // Bit-layout of the two packed 64-bit words the algorithm carries:
 // suffix:
 //      63 .. 48 :  forward tag: (biased) partition-ID of the secondary-source of the next generation (see `fwd_tag` for the "bias");
-//                  used at generation 0 only, and stale afterwards;
+//                  packed in at generation 0's upload, used at generation 0 only, and stale afterwards;
 //      47 .. 0 :   value
 // key:
 //      63 :        spare;
@@ -122,7 +122,8 @@ CUDA_SPECIFIER inline idx_t mark_poison_pill_receipt(const idx_t key) { return k
 
 // Returns the backward routing tag pair for a suffix whose payload-message and
 // forwarded poison-pill route to the `cur`'th partition and the `prev`'th
-// partitions, respectively.
+// partitions, respectively. At generation 0, which forwards no pills, `prev`
+// is the suffix's forward tag instead (used to seed TCI).
 CUDA_SPECIFIER inline beta_t beta_pair(const p_id_t cur, const p_id_t prev) { return (static_cast<beta_t>(prev) << BETA_BITS) | cur; }
 
 // Returns the current generation's backward routing tag from the tag-pair
