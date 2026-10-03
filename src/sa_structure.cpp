@@ -3,8 +3,9 @@
 //
 //     sa_structure <text-file> <suffix-array-file> <run-log> <output-json>
 //
-// The text has `uint16_t` symbols and the suffix array `uint64_t` indices, both little-endian, as `caps_sa_gpu` reads
-// and writes them. The log supplies the run's `ell`, `K` and partition-sizes, and with those its partition-ID map `Π`.
+// The text has `uint16_t` symbols and the suffix array indices of 8 or 5 bytes, per its size, both little-endian, as
+// `caps_sa_gpu` reads and writes them. The log supplies the run's `ell`, `K` and partition-sizes, and with those its
+// partition-ID map `Π`.
 //
 // With `c_t = ell 2^t` and `K <= ell`, the suffix `j` is active after generation `t` iff some other suffix `j'` has
 // `lcp(j, j') >= c_t`, `j + c_t < n`, `j' + c_t < n` and `Π(j + c_t) = Π(j' + c_t)`: the forward tag of generation 0
@@ -106,18 +107,26 @@ Run_Config parse_run_log(const std::string& path)
 }
 
 
-// Reads the entries `[beg, end)` of the suffix array from the file-descriptor `fd` into `dst`.
-void read_SA(const int fd, const idx_t beg, const idx_t end, idx_t* const dst)
+// Reads the entries `[beg, end)` of the suffix array, of `w` bytes each, from the file-descriptor `fd` into `dst`.
+void read_SA(const int fd, const std::size_t w, const idx_t beg, const idx_t end, idx_t* const dst)
 {
     auto* const p = reinterpret_cast<char*>(dst);
-    const std::size_t bytes = (end - beg) * sizeof(idx_t);
+    const std::size_t bytes = (end - beg) * w;
     for(std::size_t got = 0; got < bytes;)
     {
-        const auto r = ::pread(fd, p + got, bytes - got, static_cast<off_t>(beg * sizeof(idx_t) + got));
+        const auto r = ::pread(fd, p + got, bytes - got, static_cast<off_t>(beg * w + got));
         if(r <= 0)
             die("Could not read the suffix array's entries [" + std::to_string(beg) + ", " + std::to_string(end) + ").");
         got += r;
     }
+
+    if(w < sizeof(idx_t))   // Widen the lanes in place, from the last: word `i` overlaps no lane before `i`.
+        for(idx_t i = end - beg; i-- > 0;)
+        {
+            idx_t x = 0;
+            std::memcpy(&x, p + i * w, w);
+            dst[i] = x;
+        }
 }
 
 
@@ -168,8 +177,8 @@ private:
 public:
 
     // Reconstructs the map for the text `T` of length `n`, from the partition-sizes `P_cap` and the suffix array at
-    // the file-descriptor `fd`.
-    Partition_Map(const sym_t* const T, const idx_t n, const idx_t K, const std::vector<idx_t>& P_cap, const int fd):
+    // the file-descriptor `fd`, with `w`-byte entries.
+    Partition_Map(const sym_t* const T, const idx_t n, const idx_t K, const std::vector<idx_t>& P_cap, const int fd, const std::size_t w):
           T_(T)
         , K_(K)
         , p_(P_cap.size())
@@ -184,7 +193,7 @@ public:
                 break;
 
             idx_t last_first[2];    // The last suffix of partition `q`, and the first one of partition `q + 1`.
-            read_SA(fd, off - 1, off + 1, last_first);
+            read_SA(fd, w, off - 1, off + 1, last_first);
             if(last_first[0] >= n || last_first[1] >= n)
                 die("The suffix array has an out-of-range entry at " + std::to_string(off - 1) + ".");
             if(leq(T + last_first[1], T + last_first[0]))
@@ -256,13 +265,15 @@ int main(int argc, char** argv)
     std::fill(T + n, T + n + K, sym_t(0));
     std::cerr << "Text-read completed: " << n << " symbols. Time taken: " << duration(now() - t_0) << "s.\n";
 
-    if(gpu_saca::util::file_size<idx_t>(sa_path) != n)
-        die("The suffix array at " + sa_path + " does not have " + std::to_string(n) + " entries.");
+    const auto sa_bytes = gpu_saca::util::file_size<uint8_t>(sa_path);
+    const std::size_t w = (sa_bytes == n * sizeof(idx_t) ? sizeof(idx_t) : 5);  // Bytes per entry of the suffix array: 8, or 5 in lanes.
+    if(sa_bytes != n * w)
+        die("The suffix array at " + sa_path + " does not have " + std::to_string(n) + " entries of 8 or 5 bytes.");
     const int fd = ::open(sa_path.c_str(), O_RDONLY);
     if(fd < 0)
         die("Cannot open the suffix array at " + sa_path + ".");
 
-    const Partition_Map Pi(T, n, K, run.P_cap, fd);
+    const Partition_Map Pi(T, n, K, run.P_cap, fd, w);
     std::cerr << "Partition-ID map reconstructed: " << p << " partitions, with " << K << "-symbol pivots; ell = " << ell << ".\n";
 
 
@@ -310,7 +321,7 @@ int main(int argc, char** argv)
             {
                 const idx_t r_0 = blk * BLOCK_SZ, r_1 = std::min(n, r_0 + BLOCK_SZ); // The block's SA-range.
                 const idx_t lo = (r_0 > 0 ? r_0 - 1 : 0), hi = std::min(n, r_1 + 1);  // With its neighbours.
-                read_SA(fd, lo, hi, SA.data());
+                read_SA(fd, w, lo, hi, SA.data());
                 const auto sa = [&](const idx_t r) { return SA[r - lo]; };
 
                 for(idx_t r = r_0; r <= r_1; ++r)   // The pair `(r - 1, r)`; none exists at `r = 0` and `r = n`.
