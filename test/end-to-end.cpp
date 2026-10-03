@@ -4,6 +4,8 @@
 
 #include "omp.h"
 
+#include <cstring>
+
 
 namespace gpu_saca::test
 {
@@ -84,11 +86,12 @@ bool is_correct_SA(const std::string& text_path, const std::string& SA_path)
     const auto sym_count = util::file_size<T_sym_>(text_path);
     const auto n = sym_count;
 
-    const auto SA_sz = util::file_size<idx_t>(SA_path);
-    if(SA_sz != n)
+    const auto SA_bytes = util::file_size<uint8_t>(SA_path);
+    const std::size_t w = (SA_bytes == n * sizeof(idx_t) ? sizeof(idx_t) : 5);  // Bytes per entry of the suffix array: 8, or 5 in lanes.
+    if(SA_bytes != n * w)
     {
-        std::cerr   << "The suffix array at " << SA_path << " has " << SA_sz << " entries whereas the text at "
-                    << text_path << " has " << n << " suffixes.\n";
+        std::cerr   << "The suffix array at " << SA_path << " has " << SA_bytes << " bytes whereas the text at "
+                    << text_path << " has " << n << " suffixes, of 8 or 5 bytes each.\n";
         return false;
     }
 
@@ -96,7 +99,23 @@ bool is_correct_SA(const std::string& text_path, const std::string& SA_path)
     util::read_file(text_path, T, sym_count);
 
     auto* const SA = util::checked_allocate<idx_t>(n);
-    util::read_file(SA_path, SA, n);
+    if(w == sizeof(idx_t))
+        util::read_file(SA_path, SA, n);
+    else
+    {
+        auto* const SA_lanes = util::checked_allocate<uint8_t>(SA_bytes);
+        util::read_file(SA_path, SA_lanes, SA_bytes);
+
+        #pragma omp parallel for schedule(static)
+        for(idx_t i = 0; i < n; ++i)
+        {
+            idx_t x = 0;
+            std::memcpy(&x, SA_lanes + i * w, w);   // Little-endian.
+            SA[i] = x;
+        }
+
+        util::deallocate(SA_lanes);
+    }
 
     const auto correct = is_correct_SA(SA, T, n);
 
