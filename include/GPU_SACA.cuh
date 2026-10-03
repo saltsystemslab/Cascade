@@ -7,8 +7,8 @@
 #include "types.hpp"
 #include "Packed_Prefix.hpp"
 #include "bit-layout.hpp"
-#include "message.hpp"
 #include "lane.hpp"
+#include "message.hpp"
 #include "tests.hpp"
 
 

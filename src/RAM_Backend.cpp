@@ -1,6 +1,7 @@
 
 #include "RAM_Backend.hpp"
 #include "Direct_File.hpp"
+#include "lane.hpp"
 #include "utility.hpp"
 
 #include <cstring>
@@ -15,7 +16,7 @@ RAM_Backend::RAM_Backend(const std::vector<idx_t>& P_cap):
     , key_(P_cap.size(), nullptr)
 {
     for(p_id_t p_id = 0; p_id < P_cap_.size(); ++p_id)
-        suf_[p_id] = static_cast<idx_t*>(util::reserve_memory(reservation(P_cap_[p_id], sizeof(idx_t)))),
+        suf_[p_id] = static_cast<uint8_t*>(util::reserve_memory(reservation(P_cap_[p_id], LANE_BYTES))),
         key_[p_id] = static_cast<p_sz_t*>(util::reserve_memory(reservation(P_cap_[p_id], sizeof(p_sz_t))));
 }
 
@@ -23,7 +24,7 @@ RAM_Backend::RAM_Backend(const std::vector<idx_t>& P_cap):
 RAM_Backend::~RAM_Backend()
 {
     for(p_id_t p_id = 0; p_id < P_cap_.size(); ++p_id)
-        util::unreserve_memory(suf_[p_id], reservation(P_cap_[p_id], sizeof(idx_t))),
+        util::unreserve_memory(suf_[p_id], reservation(P_cap_[p_id], LANE_BYTES)),
         util::unreserve_memory(key_[p_id], reservation(P_cap_[p_id], sizeof(p_sz_t)));
 }
 
@@ -36,7 +37,7 @@ std::size_t RAM_Backend::reservation(const idx_t n, const std::size_t w)
 
 void RAM_Backend::release_suf(const p_id_t p_id, const idx_t off, const idx_t sz)
 {
-    util::release_memory(suf_[p_id] + off, sz * sizeof(idx_t));
+    util::release_memory(suf_[p_id] + lane::bytes(off), lane::bytes(sz));
 }
 
 
@@ -46,9 +47,9 @@ void RAM_Backend::release_key(const p_id_t p_id, const idx_t off, const idx_t sz
 }
 
 
-void RAM_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const dst) const
+void RAM_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, uint8_t* const dst) const
 {
-    std::memcpy(dst, suf_[p_id] + off, sz * sizeof(idx_t));
+    std::memcpy(dst, suf_[p_id] + lane::bytes(off), lane::bytes(sz));
 }
 
 
@@ -58,9 +59,9 @@ void RAM_Backend::read_key(const p_id_t p_id, const idx_t off, const idx_t sz, p
 }
 
 
-void RAM_Backend::write_suf(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const src)
+void RAM_Backend::write_suf(const p_id_t p_id, const idx_t off, const idx_t sz, const uint8_t* const src)
 {
-    std::memcpy(suf_[p_id] + off, src, sz * sizeof(idx_t));
+    std::memcpy(suf_[p_id] + lane::bytes(off), src, lane::bytes(sz));
 }
 
 

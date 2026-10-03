@@ -20,7 +20,7 @@ class RAM_Backend
 private:
 
     const std::vector<idx_t> P_cap_;    // Partition capacities.
-    std::vector<idx_t*> suf_;   // Suffixes of the partitions.
+    std::vector<uint8_t*> suf_; // Suffixes of the partitions, in lanes.
     std::vector<p_sz_t*> key_;  // Keys of the partitions.
 
     // Returns the bytes reserved for `n` elements of `w` bytes each: whole disk-
@@ -38,23 +38,23 @@ public:
 
     ~RAM_Backend();
 
-    // Returns the `p_id`'th partition's suffixes.
-    idx_t* suf(const p_id_t p_id) { return suf_[p_id]; }
+    // Returns the `p_id`'th partition's suffix-lanes.
+    uint8_t* suf(const p_id_t p_id) { return suf_[p_id]; }
 
     // Returns the `p_id`'th partition's keys.
     p_sz_t* key(const p_id_t p_id) { return key_[p_id]; }
 
     // Reads `sz`-many suffixes of the `p_id`'th partition, from its offset
-    // `off`, into `dst`.
-    void read_suf(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
+    // `off`, into the lanes `dst`.
+    void read_suf(p_id_t p_id, idx_t off, idx_t sz, uint8_t* dst) const;
 
     // Reads `sz`-many keys of the `p_id`'th partition, from its offset `off`,
     // into `dst`.
     void read_key(p_id_t p_id, idx_t off, idx_t sz, p_sz_t* dst) const;
 
     // Writes `sz`-many suffixes of the `p_id`'th partition, at its offset
-    // `off`, from `src`.
-    void write_suf(p_id_t p_id, idx_t off, idx_t sz, const idx_t* src);
+    // `off`, from the lanes `src`.
+    void write_suf(p_id_t p_id, idx_t off, idx_t sz, const uint8_t* src);
 
     // Writes `sz`-many keys of the `p_id`'th partition, at its offset `off`,
     // from `src`.

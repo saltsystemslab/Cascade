@@ -1,6 +1,7 @@
 
 #include "tests.hpp"
 #include "bit-layout.hpp"
+#include "lane.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
@@ -17,7 +18,7 @@ bool validate_partition_contents(const idx_t n, const idx_t ell, const Partition
     const auto p_ = P_sz.size();
 
     const auto P_sz_max = *std::max_element(P_sz.cbegin(), P_sz.cend());
-    auto* const suf_buf = util::aligned_allocate<idx_t>(Direct_File::block_up(P_sz_max * sizeof(idx_t)) / sizeof(idx_t), Direct_File::DISK_BLOCK);  // Buffer to read-in the whole suffix-file of a partition.
+    auto* const suf_buf = util::aligned_allocate<uint8_t>(Direct_File::block_up(lane::bytes(P_sz_max)), Direct_File::DISK_BLOCK);   // Buffer to read-in the whole suffix-file of a partition.
     uint8_t* present = util::allocate<uint8_t>(n); // Whether each suffix is present in the partitions.
 
     #pragma omp parallel for schedule(static)
@@ -36,9 +37,10 @@ bool validate_partition_contents(const idx_t n, const idx_t ell, const Partition
         #pragma omp parallel for schedule(static) reduction(&& : content_match)
         for(idx_t i = 0; i < sz; ++i)
         {
-            const auto j = bit_layout::suffix_of(suf_buf[i]);
+            const auto w = lane::load(suf_buf, i);
+            const auto j = bit_layout::suffix_of(w);
             const auto phi = bit_layout::fwd_tag(P_id, j + ell, n, ell);
-            if(j >= n || P_id[j] != p_id || present[j] || bit_layout::tag_of(suf_buf[i]) != phi)
+            if(j >= n || P_id[j] != p_id || present[j] || bit_layout::tag_of(w) != phi)
                 content_match = false;
 
             present[j] = 1;

@@ -1,5 +1,6 @@
 
 #include "Disk_Backend.hpp"
+#include "lane.hpp"
 #include "message.hpp"
 
 #include <algorithm>
@@ -40,7 +41,7 @@ Disk_Backend::Disk_Backend(const std::vector<idx_t>& P_cap, Spill_Store& spill, 
 
 std::size_t Disk_Backend::content_footprint(const idx_t cap)
 {
-    return Direct_File::block_up(cap * sizeof(idx_t)) + Direct_File::block_up(cap * sizeof(p_sz_t));
+    return Direct_File::block_up(lane::bytes(cap)) + Direct_File::block_up(cap * sizeof(p_sz_t));
 }
 
 
@@ -57,7 +58,7 @@ void Disk_Backend::ensure_suf(const p_id_t p_id)
         [&]
         {
             suf_[p_id] = spill_->open(p_id, Spill_Role::suf, Direct_File::Mode::read_write);
-            suf_[p_id].preallocate(P_cap_[p_id] * sizeof(idx_t));
+            suf_[p_id].preallocate(lane::bytes(P_cap_[p_id]));
         }
     );
 }
@@ -132,7 +133,7 @@ std::pair<std::size_t, std::size_t> Disk_Backend::allocated() const
     std::size_t content = 0, inboxes = 0;
     for(std::size_t p_id = 0; p_id < P_cap_.size(); ++p_id)
     {
-        content += (suf_[p_id].path().empty() ? 0 : Direct_File::block_up(P_cap_[p_id] * sizeof(idx_t)));   // Files unopened or retired have no path.
+        content += (suf_[p_id].path().empty() ? 0 : Direct_File::block_up(lane::bytes(P_cap_[p_id])));  // Files unopened or retired have no path.
         content += (key_[p_id].path().empty() ? 0 : Direct_File::block_up(P_cap_[p_id] * sizeof(p_sz_t)));
         for(std::size_t parity = 0; parity < 2; ++parity)
         {
@@ -145,9 +146,9 @@ std::pair<std::size_t, std::size_t> Disk_Backend::allocated() const
 }
 
 
-void Disk_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const dst) const
+void Disk_Backend::read_suf(const p_id_t p_id, const idx_t off, const idx_t sz, uint8_t* const dst) const
 {
-    suf_[p_id].read_at(dst, sz * sizeof(idx_t), off * sizeof(idx_t));
+    suf_[p_id].read_at(dst, lane::bytes(sz), lane::bytes(off));
 }
 
 
@@ -164,10 +165,10 @@ void Disk_Backend::read_messages(const p_id_t p_id, const p_sz_t off, const p_sz
 }
 
 
-void Disk_Backend::write_suf(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const src)
+void Disk_Backend::write_suf(const p_id_t p_id, const idx_t off, const idx_t sz, const uint8_t* const src)
 {
     ensure_suf(p_id);
-    suf_[p_id].write_at(src, sz * sizeof(idx_t), off * sizeof(idx_t));
+    suf_[p_id].write_at(src, lane::bytes(sz), lane::bytes(off));
 }
 
 

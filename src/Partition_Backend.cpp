@@ -184,7 +184,7 @@ std::size_t Partition_Backend::disk_bytes(const Field f, const p_id_t p_id, cons
 void Partition_Backend::read_suffixes(Staging_Slab& s) const
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
-    INSTRUMENT(probe::P().me().bytes += s.size() * sizeof(idx_t));
+    INSTRUMENT(probe::P().me().bytes += lane::bytes(s.size()));
     INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()));
 #ifdef STATS
     disk_read_.fetch_add(disk_bytes(Field::suf, s.p_id(), s.off(), s.size()), std::memory_order_relaxed);
@@ -201,7 +201,7 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 
     {
         INSTRUMENT_TIMER(probe::P().me().io_ns);
-        INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
+        INSTRUMENT(probe::P().me().bytes += lane::bytes(s.size()) + s.size() * sizeof(p_sz_t));
         INSTRUMENT(probe::P().me().disk_bytes += disk_bytes(Field::suf, s.p_id(), s.off(), s.size()) + disk_bytes(Field::key, s.p_id(), s.off(), s.size()));
 #ifdef STATS
         disk_read_.fetch_add(disk_bytes(Field::suf, s.p_id(), s.off(), s.size()) + disk_bytes(Field::key, s.p_id(), s.off(), s.size()), std::memory_order_relaxed);
@@ -211,26 +211,26 @@ void Partition_Backend::read_keys(Staging_Slab& s) const
 }
 
 
-void Partition_Backend::read_suf_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf) const
+void Partition_Backend::read_suf_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, uint8_t* const suf) const
 {
     // The pieces go in the range's order, so that a disk-piece's block-rounding spills only over the pieces yet to be read.
     for_each_chunk(off, sz,
         [&](const idx_t c, const idx_t from, const idx_t len)
         {
-            in_ram(Field::suf, p_id, c) ?   ram_.read_suf(p_id, from, len, suf + (from - off)) :
-                                            disk_.read_suf(p_id, from, len, suf + (from - off));
+            in_ram(Field::suf, p_id, c) ?   ram_.read_suf(p_id, from, len, suf + lane::bytes(from - off)) :
+                                            disk_.read_suf(p_id, from, len, suf + lane::bytes(from - off));
         });
 }
 
 
-void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, idx_t* const suf, p_sz_t* const key) const
+void Partition_Backend::read_chunk(const p_id_t p_id, const idx_t off, const idx_t sz, uint8_t* const suf, p_sz_t* const key) const
 {
     // The pieces go in the range's order, so that a disk-piece's block-rounding spills only over the pieces yet to be read.
     for_each_chunk(off, sz,
         [&](const idx_t c, const idx_t from, const idx_t len)
         {
-            in_ram(Field::suf, p_id, c) ?   ram_.read_suf(p_id, from, len, suf + (from - off)) :
-                                            disk_.read_suf(p_id, from, len, suf + (from - off));
+            in_ram(Field::suf, p_id, c) ?   ram_.read_suf(p_id, from, len, suf + lane::bytes(from - off)) :
+                                            disk_.read_suf(p_id, from, len, suf + lane::bytes(from - off));
             in_ram(Field::key, p_id, c) ?   ram_.read_key(p_id, from, len, key + (from - off)) :
                                             disk_.read_key(p_id, from, len, key + (from - off));
         });
@@ -274,7 +274,7 @@ void Partition_Backend::read_messages(Staging_Slab& s)
 void Partition_Backend::write(const Staging_Slab& s)
 {
     INSTRUMENT_TIMER(probe::P().me().io_ns);
-    INSTRUMENT(probe::P().me().bytes += s.size() * (sizeof(idx_t) + sizeof(p_sz_t)));
+    INSTRUMENT(probe::P().me().bytes += lane::bytes(s.size()) + s.size() * sizeof(p_sz_t));
 
     const auto p_id = s.p_id();
     const auto off = s.off();
@@ -298,10 +298,10 @@ void Partition_Backend::write(const Staging_Slab& s)
             const auto claim = (retiring ? Claim::retiring : Claim::content);
             const bool suf_ram = in_ram(Field::suf, p_id, c) || (whole && admit(Field::suf, p_id, c, claim));
             const bool key_ram = in_ram(Field::key, p_id, c) || (whole && admit(Field::key, p_id, c, claim));
-            INSTRUMENT(probe::P().me().disk_bytes += (suf_ram ? 0 : len * sizeof(idx_t)) + (key_ram ? 0 : len * sizeof(p_sz_t)));
+            INSTRUMENT(probe::P().me().disk_bytes += (suf_ram ? 0 : lane::bytes(len)) + (key_ram ? 0 : len * sizeof(p_sz_t)));
 
-            suf_ram ?   ram_.write_suf(p_id, from, len, suf + (from - off)) :
-                        disk_.write_suf(p_id, from, len, suf + (from - off));
+            suf_ram ?   ram_.write_suf(p_id, from, len, suf + lane::bytes(from - off)) :
+                        disk_.write_suf(p_id, from, len, suf + lane::bytes(from - off));
             key_ram ?   ram_.write_key(p_id, from, len, key + (from - off)) :
                         disk_.write_key(p_id, from, len, key + (from - off));
 #ifdef STATS
@@ -377,7 +377,7 @@ void Partition_Backend::move_to_disk(const Field f, const p_id_t p_id, const idx
     // The whole chunk goes, so its block-rounding spills only past the partition's end, if at all.
     // The tier turns before the release, so that no RAM-tier stands over released memory.
     const auto off = c * chunk_cap_, len = chunk_len(p_id, c);
-    f == Field::suf ?   disk_.write_suf(p_id, off, len, ram_.suf(p_id) + off) :
+    f == Field::suf ?   disk_.write_suf(p_id, off, len, ram_.suf(p_id) + lane::bytes(off)) :
                         disk_.write_key(p_id, off, len, ram_.key(p_id) + off);
     tier_[tier_idx(f, p_id, c)].store(static_cast<uint8_t>(Tier::disk), std::memory_order_release);
     f == Field::suf ?   ram_.release_suf(p_id, off, len) :
@@ -390,7 +390,7 @@ void Partition_Backend::move_to_disk(const Field f, const p_id_t p_id, const idx
 void Partition_Backend::move_to_ram(const Field f, const p_id_t p_id, const idx_t c)
 {
     const auto off = c * chunk_cap_, len = chunk_len(p_id, c);
-    f == Field::suf ?   disk_.read_suf(p_id, off, len, ram_.suf(p_id) + off) :
+    f == Field::suf ?   disk_.read_suf(p_id, off, len, ram_.suf(p_id) + lane::bytes(off)) :
                         disk_.read_key(p_id, off, len, ram_.key(p_id) + off);
     tier_[tier_idx(f, p_id, c)].store(static_cast<uint8_t>(Tier::ram), std::memory_order_release);
 
@@ -502,13 +502,13 @@ bool Partition_Backend::admit(const Field f, const p_id_t p_id, const idx_t c, c
 }
 
 
-void Partition_Backend::write_suffixes(const p_id_t p_id, const idx_t off, const idx_t sz, const idx_t* const suf)
+void Partition_Backend::write_suffixes(const p_id_t p_id, const idx_t off, const idx_t sz, const uint8_t* const suf)
 {
     for_each_chunk(off, sz,
         [&](const idx_t c, const idx_t from, const idx_t len)
         {
-            in_ram(Field::suf, p_id, c) ?   ram_.write_suf(p_id, from, len, suf + (from - off)) :
-                                            disk_.write_suf(p_id, from, len, suf + (from - off));
+            in_ram(Field::suf, p_id, c) ?   ram_.write_suf(p_id, from, len, suf + lane::bytes(from - off)) :
+                                            disk_.write_suf(p_id, from, len, suf + lane::bytes(from - off));
         });
 }
 

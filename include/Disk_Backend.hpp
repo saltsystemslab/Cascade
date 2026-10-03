@@ -116,8 +116,8 @@ public:
     void set_generation(const idx_t gen) { write_parity_ = write_parity(gen), read_parity_ = read_parity(gen); }
 
     // Reads `sz`-many suffixes of the `p_id`'th partition, from its offset
-    // `off`, into `dst`.
-    void read_suf(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
+    // `off`, into the lanes `dst`.
+    void read_suf(p_id_t p_id, idx_t off, idx_t sz, uint8_t* dst) const;
 
     // Reads `sz`-many keys of the `p_id`'th partition, from its offset `off`,
     // into `dst`.
@@ -128,8 +128,8 @@ public:
     void read_messages(p_id_t p_id, p_sz_t off, p_sz_t sz, idx_t* tgt, msg_rank_t* rank) const;
 
     // Writes `sz`-many suffixes of the `p_id`'th partition, at its offset
-    // `off`, from `src`.
-    void write_suf(p_id_t p_id, idx_t off, idx_t sz, const idx_t* src);
+    // `off`, from the lanes `src`.
+    void write_suf(p_id_t p_id, idx_t off, idx_t sz, const uint8_t* src);
 
     // Writes `sz`-many keys of the `p_id`'th partition, at its offset `off`,
     // from `src`.

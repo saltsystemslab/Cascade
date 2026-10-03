@@ -22,7 +22,7 @@ struct Staging_Slab
 private:
 
     Prefix_Key* key_;   // Keys; typed to the largest-width type used in sort (which is in initial-ranking).
-    idx_t* suf_;    // Suffixes.
+    uint8_t* suf_;  // Suffixes, in lanes.
     beta_t* beta_;  // Backward routing tags.
     idx_t* msg_target_; // Target recipients of the rank-propagation messages.
     msg_rank_t* msg_rank_;  // Ranks carried within the rank-propagation messages.
@@ -50,10 +50,10 @@ public:
     // type used as keys.
     auto key() { return key_; }
 
-    // Returns the suffixes of the staged slab.
+    // Returns the suffix-lanes of the staged slab.
     auto suf() const { return suf_; }
 
-    // Returns the suffixes of the staged slab.
+    // Returns the suffix-lanes of the staged slab.
     auto suf() { return suf_; }
 
     // Returns the backward routing tags of the staged slab.

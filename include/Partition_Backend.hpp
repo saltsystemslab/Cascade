@@ -13,6 +13,7 @@
 #include "Host_Budget.hpp"
 #include "Message_Pool.hpp"
 #include "Spin_Lock.hpp"
+#include "lane.hpp"
 #include "message.hpp"
 #include "utility.hpp"
 #include "env.hpp"
@@ -146,7 +147,7 @@ private:
 
 
     // Returns the width, in bytes, of a content-element's field `f`.
-    static constexpr std::size_t width(const Field f) { return f == Field::suf ? sizeof(idx_t) : sizeof(p_sz_t); }
+    static constexpr std::size_t width(const Field f) { return f == Field::suf ? LANE_BYTES : sizeof(p_sz_t); }
 
     // Flushes the `p_id`'th inbox's block-overflow buffer. `final` denotes
     // whether this is the last flush invoked on the buffer or not.
@@ -332,18 +333,19 @@ public:
     void read_keys(Staging_Slab& s) const;
 
     // Reads `sz` suffixes of the `p_id`'th partition, from its offset `off`,
-    // into `suf`.
-    void read_suf_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf) const;
+    // into the lanes `suf`.
+    void read_suf_chunk(p_id_t p_id, idx_t off, idx_t sz, uint8_t* suf) const;
 
     // Reads `sz` suffixes and their corresponding ranks of the `p_id`'th
-    // partition, from its offset `off`, into `suf` and `key` respectively.
-    void read_chunk(p_id_t p_id, idx_t off, idx_t sz, idx_t* suf, p_sz_t* key) const;
+    // partition, from its offset `off`, into the lanes `suf` and into `key`,
+    // respectively.
+    void read_chunk(p_id_t p_id, idx_t off, idx_t sz, uint8_t* suf, p_sz_t* key) const;
 
     // Writes `sz` suffixes of the `p_id`'th partition, at its offset `off`, from
-    // `suf`. The disk-resident pieces round up to whole disk-blocks: `suf` must
-    // have that capacity, and the write must end at a disk-block or at the
-    // partition's end. Thread-safe for disjoint ranges.
-    void write_suffixes(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf);
+    // the lanes `suf`. The disk-resident pieces round up to whole disk-blocks:
+    // `suf` must have that capacity, and the write must end at a disk-block or
+    // at the partition's end. Thread-safe for disjoint ranges.
+    void write_suffixes(p_id_t p_id, idx_t off, idx_t sz, const uint8_t* suf);
 
     // Reads into the staging slab `s` its chunk of its partition's inbox
     // messages for the current generation. The RAM message-chunks read are
