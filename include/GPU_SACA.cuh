@@ -160,13 +160,13 @@ void shuffle_kernel(T_* const __restrict__ dest, const T_* const __restrict__ sr
 }
 
 
-// Scatters the suffixes in `suf` per their ranks in `rank` into `SA`, all of
-// size `n`.
+// Scatters the suffixes in the lanes `suf` per their ranks in `rank` into `SA`,
+// all of size `n`.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void scatter_suffixes_to_rank_kernel(   const idx_t* const __restrict__ suf, const p_sz_t* const __restrict__ rank,
+void scatter_suffixes_to_rank_kernel(   const uint8_t* const __restrict__ suf, const p_sz_t* const __restrict__ rank,
                                         idx_t* const __restrict__ SA, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -178,7 +178,7 @@ void scatter_suffixes_to_rank_kernel(   const idx_t* const __restrict__ suf, con
         __trap();
 #endif
 
-    SA[rank[i]] = bit_layout::suffix_of(suf[i]);
+    SA[rank[i]] = bit_layout::suffix_of(lane::load(suf, i));
 }
 
 
@@ -307,13 +307,13 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
 }
 
 
-// Emits the rank-propagation messages from cohort `SA` (of size `n`) into
-// `msg_target` (target recipient, computed from the sender and the current
-// generation's context-size `ctx`) and `msg_rank` (target's secondary key,
-// computed from local rank `K`). Backward routing tag for each sender from `SA`
-// is in the corresponding entry of `beta`. Messages are collated by destination
-// partitions using the per- partition append-offsets in `msg_off`. `active_sz`
-// delineates the active-retired set split of the cohort.
+// Emits the rank-propagation messages from cohort `SA` (of size `n`) into the
+// lanes `msg_target` (target recipient, computed from the sender and the
+// current generation's context-size `ctx`) and `msg_rank` (target's secondary
+// key, computed from local rank `K`). Backward routing tag for each sender from
+// `SA` is in the corresponding entry of `beta`. Messages are collated by
+// destination partitions using the per- partition append-offsets in `msg_off`.
+// `active_sz` delineates the active-retired set split of the cohort.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <bool packed_key_, idx_t BLOCK_SZ>
@@ -321,7 +321,7 @@ __global__
 void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K,
                             const beta_t* const __restrict__ beta,
                             const idx_t n, const idx_t ctx, const idx_t* const __restrict__ active_sz,
-                            idx_t* const __restrict__ msg_target, msg_rank_t* const __restrict__ msg_rank,
+                            uint8_t* const __restrict__ msg_target, msg_rank_t* const __restrict__ msg_rank,
                             p_sz_t* const __restrict__ msg_off)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -336,7 +336,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         const msg_rank_t primary = packed_key_ ? bit_layout::primary_of(K[i]) : K[i];   // `j`'s local rank.
 
         // Target recipient `j - ctx` will need `j`'s rank as its secondary at next gen.
-        msg_target[slot] = j - ctx;
+        lane::store(msg_target, slot, j - ctx);
         msg_rank[slot] = (i < *active_sz ? primary : poison_pill(primary));
     }
 
@@ -345,28 +345,28 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         // Where to put the `beta[i]`'th partition's next incoming message.
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
         const msg_rank_t to_forward = bit_layout::secondary_of(K[i]);
-        msg_target[slot] = j - (ctx >> 1);
+        lane::store(msg_target, slot, j - (ctx >> 1));
         msg_rank[slot] = poison_pill(to_forward);
     }
 }
 
 
-// Locates each message's (target in `msg_tgt` and rank in `msg_rank`) recipient
-// in the suffix-ordered active set `SA` (of size `n`). If found, constructs the
-// recipient's composite key into `K` from its primary rank in `primary` and the
-// secondary key in the message's rank.
+// Locates each message's (target in the lanes `msg_tgt`, and rank in
+// `msg_rank`) recipient in the suffix-ordered active set `SA` (of size `n`). If
+// found, constructs the recipient's composite key into `K` from its primary
+// rank in `primary` and the secondary key in the message's rank.
 // Grid organization: one thread per message.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
+void join_messages_kernel(  const uint8_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
                             const idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= msg_c)
         return;
 
-    const auto tgt = bit_layout::suffix_of(msg_tgt[i]); // Recipient suffix of the message.
+    const auto tgt = bit_layout::suffix_of(lane::load(msg_tgt, i)); // Recipient suffix of the message.
     idx_t low = 0, high = n;
     while(low < high)   // Locate `tgt` in the suffix-ordered active-set.
     {

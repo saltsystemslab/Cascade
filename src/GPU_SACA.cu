@@ -44,11 +44,6 @@
 namespace gpu_saca
 {
 
-// The device's uploads and downloads of the suffixes and of the message-targets
-// move their lanes as words.
-static_assert(LANE_BYTES == sizeof(idx_t), "The device takes the suffix- and target-lanes as words.");
-
-
 template <typename T_sym_>
 GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_path):
       host_budget(env::get_u64("GPU_SACA_RAM_BUDGET").value_or(static_cast<uint64_t>((1 - MEM_SAFETY_MARGIN) * util::available_memory())))
@@ -1003,10 +998,11 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     Prefix_Key* K_ranked = nullptr; // Ranked keys.
     idx_t* SA_ranked = nullptr; // Suffixes in ranked order (bar the active | retired split).
     beta_t* beta_ranked = nullptr;  // Backward tags corresponding to the ranked suffixes.
-    idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
+    uint8_t* msg_target = nullptr;  // Lanes of the target recipient suffixes for the messages.
     msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
     p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
     p_sz_t* local_rank = nullptr;   // Final primary ranks computed.
+    uint8_t* SA_lanes = nullptr;    // Lanes of the ranked suffixes, for persisting.
 
 
     // Unpack the suffixes, each packed with its forward tag in its backward tag-pair.
@@ -1120,7 +1116,7 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
 
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
-        msg_target = reinterpret_cast<idx_t*>(K_sorted);
+        msg_target = reinterpret_cast<uint8_t*>(K_sorted);
         msg_rank = reinterpret_cast<msg_rank_t*>(SA_sorted);
         msg_off = msg_off_buf[buf_id];
 
@@ -1151,6 +1147,15 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
     }
 
 
+    // Pack the suffixes into lanes for persisting, over the keys narrowed by now.
+    {
+        SA_lanes = reinterpret_cast<uint8_t*>(K_ranked);
+        pack_lanes_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_ranked, part_sz, SA_lanes);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -1166,10 +1171,10 @@ void GPU_SACA<T_sym_>::sort_and_init_rank_and_filter(const p_id_t p_id, Partitio
             s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_ranked + s->off(), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_lanes + lane::bytes(s->off()), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, lane::bytes(chunk_outbox_sz), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + lane::bytes(chunk_outbox_off), lane::bytes(chunk_outbox_sz), cudaMemcpyDeviceToHost, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             }
         }
@@ -1502,6 +1507,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     cub::DoubleBuffer<idx_t> suf(suf_buf[buf_id][0], suf_buf[buf_id][1]);
     cub::DoubleBuffer<p_sz_t> perm(perm_buf[buf_id][0], perm_buf[buf_id][1]);
     cub::DoubleBuffer<beta_t> beta(beta_buf[buf_id][0], beta_buf[buf_id][1]);
+    uint8_t* const suf_lanes = reinterpret_cast<uint8_t*>(suf.Alternate()); // Lanes of the suffixes, uploaded for unpacking.
 
     static_assert(DEV_KEY_BYTES >= 2 * sizeof(idx_t), "Current device floor-plan requires at least two `idx_t` per entry.");
     const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
@@ -1518,7 +1524,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         for(auto* s : p_assembly.slab)
         {
             CUDA_CHECK(cudaMemcpyAsync(primary + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(suf.Current() + s->off(), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf_lanes + lane::bytes(s->off()), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(beta.Current() + s->off(), s->beta(), s->size() * sizeof(beta_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
@@ -1539,11 +1545,20 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     idx_t* SA_re_ranked = nullptr;  // Suffixes in re-ranked order (bar the active | retired split).
     beta_t* beta_re_ranked = nullptr;   // Backward tags corresponding to the re-ranked suffixes.
     p_sz_t* msg_off = nullptr;  // Offsets for messages into message buffers per destination-partition.
-    idx_t* msg_target = nullptr;    // Target recipient suffixes for the messages.
+    uint8_t* msg_target = nullptr;  // Lanes of the target recipient suffixes for the messages.
     msg_rank_t* msg_rank = nullptr; // Local ranks sent with the messages.
-    idx_t* inbox_target = nullptr;  // Message-targets in the inbox of this partition.
+    uint8_t* inbox_target = nullptr;    // Lanes of the message-targets in the inbox of this partition.
     msg_rank_t* inbox_rank = nullptr;   // Message-ranks in the inbox of this partition.
+    uint8_t* SA_lanes = nullptr;    // Lanes of the re-ranked suffixes, for persisting.
     const auto inbox_sz = backend_->inbox_size(p_id);   // Size of the inbox.
+
+
+    // Unpack the suffixes.
+    {
+        unpack_lanes_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (suf_lanes, part_sz, suf.Current());
+        CUDA_CHECK(cudaGetLastError());
+    }
 
 
     // Sort the partition by suffix indices and consume the received messages.
@@ -1556,7 +1571,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             workspace, ws_sz,
             suf, perm,
             part_sz,
-            0, static_cast<int>(bit_layout::SUF_BITS),
+            0, static_cast<int>(std::min<idx_t>(bit_layout::SUF_BITS, lane::BITS)),
             stream[buf_id]
         ));
 
@@ -1574,7 +1589,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     // Asynchronously upload this partition's inbox to the device.
     {
-        inbox_target = A + P_sz_max;    // Bare local ranks have moved to `primary_suf_ordered`, at `A[4P, 8P)`.
+        inbox_target = reinterpret_cast<uint8_t*>(suf.Alternate()); // The suffixes' sort has freed it.
         inbox_rank = reinterpret_cast<msg_rank_t*>(B + P_sz_max);
         if(inbox_sz > P_sz_max) // By injectivity, a partition cannot receive more messages than its capacity.
         {
@@ -1586,7 +1601,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
         for(auto* s : p_assembly.slab)
             if(s->inbox_sz() > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(inbox_target + s->inbox_off(), s->msg_target(), lane::bytes(s->inbox_sz()), cudaMemcpyHostToDevice, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(inbox_target + lane::bytes(s->inbox_off()), s->msg_target(), lane::bytes(s->inbox_sz()), cudaMemcpyHostToDevice, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(inbox_rank + s->inbox_off(), s->msg_rank(), s->inbox_sz() * sizeof(msg_rank_t), cudaMemcpyHostToDevice, stream[buf_id]));
             }
     }
@@ -1701,7 +1716,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
 
     // Emit this generation's cohort's rank-propagation messages, collated by their destination partitions.
     {
-        msg_target = K_sorted;
+        msg_target = reinterpret_cast<uint8_t*>(K_sorted);
         msg_rank = reinterpret_cast<msg_rank_t*>(SA_sorted);
         msg_off = msg_off_buf[buf_id];
 
@@ -1732,6 +1747,15 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
     }
 
 
+    // Pack the suffixes into lanes for persisting, over the keys narrowed by now.
+    {
+        SA_lanes = reinterpret_cast<uint8_t*>(K_re_ranked);
+        pack_lanes_kernel<BLOCK_SZ> <<< block_count, BLOCK_SZ, 0, stream[buf_id] >>>
+            (SA_re_ranked, part_sz, SA_lanes);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+
     // Asynchronously download the ranked-and-compacted partition in a chunked manner to host slabs.
     {
         CUDA_CHECK(cudaMemcpyAsync(backend_->msg_off(p_id), msg_off, p_ * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
@@ -1747,10 +1771,10 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             s->set_outbox_off_and_size(chunk_outbox_off, chunk_outbox_sz);
 
             CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<p_sz_t*>(s->key()), local_rank + s->off(), s->size() * sizeof(p_sz_t), cudaMemcpyDeviceToHost, stream[buf_id]));
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_re_ranked + s->off(), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_lanes + lane::bytes(s->off()), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
             if(chunk_outbox_sz > 0)
             {
-                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + chunk_outbox_off, lane::bytes(chunk_outbox_sz), cudaMemcpyDeviceToHost, stream[buf_id]));
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), msg_target + lane::bytes(chunk_outbox_off), lane::bytes(chunk_outbox_sz), cudaMemcpyDeviceToHost, stream[buf_id]));
                 CUDA_CHECK(cudaMemcpyAsync(s->msg_rank(), msg_rank + chunk_outbox_off, chunk_outbox_sz * sizeof(msg_rank_t), cudaMemcpyDeviceToHost, stream[buf_id]));
             }
         }
@@ -1865,7 +1889,8 @@ void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assemb
     PROFILE_SCOPE_FMT("scatter_to_rank_order_p%d", static_cast<int>(p_id));
 
     static_assert(DEV_KEY_BYTES >= sizeof(p_sz_t), "Current device floor-plan requires at least one local-rank per entry.");
-    idx_t* const suf = suf_buf[buf_id][0];
+    static_assert(LANE_BYTES == sizeof(idx_t), "The suffix-array's entries are staged in the slabs' suffix-lanes.");
+    uint8_t* const suf = reinterpret_cast<uint8_t*>(suf_buf[buf_id][0]);    // Lanes of the suffixes.
     p_sz_t* const rank = reinterpret_cast<p_sz_t*>(key_buf[buf_id][0]);
     idx_t* const SA_local = suf_buf[buf_id][1]; // The partition's slice of the suffix array.
     const auto part_sz = P_cap[p_id];
@@ -1874,7 +1899,7 @@ void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assemb
     {
         for(auto* s : p_assembly.slab)
         {
-            CUDA_CHECK(cudaMemcpyAsync(suf + s->off(), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
+            CUDA_CHECK(cudaMemcpyAsync(suf + lane::bytes(s->off()), s->suf(), lane::bytes(s->size()), cudaMemcpyHostToDevice, stream[buf_id]));
             CUDA_CHECK(cudaMemcpyAsync(rank + s->off(), s->key(), s->size() * sizeof(p_sz_t), cudaMemcpyHostToDevice, stream[buf_id]));
         }
     }
