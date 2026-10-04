@@ -3,7 +3,8 @@
 # Staging of the query runs' inputs onto node-local storage, sourced by
 # timed.sbatch and xcheck.sbatch: files copied in parallel pieces, since a
 # single stream reads a shared file system at a fraction of what several do,
-# and kept for later runs.
+# and kept for later runs where the node keeps them: Explorer's epilog
+# empties a user's /tmp after their last job on the node.
 #
 # Environment (optional):
 #   STAGE_STREAMS   pieces copied at a time; default 16

@@ -38,9 +38,11 @@
 #
 # Environment (all optional):
 #   TM_STAGE        node-local directory to stage the indexes and the batches
-#                   under, kept for later runs; default /tmp/${USER}/query-stage;
-#                   `none` reads the indexes in place. STAGE_STREAMS sets the
-#                   pieces copied at a time (see stage.sh)
+#                   under, kept for later runs where the node keeps it; default
+#                   /tmp/${USER}/query-stage, which Explorer's epilog empties
+#                   after the user's last job on the node; `none` reads the
+#                   indexes in place. STAGE_STREAMS sets the pieces copied at a
+#                   time (see stage.sh)
 #   TM_RUNS         default main,batch,ablation,threads,variants,host; host runs
 #                   only if the host searches our index
 #   TM_IG_LOAD      infini-gram's index in the main, batch, and thread runs: mmap,

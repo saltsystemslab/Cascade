@@ -31,7 +31,8 @@
 #                   wants
 #   XC_STAGE        node-local directory to stage both indexes and the held-out
 #                   text under first, as timed.sbatch does, and to keep them for
-#                   later runs; default none: they are read in place
+#                   later runs where the node keeps it; default none: they are
+#                   read in place
 #   XC_SPOT         suffix-array order spot-checks at load; default 100000
 #   XC_ARCH         CUDA architecture of the in-job build; default 120-real
 #   XC_THREADS      infini-gram's pool size; default the job's CPUs
