@@ -1571,7 +1571,7 @@ void GPU_SACA<T_sym_>::sort_and_re_rank_and_filter(const p_id_t p_id, Partition_
             workspace, ws_sz,
             suf, perm,
             part_sz,
-            0, static_cast<int>(std::min<idx_t>(bit_layout::SUF_BITS, lane::BITS)),
+            0, static_cast<int>(bit_layout::SUF_BITS),
             stream[buf_id]
         ));
 

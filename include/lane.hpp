@@ -20,7 +20,7 @@ namespace gpu_saca
 // targets are persisted and staged, in host and in disk, and at which the
 // suffix array is output.
 #ifndef IDX_LANE_BYTES
-    constexpr std::size_t LANE_BYTES = 8;
+    constexpr std::size_t LANE_BYTES = 5;
 #else
     constexpr std::size_t LANE_BYTES = IDX_LANE_BYTES;
 #endif

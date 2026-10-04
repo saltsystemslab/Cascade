@@ -6,9 +6,11 @@
 
 #include "types.hpp"
 #include "Partition_ID_Map.hpp"
+#include "lane.hpp"
 #include "cross-compile.hpp"
 
 #include <iostream>
+#include <algorithm>
 
 
 // Bit-layout of the two packed 64-bit words the algorithm carries:
@@ -27,7 +29,7 @@ namespace gpu_saca::bit_layout
 constexpr idx_t WORD_BITS = 64;
 constexpr idx_t TAG_BITS = 16;  // Forward-tag: a partition-ID, biased past the reserved band; see `fwd_tag`.
 constexpr idx_t VAL_BITS = WORD_BITS - TAG_BITS;    // 48: suffix-indices and global ranks up to ~2.8e14.
-constexpr idx_t SUF_BITS = VAL_BITS;
+constexpr idx_t SUF_BITS = std::min(VAL_BITS, lane::BITS);  // Suffix-indices fit the value field and the index-lanes: 40 bits at 5 bytes.
 
 static_assert(TAG_BITS + VAL_BITS == WORD_BITS, "fields must tile a full word");
 static_assert(sizeof(idx_t) * 8 == WORD_BITS, "bit_layout assumes a 64-bit `idx_t`");
@@ -42,7 +44,7 @@ constexpr idx_t TAG_MASK = (idx_t(1) << TAG_BITS) - 1;  // Mask to extract the f
 constexpr idx_t VAL_MASK = (idx_t(1) << VAL_BITS) - 1;  // Mask to extract the actual values (bar the forward-tag) from a word.
 
 // Largest text length and partition-count the bit_layout supports.
-constexpr idx_t MAX_N = idx_t(1) << VAL_BITS;
+constexpr idx_t MAX_N = idx_t(1) << SUF_BITS;
 constexpr idx_t MAX_P = idx_t(1) << TAG_BITS;
 
 
@@ -141,7 +143,7 @@ inline bool validate(const idx_t n, const idx_t p)
 {
     if(n > MAX_N)
     {
-        std::cerr << "Text length " << n << " exceeds the " << VAL_BITS << "-bit value field (max " << MAX_N << ") of the packed-bit layout.\n";
+        std::cerr << "Text length " << n << " exceeds the " << SUF_BITS << "-bit suffix-indices (max " << MAX_N << ") of the packed-bit layout and the index-lanes.\n";
         return false;
     }
 
