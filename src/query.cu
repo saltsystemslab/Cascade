@@ -574,6 +574,9 @@ int run_gen(const Args& a)
 
 int main(const int argc, char** const argv)
 {
+    // Whole lines: a log of stdout and stderr together then puts an error between two lines, not inside one.
+    std::setvbuf(stdout, nullptr, _IOLBF, BUFSIZ);
+
     Args a;
     std::string err;
     if(!parse(argc, argv, a, err) || !a.has("index") || (a.cmd == "find" && !a.has("queries")))
