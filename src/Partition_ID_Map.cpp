@@ -19,7 +19,7 @@ Partition_ID_Map::Partition_ID_Map():
 Partition_ID_Map::Partition_ID_Map(const idx_t n, const p_id_t p):
       n_(n)
     , bits_(bits_for(p))
-    , mask_((uint64_t(1) << bits_) - 1)
+    , mask_((uint64_t(1) << (bits_ - 1)) - 1)
     , word_c_(word_c(n, bits_))
     , word_(util::checked_allocate<uint64_t>(word_c_))
 {
@@ -57,6 +57,18 @@ Partition_ID_Map::~Partition_ID_Map()
 void Partition_ID_Map::store_packed(const idx_t off, const idx_t sz, const uint64_t* const src)
 {
     std::memcpy(word_ + (off / GROUP_SZ) * bits_, src, packed_word_c(sz, bits_) * sizeof(uint64_t));
+}
+
+
+idx_t Partition_ID_Map::retired_count() const
+{
+    idx_t c = 0;
+
+    #pragma omp parallel for schedule(static) reduction(+ : c)
+    for(idx_t i = 0; i < n_; ++i)
+        c += retired(i);
+
+    return c;
 }
 
 

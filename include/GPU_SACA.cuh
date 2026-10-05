@@ -74,7 +74,7 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 
 
 // Packs the partition-IDs `P_id` of `n` suffixes into the words `word`, at
-// `bits` bits per ID, in the layout of `Partition_ID_Map`.
+// `bits` bits per entry, in the layout of `Partition_ID_Map`.
 // Grid organization: one thread per group of `Partition_ID_Map::GROUP_SZ`
 // suffixes.
 // Shared memory layout: no usage.
