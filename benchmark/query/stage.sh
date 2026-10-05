@@ -2,9 +2,9 @@
 #
 # Staging of the query runs' inputs onto node-local storage, sourced by
 # timed.sbatch and xcheck.sbatch: files copied in parallel pieces, since a
-# single stream reads a shared file system at a fraction of what several do,
-# and kept for later runs where the node keeps them: Explorer's epilog
-# empties a user's /tmp after their last job on the node.
+# single stream reads a shared file system at a fraction of what several do.
+# Copies already there of the same size and time are used as they are; a job
+# deletes its copies when it ends, unless told to keep them.
 #
 # Environment (optional):
 #   STAGE_STREAMS   pieces copied at a time; default 16
@@ -46,6 +46,19 @@ stage_files()
         stage_file "${f}" "${d}" || { echo "stage: cannot copy ${f}"; rc=1; }
     done
     return ${rc}
+}
+
+
+# Deletes the staged directories "${@:2}", and then the staging directory $1
+# if it is left empty.
+unstage()
+{
+    local d
+    for d in "${@:2}"; do
+        [ -n "${d}" ] && rm -rf -- "${d}"
+    done
+    rmdir -- "$1" 2> /dev/null
+    return 0
 }
 
 

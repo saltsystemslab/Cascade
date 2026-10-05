@@ -38,11 +38,12 @@
 #
 # Environment (all optional):
 #   TM_STAGE        node-local directory to stage the indexes and the batches
-#                   under, kept for later runs where the node keeps it; default
-#                   /tmp/${USER}/query-stage, which Explorer's epilog empties
-#                   after the user's last job on the node; `none` reads the
+#                   under; default /tmp/${USER}/query-stage; `none` reads the
 #                   indexes in place. STAGE_STREAMS sets the pieces copied at a
 #                   time (see stage.sh)
+#   TM_KEEP_STAGE   1 keeps the staged copies for later runs; by default the job
+#                   deletes them when it ends, as Explorer's epilog does anyway
+#                   for /tmp after the user's last job on the node
 #   TM_RUNS         default main,batch,ablation,threads,variants,host; host runs
 #                   only if the host searches our index
 #   TM_IG_LOAD      infini-gram's index in the main, batch, and thread runs: mmap,
@@ -118,6 +119,7 @@ fi
 
 OUT="${4:-${RESULTS_ROOT:-${HOME}/gpu-saca-results}/timed-$(basename "${IDX}")-$(date -u +%Y%m%dT%H%M%SZ)}"
 STAGE="${TM_STAGE:-/tmp/${USER}/query-stage}"
+KEEP_STAGE="${TM_KEEP_STAGE:-0}"
 RUNS=",${TM_RUNS:-main,batch,ablation,threads,variants,host},"
 REPS="${TM_REPS:-6}"
 REPL="${TM_REPLICATES:-3}"
@@ -184,6 +186,8 @@ fi
     echo "ours_text_res=${TEXT_RES}"
     echo "ours_sa_res=${SA_RES}"
     echo "ours_host_search=${HOST}"
+    echo "stage=${STAGE}"
+    echo "keep_stage=${KEEP_STAGE}"
     echo "ours_main_modes=${MAIN_MODES[*]}"
     echo "ours_batch_modes=${BATCH_MODES[*]}"
     echo "kernel=$(uname -r)"
@@ -219,6 +223,13 @@ SIDX="${IDX}"
 SIG="${IG}"
 BQ="${OUT}/batch-qry"
 if [ "${STAGE}" != none ]; then
+    # The copies go when the job does, however it ends, unless kept.
+    staged=("${STAGE}/ours-$(basename "${IDX}")" "${STAGE}/ig-$(basename "${IG}")" "${STAGE}/batch-qry-$(basename "${IDX}")")
+    if [ "${KEEP_STAGE}" != 1 ]; then
+        trap 'unstage "${STAGE}" "${staged[@]}"' EXIT
+        trap 'exit 143' TERM
+    fi
+
     stamp "stage: ${STAGE}"
     if stage_indexes "${IDX}" "${IG}" "${STAGE}"; then
         BQ="${STAGE}/batch-qry-$(basename "${IDX}")"

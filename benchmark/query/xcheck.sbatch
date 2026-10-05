@@ -30,9 +30,10 @@
 #                   its memory interleaved over every node, as the host's search
 #                   wants
 #   XC_STAGE        node-local directory to stage both indexes and the held-out
-#                   text under first, as timed.sbatch does, and to keep them for
-#                   later runs where the node keeps it; default none: they are
-#                   read in place
+#                   text under first, as timed.sbatch does; default none: they
+#                   are read in place
+#   XC_KEEP_STAGE   1 keeps the staged copies for later runs; by default the job
+#                   deletes them when it ends
 #   XC_SPOT         suffix-array order spot-checks at load; default 100000
 #   XC_ARCH         CUDA architecture of the in-job build; default 120-real
 #   XC_THREADS      infini-gram's pool size; default the job's CPUs
@@ -108,6 +109,13 @@ SIDX="${IDX}"
 SIG="${IG}"
 HELDOUT="${XC_HELDOUT:-}"
 if [ "${XC_STAGE:-none}" != none ]; then
+    # The copies go when the job does, however it ends, unless kept.
+    staged=("${XC_STAGE}/ours-$(basename "${IDX}")" "${XC_STAGE}/ig-$(basename "${IG}")" "${XC_STAGE}/heldout")
+    if [ "${XC_KEEP_STAGE:-0}" != 1 ]; then
+        trap 'unstage "${XC_STAGE}" "${staged[@]}"' EXIT
+        trap 'exit 143' TERM
+    fi
+
     stamp "stage: ${XC_STAGE}"
     if stage_indexes "${IDX}" "${IG}" "${XC_STAGE}" && { [ -z "${HELDOUT}" ] || stage_file "${HELDOUT}" "${XC_STAGE}/heldout"; }; then
         [ -n "${HELDOUT}" ] && HELDOUT="${XC_STAGE}/heldout/$(basename "${HELDOUT}")"
