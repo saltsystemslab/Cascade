@@ -61,6 +61,7 @@ private:
     const idx_t n_; // Size of the text.
     T_sym_* T_h_;   // Text.
     const std::string ip_path_; // Filesystem path the input text.
+    inline static const idx_t TEXT_READER_C = env::get_u64("GPU_SACA_TEXT_READER_C").value_or(16);  // Threads reading the text in parallel.
     const std::string op_path_; // Filesystem path to output the suffix array to.
 
     p_id_t p_;  // Number of partitions for the SA.

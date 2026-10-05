@@ -210,13 +210,13 @@ void GPU_SACA<T_sym_>::load_text()
     const auto bytes = (sym_count + null_count) * sizeof(T_sym_);   // Size of the text's buffer.
 
     const auto t_0 = timer::now();
-    T_h_ = util::checked_allocate<T_sym_>(sym_count + null_count);
+    T_h_ = util::checked_allocate<T_sym_>(util::math::block_up<util::PAGE_SIZE>(bytes) / sizeof(T_sym_), util::PAGE_SIZE);
     const auto t_1 = timer::now();
 
     util::prepage(T_h_, sym_count + null_count);
     const auto t_2 = timer::now();
 
-    util::read_file(ip_path_, T_h_, sym_count);
+    util::file::read_parallel(ip_path_, T_h_, sym_count * sizeof(T_sym_), TEXT_READER_C);
     for(idx_t i = 0; i < null_count; ++i)
         T_h_[sym_count + i] = std::numeric_limits<T_sym_>::min();
     const auto t_3 = timer::now();

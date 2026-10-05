@@ -189,6 +189,45 @@ void write_and_flush(const int fd, const std::string& path, const void* const bu
 }
 
 
+void read_parallel(const std::string& path, void* const dst, const std::size_t bytes, const std::size_t thread_c)
+{
+    auto fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
+    if(fd < 0 && errno == EINVAL)   // The filesystem does not support direct I/O.
+    {
+        std::cerr << "Warning: no direct reads at filesystem-path: " << path << "; reading through the page-cache.\n";
+        fd = ::open(path.c_str(), O_RDONLY);
+    }
+
+    if(fd < 0)
+        exit_on_io_failure("open", path);
+
+    constexpr std::size_t BLOCK = std::size_t(1) << 26; // Bytes per read.
+    const auto block_c = (bytes + BLOCK - 1) / BLOCK;
+
+    #pragma omp parallel for num_threads(thread_c) schedule(dynamic, 1)
+    for(std::size_t b = 0; b < block_c; ++b)
+    {
+        const auto off = b * BLOCK;
+        const auto sz = std::min(BLOCK, bytes - off);
+        const auto to_read = math::block_up<PAGE_SIZE>(sz); // Direct reads take whole pages; the file's last one ends short.
+        std::size_t read = 0;
+        while(read < sz)
+        {
+            const auto read_bytes = ::pread(fd, static_cast<char*>(dst) + off + read, to_read - read, off + read);
+            if(read_bytes < 0)
+                exit_on_io_failure("pread", path);
+            else if(read_bytes == 0)
+                exit_on_io_failure("pread: unexpected EOF", path);  // `errno` may be stale for the EOF case.
+
+            read += read_bytes;
+        }
+    }
+
+    if(::close(fd) != 0)
+        exit_on_io_failure("close", path);
+}
+
+
 void raise_open_files_limit(const std::size_t required)
 {
     rlimit lim;

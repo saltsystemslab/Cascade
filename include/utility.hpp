@@ -170,12 +170,13 @@ T_* aligned_allocate(const std::size_t size, const std::size_t alignment)
 }
 
 
-// Returns pointer to a memory-allocation for `size` elements of type `T_`;
-// aborts the execution if the allocation fails.
+// Returns pointer to a memory-allocation for `size` elements of type `T_`,
+// aligned to `alignment` if non-zero; aborts the execution if the allocation
+// fails.
 template<typename T_>
-T_* checked_allocate(const std::size_t sz)
+T_* checked_allocate(const std::size_t sz, const std::size_t alignment = 0)
 {
-    auto* const p = allocate<T_>(sz);
+    auto* const p = (alignment == 0 ? allocate<T_>(sz) : aligned_allocate<T_>(sz, alignment));
     if(p == nullptr)
     {
         std::cerr << "Failed to allocate " << sz << "-many bytes for: ";
@@ -353,6 +354,12 @@ void exit_on_io_failure(const char* op, const std::string& path);
 // `fd`, opened at path `path`. Additionally queues the bytes for writeback, so
 // that dirty pages do not pile up from a long output-stream.
 void write_and_flush(int fd, const std::string& path, const void* buf, std::size_t bytes, std::size_t off);
+
+// Reads the first `bytes`-many bytes of the file at path `path` into `dst`,
+// with `thread_c` threads reading disjoint blocks of it in parallel. The reads
+// bypass the page-cache, unless the filesystem does not support it. `dst` must
+// be `PAGE_SIZE`-aligned, and have room for `bytes` rounded up to a page.
+void read_parallel(const std::string& path, void* dst, std::size_t bytes, std::size_t thread_c);
 
 // Raises the soft limit on the process's open files to the hard limit, if the
 // soft limit falls below `required`. Aborts if the hard limit falls below it.
