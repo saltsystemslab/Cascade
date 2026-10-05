@@ -74,6 +74,7 @@ static_assert(PRIMARY_BITS == SECONDARY_BITS, "primary and secondary must share 
 
 constexpr idx_t BETA_BITS = 16; // Current generation's backward routing tag in low half of the pair, and preceding generation's one in high half.
 constexpr idx_t BETA_CUR_GEN_MASK = (idx_t(1) << BETA_BITS) - 1;
+constexpr idx_t BETA_RETIRED = idx_t(1) << (BETA_BITS - 1); // Flag in a half: its recipient has retired, so its message is not sent.
 
 
 // Returns the word packing `val` with forward tag `tag`.
@@ -135,6 +136,18 @@ CUDA_SPECIFIER inline p_id_t beta_cur_gen(const beta_t beta) { return beta & BET
 // Returns the previous generation's backward routing tag from the tag-pair
 // `beta`.
 CUDA_SPECIFIER inline p_id_t beta_prev_gen(const beta_t beta) { return beta >> BETA_BITS; }
+
+// Returns the backward routing tag to the `p_id`'th partition, flagged iff its
+// recipient has retired.
+CUDA_SPECIFIER inline p_id_t route(const p_id_t p_id, const bool retired) { return retired ? static_cast<p_id_t>(p_id | BETA_RETIRED) : p_id; }
+
+// Returns `true` iff the current generation's backward routing tag in the tag-
+// pair `beta` is flagged retired.
+CUDA_SPECIFIER inline bool beta_cur_retired(const beta_t beta) { return beta & BETA_RETIRED; }
+
+// Returns `true` iff the previous generation's backward routing tag in the tag-
+// pair `beta` is flagged retired.
+CUDA_SPECIFIER inline bool beta_prev_retired(const beta_t beta) { return (beta >> BETA_BITS) & BETA_RETIRED; }
 
 
 // Returns `true` iff a text of size `n` partitioned into `p` parts fits the

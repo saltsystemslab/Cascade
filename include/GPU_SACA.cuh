@@ -284,7 +284,8 @@ void refine_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n,
 // next generation from the cohort `SA` (of size `n`) into `msg_count`. `K` has
 // the cohort's packed keys, required for detecting poison-pill forwarding. The
 // current generation resolved context-size `ctx`. The backward routing tag for
-// each sender from `SA` is in the corresponding entry in `beta`.
+// each sender from `SA` is in the corresponding entry in `beta`; a message to a
+// recipient flagged retired there is not sent.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
@@ -299,10 +300,10 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
         return;
 
     const auto j = bit_layout::suffix_of(SA[i]);
-    if(j >= ctx)    // Regular payload message.
+    if(j >= ctx && !bit_layout::beta_cur_retired(beta[i]))  // Regular payload message.
         atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + bit_layout::beta_cur_gen(beta[i]), static_cast<unsigned int>(1));
 
-    if(bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1))   // Poison-pill forwarding.
+    if(bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1) && !bit_layout::beta_prev_retired(beta[i]))    // Poison-pill forwarding.
         atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
 }
 
@@ -311,8 +312,9 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
 // lanes `msg_target` (target recipient, computed from the sender and the
 // current generation's context-size `ctx`) and `msg_rank` (target's secondary
 // key, computed from local rank `K`). Backward routing tag for each sender from
-// `SA` is in the corresponding entry of `beta`. Messages are collated by
-// destination partitions using the per- partition append-offsets in `msg_off`.
+// `SA` is in the corresponding entry of `beta`; a message to a recipient flagged
+// retired there is not sent. Messages are collated by destination partitions
+// using the per- partition append-offsets in `msg_off`.
 // `active_sz` delineates the active-retired set split of the cohort.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
@@ -329,7 +331,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         return;
 
     const auto j = bit_layout::suffix_of((SA[i]));  // Suffix.
-    if(j >= ctx)    // Regular payload message.
+    if(j >= ctx && !bit_layout::beta_cur_retired(beta[i]))  // Regular payload message.
     {
         // Where to put the `beta[i]`'th partition's next incoming message.
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_cur_gen(beta[i]), static_cast<unsigned int>(1));
@@ -340,7 +342,7 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         msg_rank[slot] = (i < *active_sz ? primary : poison_pill(primary));
     }
 
-    if(packed_key_ && bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1))    // Poison-pill forwarding.
+    if(packed_key_ && bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1) && !bit_layout::beta_prev_retired(beta[i])) // Poison-pill forwarding.
     {
         // Where to put the `beta[i]`'th partition's next incoming message.
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));

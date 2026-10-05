@@ -5,6 +5,7 @@
 
 
 #include "types.hpp"
+#include "bit-layout.hpp"
 #include "Packed_Prefix.hpp"
 #include "Partition_ID_Map.hpp"
 #include "Partition_Backend.hpp"
@@ -31,7 +32,7 @@
 namespace gpu_saca
 {
 
-constexpr p_id_t MAX_PART_COUNT = std::numeric_limits<p_id_t>::max();  // Maximum supported number of partitions.
+constexpr p_id_t MAX_PART_COUNT = bit_layout::BETA_RETIRED - 1; // Maximum supported number of partitions: the routing tags keep their top bit for a flag.
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.

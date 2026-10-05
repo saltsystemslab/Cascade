@@ -1512,9 +1512,11 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
             key[i] = Prefix_Key::pack_prefix(T_h_ + j);
         }
 
-        // At generation 0, which forwards no pills, the pair's high half carries the forward tag instead.
-        beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
-                                        init_rank_ ? bit_layout::fwd_tag(P_id, j + ell, n_, ell) : (j < stride ? 0 : P_id[j - stride]));
+        // The routing tags carry their recipients' retirement-flags. At generation 0, which forwards no pills, the pair's high
+        // half carries the forward tag instead.
+        beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : bit_layout::route(P_id[j - ctx_], P_id.retired(j - ctx_)),
+                                        init_rank_ ? bit_layout::fwd_tag(P_id, j + ell, n_, ell) :
+                                                     (j < stride ? 0 : bit_layout::route(P_id[j - stride], P_id.retired(j - stride))));
     }
 }
 
