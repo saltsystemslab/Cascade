@@ -601,7 +601,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
         // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer.
         // A slab lives in exactly one of: `F`, a reader, an assembly slot (covering its timeline in `C`,
-        // at a stager, and at device), `W`, and a writer.
+        // at a stager, and at device), `C` and a stager again past the device, `W`, and a writer.
         slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
 
         admit_budget_ = slab_c_;
@@ -937,6 +937,13 @@ void GPU_SACA<T_sym_>::initial_rank()
     }
 
 #ifdef TESTS
+    // As many suffixes are marked retired as have retired; and no cohort holds a marked suffix, as its staging checks.
+    if(P_id.retired_count() != n_ - active_set_size())
+    {
+        std::cerr << "Retirement-flags of the partition-ID map disagree with the active-sets. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
     backend_->shuffle_tiers(1, Active_sz);
 #endif
 
@@ -1298,9 +1305,10 @@ void GPU_SACA<T_sym_>::drive_pipeline()
 
 
     std::vector<std::thread> stagers;   // Stagers-pool.
-    std::atomic<int64_t> st_remain(total_chunk);    // Count of slabs left to stage.
+    std::atomic<int64_t> st_remain(2 * total_chunk);    // Count of slab-visits left: each slab visits before and after its device-run.
     // Launch the stagers thread-pool to apply host-side compute to each slab as soon as it's been read from
-    // the backend, add it to its partition's assembly, and post completed assemblies for dispatch.
+    // the backend, add it to its partition's assembly, and post completed assemblies for dispatch; and to
+    // destage each slab processed at the device, and hand it over to the writers.
     {
         for(idx_t c = 0; c < stager_c_; ++c)
             stagers.emplace_back([&, c]
@@ -1311,10 +1319,16 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                         Staging_Slab* s;
                         {
                             INSTRUMENT_TIMER(probe::P().me().wait_in_ns);
-                            C.wait_dequeue(s);  // Get a slab with read data.
+                            C.wait_dequeue(s);  // Get a slab with read data, or one processed at the device.
                         }
 
                         INSTRUMENT(probe::P().me().items++);
+                        if(s->processed())
+                        {
+                            destage_slab(*s);
+                            W.enqueue(s);   // The destaged slab now moves to the write queue.
+                            continue;
+                        }
 #ifdef TESTS
                         if(!test::validate_inbox_routing(*s, P_id, n_))
                         {
@@ -1426,8 +1440,8 @@ void GPU_SACA<T_sym_>::drive_pipeline()
                             CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
                         }
 
-                        for(auto* s : p_assembly->slab) // The processed slabs now move to the write queue.
-                            W.enqueue(s);
+                        for(auto* s : p_assembly->slab) // The processed slabs now move back to the staging-compute queue, for destaging.
+                            s->mark_processed(), C.enqueue(s);
                     }
                 }
             );
@@ -1475,6 +1489,13 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
                 std::exit(EXIT_FAILURE);
             }
     }
+
+    for(idx_t i = 0; i < sz; ++i)
+        if(P_id.retired(bit_layout::suffix_of(lane::load(suf, i))))
+        {
+            std::cerr << "Suffix " << bit_layout::suffix_of(lane::load(suf, i)) << " is marked retired, yet in the cohort. Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
 #endif
 
     auto* const beta = s.beta();
@@ -1494,6 +1515,25 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
         // At generation 0, which forwards no pills, the pair's high half carries the forward tag instead.
         beta[i] = bit_layout::beta_pair(j < ctx_ ? 0 : P_id[j - ctx_],
                                         init_rank_ ? bit_layout::fwd_tag(P_id, j + ell, n_, ell) : (j < stride ? 0 : P_id[j - stride]));
+    }
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::destage_slab(const Staging_Slab& s)
+{
+    INSTRUMENT_TIMER(probe::P().me().stage_ns);
+
+    const auto a_new = *backend_->active_slot(s.p_id());    // The partition's active-set size past its device-run.
+    const auto* const suf = s.suf();
+
+    // Past its device-run, the partition's cohort sits in its slabs as its new active-set, then its retirees.
+    for(idx_t i = (a_new > s.off() ? std::min(a_new - s.off(), s.size()) : 0); i < s.size(); ++i)
+    {
+        if(i + RETIREE_MARK_PREFETCH_D < s.size())
+            P_id.prefetch_flag(bit_layout::suffix_of(lane::load(suf, i + RETIREE_MARK_PREFETCH_D)));
+
+        P_id.retire(bit_layout::suffix_of(lane::load(suf, i)));
     }
 }
 
@@ -1852,6 +1892,13 @@ void GPU_SACA<T_sym_>::exponentiate_prefix()
             idx_t pill_c_h;
             CUDA_CHECK(cudaMemcpy(&pill_c_h, pill_c_d, sizeof(idx_t), cudaMemcpyDeviceToHost));
             std::cerr << "Active suffixes with poison-pill received for generation " << gen << ": " << pill_c_h << ".\n";
+        }
+
+        // As many suffixes are marked retired as have retired; and no cohort holds a marked suffix, as its staging checks.
+        if(P_id.retired_count() != n_ - active_set_size())
+        {
+            std::cerr << "Retirement-flags of the partition-ID map disagree with the active-sets. Aborting.\n";
+            std::exit(EXIT_FAILURE);
         }
 
         backend_->shuffle_tiers(gen + 1, Active_sz);

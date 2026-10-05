@@ -44,6 +44,7 @@ private:
                                                         // TODO: what happens if we bump it down? How far can we go?
 
     static constexpr idx_t PREFIX_KEY_GATHER_PREFETCH_D = 16;   // Software-prefetch lookahead for prefix-key gathering in initial ranking.
+    static constexpr idx_t RETIREE_MARK_PREFETCH_D = 16;    // Software-prefetch lookahead for marking retirees in the partition-ID map.
 
     // Bytes per suffix required in each of the two device key-buffers, per
     // partition. The initial-ranking phase sorts the suffixes by their `\ell`-
@@ -216,6 +217,11 @@ private:
 
     // Stages the slab `s`'s content for upload with required host-side compute.
     template <bool init_rank_> void stage_slab(Staging_Slab& s);
+
+    // Marks the retirees in the slab `s`, processed at the device, as retired
+    // in the partition-ID map: the suffixes past their partition's new active-
+    // set.
+    void destage_slab(const Staging_Slab& s);
 
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
