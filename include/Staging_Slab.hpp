@@ -34,6 +34,7 @@ private:
     p_sz_t outbox_off_; // Offset of this slab's chunk into its partition's outbox.
     p_sz_t outbox_sz_;  // Count of outbox messages in this slab's chunk.
     idx_t sz_;  // Number of elements in the slab.
+    bool processed_;    // Whether the slab holds its chunk's device-output.
 
 public:
 
@@ -96,6 +97,12 @@ public:
     // Returns the number of elements in the slab.
     auto size() const { return sz_; }
 
+    // Returns whether the slab holds its chunk's device-output.
+    bool processed() const { return processed_; }
+
+    // Marks the slab as holding its chunk's device-output, past its device-run.
+    void mark_processed() { processed_ = true; }
+
     // Sets the offset of this slab's chunk into its partition's outbox, and the
     // count of outbox messages in this slab's chunk to `outbox_sz`.
     void set_outbox_off_and_size(const idx_t off, const idx_t sz) { outbox_off_ = off, outbox_sz_ = sz; }
@@ -106,7 +113,8 @@ public:
 
     // Tags the slab with the partition-chunk it's carrying (from partition-ID
     // `p_id`, at range `[off, off + sz)`, and the message- chunk it's carrying
-    // (at range `[msg_off, msg_off + inbox_sz)`).
+    // (at range `[msg_off, msg_off + inbox_sz)`); the slab holds no device-
+    // output then.
     void assign(p_id_t p_id, idx_t off, idx_t sz, p_sz_t msg_off, p_sz_t inbox_sz);
 };
 

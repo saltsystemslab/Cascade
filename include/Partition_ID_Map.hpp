@@ -18,26 +18,29 @@ namespace gpu_saca
 {
 
 // Partition-ID map `Π` of a text: the ID of the partition holding each suffix,
-// bit-packed.
+// and whether the suffix has retired, bit-packed.
 class Partition_ID_Map
 {
 public:
 
-    static constexpr idx_t GROUP_SZ = 64;   // Suffixes per group: their IDs take up as many words as bits per ID.
-                                            // IDs of `GROUP_SZ` consecutive suffixes take up whole words.
+    static constexpr idx_t GROUP_SZ = 64;   // Suffixes per group: their entries take up as many words as bits per entry.
+                                            // Entries of `GROUP_SZ` consecutive suffixes take up whole words.
 
 private:
 
     idx_t n_;   // Count of suffixes.
-    uint32_t bits_; // Bits per partition-ID.
+    uint32_t bits_; // Bits per entry: the partition-ID's, then the retirement-flag's.
     uint64_t mask_; // Mask of a partition-ID's bits.
     std::size_t word_c_;    // Count of words in the flat array, including the padding at the end.
-    uint64_t* word_;    // The packed partition-IDs: `bits_` words per group of suffixes, then a padding.
+    uint64_t* word_;    // The packed entries: `bits_` words per group of suffixes, then a padding.
 
 
-    // Returns the count of words of a map of `n` suffixes at `bits` bits per ID,
-    // including the padding.
+    // Returns the count of words of a map of `n` suffixes at `bits` bits per
+    // entry, including the padding.
     static std::size_t word_c(const idx_t n, const uint32_t bits) { return ((n + GROUP_SZ - 1) / GROUP_SZ) * bits + 1; }
+
+    // Returns the bit-position of the `i`'th suffix's retirement-flag.
+    idx_t flag_bit(const idx_t i) const { return i * bits_ + bits_ - 1; }
 
 public:
 
@@ -55,26 +58,39 @@ public:
 
     ~Partition_ID_Map();
 
-    // Returns the bits per partition-ID across `p` partitions.
-    static uint32_t bits_for(const p_id_t p) { return std::max<uint32_t>(1, util::math::bits_for(p)); }
+    // Returns the bits per entry across `p` partitions: a partition-ID's, and
+    // the retirement-flag's.
+    static uint32_t bits_for(const p_id_t p) { return std::max<uint32_t>(1, util::math::bits_for(p)) + 1; }
 
     // Returns the bytes of a map of `n` suffixes across `p` partitions.
     static std::size_t bytes(const idx_t n, const p_id_t p) { return word_c(n, bits_for(p)) * sizeof(uint64_t); }
 
-    // Returns the count of words that the partition-IDs of `sz` consecutive
-    // suffixes take up, packed at `bits` bits per ID from a group's start.
+    // Returns the count of words that the entries of `sz` consecutive suffixes
+    // take up, packed at `bits` bits per entry from a group's start.
     CUDA_SPECIFIER static std::size_t packed_word_c(const idx_t sz, const uint32_t bits) { return (sz * bits + 63) / 64; }
 
     // Packs the partition-IDs `src` of `sz` consecutive suffixes, from a
-    // group's start, into the words `dst` at `bits` bits per ID, in the map's
-    // layout.
+    // group's start, into the words `dst` at `bits` bits per entry, with the
+    // retirement-flags clear, in the map's layout.
     CUDA_SPECIFIER static void pack(const p_id_t* src, idx_t sz, uint32_t bits, uint64_t* dst);
 
-    // Returns the bits per partition-ID.
+    // Returns the bits per entry.
     uint32_t bits() const { return bits_; }
 
     // Returns the partition-ID of the `i`'th suffix.
     p_id_t operator[](idx_t i) const;
+
+    // Returns whether the `i`'th suffix is marked retired.
+    bool retired(idx_t i) const;
+
+    // Marks the `i`'th suffix retired. Thread-safe.
+    void retire(idx_t i);
+
+    // Prefetches the `i`'th suffix's retirement-flag, for marking it.
+    void prefetch_flag(const idx_t i) const { __builtin_prefetch(word_ + flag_bit(i) / 64, 1, 0); }
+
+    // Returns the count of the suffixes marked retired.
+    idx_t retired_count() const;
 
     // Stores the partition-IDs of the `sz` suffixes from the `off`'th one on,
     // packed per `pack` in `src`. Both `off` and `off + sz` must be multiples
@@ -115,11 +131,27 @@ CUDA_SPECIFIER inline void Partition_ID_Map::pack(const p_id_t* const src, const
 
 inline p_id_t Partition_ID_Map::operator[](const idx_t i) const
 {
+    // Relaxed atomic loads of whole words, as the retirement-flags in them may change concurrently; the IDs never do.
     const auto bit = i * bits_;
-    uint64_t w;
-    std::memcpy(&w, reinterpret_cast<const char*>(word_) + bit / 8, sizeof(w)); // Unaligned: the ID's bits start within its first byte.
+    const auto off = bit % 64;
+    const uint64_t lo = __atomic_load_n(word_ + bit / 64, __ATOMIC_RELAXED) >> off;
+    const uint64_t hi = (off + bits_ - 1 > 64 ? __atomic_load_n(word_ + bit / 64 + 1, __ATOMIC_RELAXED) << (64 - off) : 0); // The ID straddles two words.
 
-    return static_cast<p_id_t>((w >> (bit % 8)) & mask_);
+    return static_cast<p_id_t>((lo | hi) & mask_);
+}
+
+
+inline bool Partition_ID_Map::retired(const idx_t i) const
+{
+    const auto bit = flag_bit(i);
+    return (__atomic_load_n(word_ + bit / 64, __ATOMIC_RELAXED) >> (bit % 64)) & 1;
+}
+
+
+inline void Partition_ID_Map::retire(const idx_t i)
+{
+    const auto bit = flag_bit(i);
+    __atomic_fetch_or(word_ + bit / 64, uint64_t(1) << (bit % 64), __ATOMIC_RELAXED);
 }
 
 }

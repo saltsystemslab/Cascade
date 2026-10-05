@@ -25,6 +25,7 @@ Writes pgfplots-ready TSVs into <out-dir>, with `nan` for what is unavailable:
                         skew_p.tsv and skew_k.tsv
     partition_sizes.tsv each partition's size over B, for CDFs
     datasets.tsv        one row per corpus; also typeset as datasets.tex
+    budget.tsv          each corpus' messages per suffix, live and dead, in order of E[d]
     checks.txt          the consistency checks, also printed
 Exits 1 if any check fails.
 
@@ -101,6 +102,12 @@ def derive(r):
 
     The per-partition active-set sizes give each generation's skew over the
     partitions, max / mean; the corpus' skew weighs it by |A^(t)|, i.e. by work.
+
+    The message budget per suffix: each active suffix receives one live message
+    per generation, A / n in all. A suffix sends its rank in each generation it
+    takes part in, d + 1 of them, but receives only d; so the dead messages are
+    one per suffix, less the last generation's cohort and the E_t edges, plus
+    the forwarded pills. Generation 0's dead ones are the flood's.
     """
     c, n, a, inbox = r["name"], r["n"], r["active"], r["inbox"]
     ell = r["ctx"][0]
@@ -180,7 +187,9 @@ def derive(r):
                     "depth_lo": ell << (G - 1), "depth_hi": (ell << G) + ell, "depth_max": NAN,
                     "amp_run": M / A, "waste": 1 - A / M, "pill_ovh": (M - payloads_hi) / payloads_hi,
                     "pill_ovh_exact": NAN, "flood_share": m[1] / M, "flood_waste": 1 - a[0] / m[1],
-                    "skew_work": skew_work / A if vec else NAN, "max_B": NAN}
+                    "skew_work": skew_work / A if vec else NAN, "max_B": NAN,
+                    "live": A / n, "dead0": (m[1] - a[0]) / n, "dead_surv": (sum(m[2:]) - sum(a[1:]) - pills) / n,
+                    "dead_pill": pills / n, "total": M / n}
     return fails
 
 
@@ -331,6 +340,8 @@ def attach(r, tool):
                  for t in range(min(D, G))]
     s["depth_max"] = tool["depth_max"]
     s["pill_ovh_exact"] = sum(fwd[1:G]) / sum(pay[:G])     # Over the logged inboxes, M_2 to M_G.
+    s["dead_pill"] = sum(fwd[1:G]) / n                      # Exact, in place of the log's bracket.
+    s["dead_surv"] = (sum(m[2:]) - sum(a[1:]) - sum(fwd[1:G])) / n
     return fails
 
 
@@ -393,6 +404,7 @@ SKEW = ["corpus", "label", "feasible", "K", "ell", "n", "p", "p_min", "floor", "
         "mean_full_B", "min_full_B", "q05_B", "q50_B", "q95_B", "fill", "env_B"]
 DATASETS = ["corpus", "n", "p", "ell", "G", "surv0", "Ed", "depth_lo", "depth_hi", "amp_run", "waste", "pill_ovh",
             "flood_share", "flood_waste", "K", "depth_max", "pill_ovh_exact", "skew_work", "max_B"]
+BUDGET = ["corpus", "Ed", "live", "dead0", "dead_surv", "dead_pill", "total", "amp_run"]   # Messages per suffix.
 
 
 def main(argv):
@@ -457,6 +469,7 @@ def main(argv):
     write_tsv(out / "partition_sizes.tsv", ["corpus", "label", "i", "size_B"], sizes)
     summary = [r["summary"] for r in runs]
     write_tsv(out / "datasets.tsv", DATASETS, summary)
+    write_tsv(out / "budget.tsv", BUDGET, sorted(summary, key=lambda s: s["Ed"]))
     write_tex(out / "datasets.tex", summary)
 
     report = [f"{r['name']}: n = {r['n']}, ell = {r['ctx'][0]}, {len(r['active']) - 1} doubling generations"
