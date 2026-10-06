@@ -56,6 +56,17 @@ if [ -n "${MODULES:-}" ]; then
     set -u
 fi
 
+# Executable is not loadable: ours links libcudart, which only a loaded cuda
+# module puts on the loader path, and `-x` above cannot see that. Checked here
+# rather than at the first run, which is past staging the corpus.
+"${OURS_BIN}" >/dev/null 2>&1
+if [ $? -eq 127 ]; then
+    echo "FATAL: ${OURS_BIN} will not load. MODULES='${MODULES:-}'; missing:"
+    ldd "${OURS_BIN}" 2>&1 | grep 'not found'
+    echo "Set MODULES (see benchmark/local.env) so the job loads the cuda runtime."
+    exit 1
+fi
+
 # Stamp the binary under test into every record.
 if [ -r "${HERE}/pin" ]; then
     set -a; . "${HERE}/pin"; set +a
