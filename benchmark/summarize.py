@@ -20,7 +20,7 @@ GiB = 1 << 30
 # baseline's numbers stand, so a campaign pair will routinely span minors. Only
 # a major says a field changed meaning, and only then are the two sets of
 # numbers actually incomparable.
-SCHEMA = (6, 2)
+SCHEMA = (6, 3)
 
 # A run is comparable to another run only if the machine was in the same state.
 # thp_alloc + thp_fallback is a constant of the workload separates the good runs
@@ -145,7 +145,11 @@ def inconsistencies(rs):
     harness fault by construction, not noise—replicates of one configuration
     cannot legitimately run a different binary or a different environment."""
     out = []
-    for k in ("exe_hash", "env_tuning", "threads_avail", "cpus_allowed"):
+    # `placement` belongs here and not in `check`: the best placement differs by
+    # corpus -- libsais wants --cpunodebind=0 where a corpus fits one socket and
+    # plain 128 threads where it does not -- so a campaign may legitimately span
+    # placements while a single group never can.
+    for k in ("exe_hash", "env_tuning", "threads_avail", "cpus_allowed", "placement"):
         vals = {r.get(k) for r in rs}
         if len(vals) > 1:
             out.append(f"{k}={sorted(map(str, vals))}")

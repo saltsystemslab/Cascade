@@ -88,6 +88,15 @@ IFS=',:' read -r -a METHOD_LIST <<< "${METHODS-}"
 TOKENIZER="${TOKENIZER:?TOKENIZER is required}"
 OURS_TAG="${OURS_TAG-}"
 REPS="${REPS:?REPS is required}"
+# Placement, transported colon-for-comma like the lists above. Empty means the
+# default. It is an input of the run, not harness policy: libsais wants
+# --cpunodebind=0 where a corpus fits one socket and plain 128 threads where it
+# does not, and ours wants the default everywhere. So it is supplied per
+# campaign and recorded per run, never assumed here.
+NUMACTL="${NUMACTL-}"
+NUMACTL="${NUMACTL//:/,}"
+# shellcheck disable=SC2206
+PLACE=(${NUMACTL:+numactl ${NUMACTL}})
 # Empty means "all cores on this node". Overriding it is how the thread-choice
 # control is run: same corpus, half the cores, into the same results directory --
 # the run-id carries t<threads>, so the two land as separate rows.
@@ -212,9 +221,15 @@ run()
 
     [ -s "${RESULTS}/${id}.json" ] && { echo "skip (already done) ${id}"; return; }
 
-    local -a cmd=("${bin}" --input "$(corpus_path "$3")" --corpus "$3"
+    # The placement prefixes the binary and is also handed to it, so the record
+    # says how the run was placed. Declared, not observed: numactl execs the
+    # binary, so by the time it looks the wrapper is gone. `cpus_allowed` is the
+    # cross-check -- a --cpunodebind=0 that took reports 64, not 128.
+    local -a cmd=(${PLACE[@]+"${PLACE[@]}"}
+                  "${bin}" --input "$(corpus_path "$3")" --corpus "$3"
                   --tokenizer "${TOKENIZER}" --run-id "${id}"
                   --alphabet "$4" --n "${n}" --threads "${threads}"
+                  --placement "${PLACE[*]-}"
                   --results-dir "${RESULTS}")
 
     # The baselines report their library's own version; ours reports the tag it

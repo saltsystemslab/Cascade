@@ -356,7 +356,7 @@ struct Record
     // a change to what a timing measures; records across majors do not mix.
     // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
-    static constexpr int schema_minor = 2;
+    static constexpr int schema_minor = 3;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     // Which build of that commit. The commit alone does not identify the
@@ -378,6 +378,11 @@ struct Record
     double      cpu_user = -1, cpu_sys = -1;
     int64_t     minflt = -1, majflt = -1, nvcsw = -1, nivcsw = -1;
     int64_t     threads_avail = -1, cpus_allowed = -1;
+    // How the run was placed, as the harness invoked it, e.g.
+    // "numactl --cpunodebind=0". Declared rather than observed: numactl execs
+    // us, so the wrapper is gone by the time we look. `cpus_allowed` is the
+    // observed cross-check -- a cpunodebind that took shows 64, not 128.
+    std::string placement;
     uint64_t    exe_hash = 0;
     std::string env_tuning;
 
@@ -424,7 +429,8 @@ struct Record
         J_NUM(peak_rss);     J_NUM(peak_device);
         J_NUM(cpu_user);     J_NUM(cpu_sys);
         J_NUM(minflt);       J_NUM(majflt);        J_NUM(nvcsw);      J_NUM(nivcsw);
-        J_NUM(threads_avail);J_NUM(cpus_allowed);  J_NUM(exe_hash);   J_STR(env_tuning);
+        J_NUM(threads_avail);J_NUM(cpus_allowed);  J_NUM(exe_hash);
+        J_STR(placement);   J_STR(env_tuning);
         J_NUM(thp_alloc);    J_NUM(thp_fallback);  J_NUM(pgscan_direct);
         J_NUM(compact_stall);J_NUM(numa_local);    J_NUM(numa_other);
         J_NUM(buddy_free);   J_NUM(buddy_free_huge);
@@ -477,6 +483,7 @@ struct Args
 {
     std::string input, corpus, run_id, alphabet, tokenizer;
     std::string method_version;         // Overrides the library's own version string.
+    std::string placement;              // What the harness wrapped the run in, for the record.
     std::string results_dir = ".";
     std::string sa_out;                 // Writing the SA is opt-in: github's would be 472 GiB.
 
@@ -494,6 +501,7 @@ inline const char* usage()
     "  --input P --corpus NAME --run-id ID --alphabet token16|byte|byte_from_token16\n"
     "  [--tokenizer NAME] [--method-version V]\n"
     "  [--n N] [--threads T] [--fs F] [--results-dir D] [--sa-out P] [--verify]\n"
+    "  [--placement S]   what the caller wrapped this run in, recorded verbatim\n"
     "\n"
     "  --n counts SYMBOLS, not tokens. For byte_from_token16 that is bytes,\n"
     "  i.e. twice the token count.\n";
@@ -522,6 +530,7 @@ inline bool parse(const int argc, char** const argv, Args& a, std::string& err)
         else if(k == "--n")             a.n           = std::strtoll(v, nullptr, 10);
         else if(k == "--threads")       a.threads     = std::strtoll(v, nullptr, 10);
         else if(k == "--fs")            a.fs          = std::strtoll(v, nullptr, 10);
+        else if(k == "--placement")     a.placement   = v;
         else                            { err = "unknown argument: " + k; return false; }
     }
 
@@ -753,6 +762,7 @@ int bench_main(const Args& arg, const char* const method, const char* const meth
     rec.tokenizer    = arg.tokenizer;
     rec.alphabet     = arg.alphabet;
     rec.symbol_bytes = alpha::symbol_bytes(arg.alphabet);
+    rec.placement    = arg.placement;
     rec.threads      = arg.threads;
 
     const auto emit = [&](const char* const status, const int64_t code, const std::string& detail)

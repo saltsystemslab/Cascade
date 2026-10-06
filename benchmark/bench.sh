@@ -21,6 +21,9 @@ Usage: benchmark/bench.sh --corpora LIST [options]
   --ours TAG           also run our method, built at git tag TAG
   --reps N             replicates per configuration (default 3, minimum 1)
   --threads N          CPU threads for libsais/ours (default: all cores on the node)
+  --numactl ARGS       run each method under `numactl ARGS`, e.g. "--cpunodebind=0";
+                       recorded per run, because the best placement differs by
+                       method and by corpus (see benchmark/baselines.md)
   --name LABEL         human label for the campaign directory
   --results-dir DIR    override the computed directory; reuse one to accumulate
   --dry-run            print the plan and exit without submitting
@@ -39,6 +42,7 @@ EOF
 die() { echo "error: $*" >&2; exit 1; }
 
 CORPORA= TOKENIZER=llama2 METHODS= OURS_TAG= REPS=3 NAME= RESULTS= DRY=0 YES=0 THREADS=
+NUMACTL=
 while [ $# -gt 0 ]; do
     case "$1" in
         --corpora)     CORPORA="${2:?--corpora needs a value}"; shift 2;;
@@ -47,6 +51,7 @@ while [ $# -gt 0 ]; do
         --ours)        OURS_TAG="${2:?--ours needs a tag}"; shift 2;;
         --reps)        REPS="${2:?--reps needs a value}"; shift 2;;
         --threads)     THREADS="${2:?--threads needs a value}"; shift 2;;
+        --numactl)     NUMACTL="${2?--numactl needs a value}"; shift 2;;
         --name)        NAME="${2:?--name needs a value}"; shift 2;;
         --results-dir) RESULTS="${2:?--results-dir needs a value}"; shift 2;;
         --dry-run)     DRY=1; shift;;
@@ -127,6 +132,7 @@ echo "tokenizer  ${TOKENIZER}"
 echo "methods    ${ALL_METHODS[*]}${OURS_TAG:+  (gpu_saca @ ${OURS_TAG})}"
 echo "reps       ${REPS}"
 echo "threads    ${THREADS:-all cores on the node}"
+echo "placement  ${NUMACTL:+numactl ${NUMACTL}}${NUMACTL:-default}"
 echo "results    ${RESULTS}"
 echo
 printf '%-16s %10s %14s\n' corpus bytes "n (tokens)"
@@ -176,11 +182,15 @@ EOF
 # bare `arxiv`, silently dropping every corpus after the first. Transport the
 # lists colon-separated; the sbatch splits on either.
 CORPORA_X="${CORPORA//,/:}"
+# Same dodge for the placement, which needs it for lists like
+# `--physcpubind=0,2,4`. Colon is safe as the stand-in: numactl's syntax uses
+# commas and dashes, never colons.
+NUMACTL_X="${NUMACTL//,/:}"
 METHODS_X="${METHODS//,/:}"
 
 jid=$(sbatch --parsable \
         --output="${RESULTS}/slurm-%j.out" --error="${RESULTS}/slurm-%j.err" \
-        --export=ALL,CORPORA="${CORPORA_X}",TOKENIZER="${TOKENIZER}",METHODS="${METHODS_X}",OURS_TAG="${OURS_TAG}",REPS="${REPS}",THREADS="${THREADS}" \
+        --export=ALL,CORPORA="${CORPORA_X}",TOKENIZER="${TOKENIZER}",METHODS="${METHODS_X}",OURS_TAG="${OURS_TAG}",REPS="${REPS}",THREADS="${THREADS}",NUMACTL="${NUMACTL_X}" \
         "${HERE}/bench.sbatch" "${RESULTS}")
 rc=$?
 [ "${rc}" -eq 0 ] || die "sbatch failed (rc=${rc})"

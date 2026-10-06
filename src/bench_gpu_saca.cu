@@ -79,6 +79,7 @@ int main(int argc, char** argv)
     rec.tokenizer       = a.tokenizer;
     rec.alphabet        = a.alphabet;
     rec.symbol_bytes    = bench::alpha::symbol_bytes(a.alphabet);
+    rec.placement       = a.placement;
     rec.threads         = a.threads;
 
     // The shared path to record-emission.
