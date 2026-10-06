@@ -282,17 +282,36 @@ if [ -n "${OURS_TAG}" ]; then
         # residency plan, and per-generation active set sizes (corpus's LCP distribution
         # on a dyadic ladder. Cost is a handful of `O(p)` loops and some stderr-logging.
         #
-        # The second branch matters. Configure only runs when the cache is
-        # absent, so a worktree built before this flag existed would silently
-        # keep producing statless runs. Note the cache entry is
-        # STATS:UNINITIALIZED, not STATS:BOOL -- nothing declares it via option().
+        # Anything beyond that is a property of the method, not of the harness,
+        # so it comes from OURS_DEFINES in local.env rather than being written
+        # here. Whatever is used reaches the record as `build_config`: leaving
+        # the prefix-key width out of this line built every --ours campaign
+        # narrow while every hand-run build was wide, and no record said so.
+        # shellcheck disable=SC2206
+        OURS_CMAKE=(-DCMAKE_BUILD_TYPE=Release -DSTATS=ON ${OURS_DEFINES:-})
+
+        # Configure runs only when the cache is absent, so a worktree configured
+        # before an option existed keeps producing the old build in silence.
+        # That happened with STATS, then again with PREF_KEY_WORDS, so check
+        # every requested define rather than adding a branch per option. The
+        # cache entries are K:UNINITIALIZED, not K:BOOL -- nothing declares them
+        # via option() -- hence the [A-Z]* in the pattern.
+        STALE=""
+        if [ -f "${OURS_BUILD}/CMakeCache.txt" ]; then
+            for d in "${OURS_CMAKE[@]}"; do
+                kv="${d#-D}"
+                grep -qE "^${kv%%=*}:[A-Z]*=${kv#*=}\$" "${OURS_BUILD}/CMakeCache.txt" \
+                    || STALE="${STALE} ${kv}"
+            done
+        fi
+
         if [ ! -f "${OURS_BUILD}/CMakeCache.txt" ]; then
             echo "configuring ${WT} (needs network; run it on a login node if this has none)"
-            cmake -S "${WT}" -B "${OURS_BUILD}" -DCMAKE_BUILD_TYPE=Release -DSTATS=ON \
+            cmake -S "${WT}" -B "${OURS_BUILD}" "${OURS_CMAKE[@]}" \
                 || { echo "FATAL: configure failed for tag ${OURS_TAG}."; exit 1; }
-        elif ! grep -qE '^STATS:[A-Z]*=(ON|TRUE|1|YES)' "${OURS_BUILD}/CMakeCache.txt"; then
-            echo "reconfiguring ${OURS_BUILD}: built without -DSTATS=ON"
-            cmake -S "${WT}" -B "${OURS_BUILD}" -DCMAKE_BUILD_TYPE=Release -DSTATS=ON \
+        elif [ -n "${STALE}" ]; then
+            echo "reconfiguring ${OURS_BUILD}: cache disagrees on${STALE}"
+            cmake -S "${WT}" -B "${OURS_BUILD}" "${OURS_CMAKE[@]}" \
                 || { echo "FATAL: reconfigure failed for tag ${OURS_TAG}."; exit 1; }
         fi
         echo "compiling bench_gpu_saca @ ${OURS_TAG} with -j$(nproc)"

@@ -68,9 +68,10 @@ set_target_properties(libcubwt PROPERTIES
 #
 add_library(bench_settings INTERFACE)
 target_compile_options(bench_settings INTERFACE ${COMPILE_FLAGS})
-target_compile_definitions(bench_settings INTERFACE
-        BENCH_COMMIT="${BENCH_COMMIT}"
-        BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+# The same list the root gives our own driver, not a second copy of it: these
+# drifted apart once already, and a baseline stamping different provenance from
+# ours is exactly the kind of difference nobody notices.
+target_compile_definitions(bench_settings INTERFACE ${BENCH_PROVENANCE})
 
 
 # ======== Drivers ========

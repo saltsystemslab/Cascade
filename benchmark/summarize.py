@@ -20,7 +20,7 @@ GiB = 1 << 30
 # baseline's numbers stand, so a campaign pair will routinely span minors. Only
 # a major says a field changed meaning, and only then are the two sets of
 # numbers actually incomparable.
-SCHEMA = (6, 1)
+SCHEMA = (6, 2)
 
 # A run is comparable to another run only if the machine was in the same state.
 # thp_alloc + thp_fallback is a constant of the workload separates the good runs
@@ -114,6 +114,17 @@ def check(runs):
         warn.append("some records come from a dirty working tree")
     if len(commits) > 1:
         warn.append(f"records span {len(commits)} commits {sorted(commits)}: not comparable")
+    # One commit is not one binary. `bench.sbatch`'s --ours path configured
+    # without PREF_KEY_WORDS for a long time, so the same source could be built
+    # narrow or wide with nothing in the record to tell them apart.
+    # Records predating the field do not carry it; absent is "not measured",
+    # not a bad value, so they sit this check out the way pre-schema-6 records
+    # sit out the fragmentation one.
+    configs = {r["build_config"] for r in runs if "build_config" in r}
+    if "unknown" in configs:
+        warn.append("some records have build_config=unknown: CMake did not pass BENCH_BUILD_CONFIG")
+    if len(configs - {"unknown"}) > 1:
+        warn.append(f"records span build configurations {sorted(configs)}: not comparable")
     hosts = {r.get("host") for r in runs}
     if len(hosts) > 1:
         warn.append(f"runs spanned hosts {sorted(hosts)}: timings are not comparable")

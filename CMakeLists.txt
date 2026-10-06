@@ -205,9 +205,27 @@ elseif(BENCH_DIRTY)
     set(BENCH_COMMIT "${BENCH_COMMIT}-dirty")
 endif()
 
+# The build options that change the binary's behaviour, stamped in so a record
+# says which configuration produced it. The commit alone does not: the same
+# commit built with a different PREF_KEY_WORDS is a different method. Omitted
+# options report the header's default, which is what the binary actually used.
+set(BENCH_BUILD_CONFIG "pref_key_words=${PREF_KEY_WORDS}")
+if(NOT PREF_KEY_WORDS)
+    set(BENCH_BUILD_CONFIG "pref_key_words=default")
+endif()
+if(PIVOT_WORDS)
+    string(APPEND BENCH_BUILD_CONFIG " pivot_words=${PIVOT_WORDS}")
+else()
+    string(APPEND BENCH_BUILD_CONFIG " pivot_words=default")
+endif()
+if(STATS)
+    string(APPEND BENCH_BUILD_CONFIG " stats=on")
+endif()
+
 set(BENCH_PROVENANCE
         BENCH_COMMIT="${BENCH_COMMIT}"
-        BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}")
+        BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+        BENCH_BUILD_CONFIG="${BENCH_BUILD_CONFIG}")
 
 
 # Add required subdirectories to the build.

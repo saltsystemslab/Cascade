@@ -39,6 +39,10 @@ extern "C" char** environ;
     #define BENCH_BUILD_TYPE "unknown"
 #endif
 
+#ifndef BENCH_BUILD_CONFIG
+    #define BENCH_BUILD_CONFIG "unknown"
+#endif
+
 // Corpora are little-endian on-disk arrays.
 #if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
     static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
@@ -352,9 +356,12 @@ struct Record
     // a change to what a timing measures; records across majors do not mix.
     // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
-    static constexpr int schema_minor = 1;
+    static constexpr int schema_minor = 2;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
+    // Which build of that commit. The commit alone does not identify the
+    // binary: the same source at a different PREF_KEY_WORDS is a different method.
+    std::string build_config = BENCH_BUILD_CONFIG;
     std::string host = host_name(), timestamp_utc = now_utc();
     std::string method, method_version;
     std::string input, corpus, tokenizer, alphabet;
@@ -407,6 +414,7 @@ struct Record
 
         J_NUM(schema_version); J_NUM(schema_minor);
         J_STR(run_id);       J_STR(commit);        J_STR(build_type);
+        J_STR(build_config);
         J_STR(host);         J_STR(timestamp_utc);
         J_STR(method);       J_STR(method_version);
         J_STR(input);        J_STR(corpus);        J_STR(tokenizer);   J_STR(alphabet);
