@@ -15,6 +15,8 @@
 //
 // The output JSON has:
 //  - the repeat-depth histogram (capped at `DEPTH_CAP`), and the maximum repeat-depth;
+//  - for each `K` up to `KGRAM_MAX`, the frequency of the heaviest `K`-gram, which no partitioning by `K`-prefixes
+//    can split, and a text-position of it;
 //  - the retirement-generation histogram, i.e. the active-set sizes;
 //  - per generation: the payloads and the forwarded poison-pills emitted, i.e. the next inbox-size, and the number of
 //    runs of consecutive text-positions in the active set;
@@ -53,6 +55,7 @@ static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the word-wise lcp and 
 
 constexpr idx_t DEPTH_CAP = idx_t(1) << 20; // Repeat-depths at least this are histogrammed together.
 constexpr idx_t BLOCK_SZ = idx_t(1) << 20;  // SA-entries per work-unit of the SA-order pass.
+constexpr idx_t KGRAM_MAX = 32; // The heaviest `K`-gram is found for every `K` up to this.
 constexpr uint8_t UNSET = 0xFF; // Retirement generation of a text-position the suffix array hasn't covered yet.
 
 
@@ -149,6 +152,17 @@ idx_t lcp(const sym_t* const T, const idx_t a, const idx_t b, const idx_t n)
 
     return l;
 }
+
+
+// A block's runs of SA-adjacent pairs with an lcp of at least some `K`, in pairs: the run at its start, which may
+// continue the previous block's, the run at its end, and the longest one past the first.
+struct Kgram_Runs
+{
+    idx_t head = 0; // The block's pair-count if one run spans it.
+    idx_t tail = 0;
+    idx_t longest = 0;
+    idx_t longest_at = 0;   // Its first pair, as an offset in the block.
+};
 
 
 // Partition-ID map `Π` of a run, from its partition-sizes and the suffix array. The run's pivot `q` is an inclusive
@@ -297,6 +311,7 @@ int main(int argc, char** argv)
     std::vector<idx_t> depth_hist(DEPTH_CAP + 1, 0);    // Histogram of the repeat-depths.
     idx_t depth_max = 0;    // Maximum repeat-depth.
     int d_max = 0;  // Maximum retirement generation.
+    std::vector<idx_t> kgram_max(KGRAM_MAX, 1), kgram_pos(KGRAM_MAX, n);    // The heaviest `K`-gram's frequency and a text-position of it, at `K - 1`.
     {
         const auto t_1 = now();
 
@@ -306,6 +321,7 @@ int main(int argc, char** argv)
 
         const idx_t block_c = (n + BLOCK_SZ - 1) / BLOCK_SZ;
         std::atomic<idx_t> bad_pair(n); // Smallest SA-index of a pair that is out-of-range or out-of-order.
+        std::vector<Kgram_Runs> kgram_runs(block_c * KGRAM_MAX);    // Block `blk`'s runs for `K` at `blk * KGRAM_MAX + K - 1`.
 
         #pragma omp parallel
         {
@@ -363,6 +379,24 @@ int main(int argc, char** argv)
                     dep_max = std::max(dep_max, depth);
                     gen_max = std::max(gen_max, d_j);
                 }
+
+                const idx_t len = r_1 - r_0;    // The block's pairs, with `(r - 1, r)` at `r - r_0`.
+                for(idx_t k = 1; k <= KGRAM_MAX; ++k)
+                {
+                    auto& s = kgram_runs[blk * KGRAM_MAX + k - 1];
+                    while(s.head < len && lcp_v[s.head] >= k)
+                        s.head++;
+
+                    idx_t run = 0;
+                    for(idx_t i = s.head; i < len; ++i)
+                    {
+                        run = (lcp_v[i] >= k ? run + 1 : 0);
+                        if(run > s.longest)
+                            s.longest = run, s.longest_at = i + 1 - run;
+                    }
+
+                    s.tail = (s.head == len ? len : run);
+                }
             }
 
             #pragma omp critical
@@ -384,8 +418,38 @@ int main(int argc, char** argv)
         if(unset > 0)
             die("The suffix array misses " + std::to_string(unset) + " text-positions: it is not a permutation.");
 
+        // The heaviest `K`-gram is the longest run of pairs across the blocks, plus one.
+        for(idx_t k = 1; k <= KGRAM_MAX; ++k)
+        {
+            idx_t best = 0, best_at = 0, run = 0, run_at = 0;   // Runs, and the SA-indices of their first pairs.
+            for(idx_t blk = 0; blk < block_c; ++blk)
+            {
+                const auto& s = kgram_runs[blk * KGRAM_MAX + k - 1];
+                const idx_t r_0 = blk * BLOCK_SZ, len = std::min(n, r_0 + BLOCK_SZ) - r_0;
+                if(run == 0)
+                    run_at = r_0;
+                run += s.head;
+                if(s.head == len)
+                    continue;
+
+                if(run > best)
+                    best = run, best_at = run_at;
+                if(s.longest > best)
+                    best = s.longest, best_at = r_0 + s.longest_at;
+                run = s.tail, run_at = r_0 + len - s.tail;
+            }
+
+            if(run > best)
+                best = run, best_at = run_at;
+
+            kgram_max[k - 1] = best + 1;
+            if(best > 0)    // Its first suffix is the first pair's predecessor.
+                read_SA(fd, w, best_at - 1, best_at, &kgram_pos[k - 1]);
+        }
+
         std::cerr << "SA-order pass completed. Maximum repeat-depth: " << depth_max << "; retirement by generation " << d_max << "."
                   << " Time taken: " << duration(now() - t_1) << "s.\n";
+        std::cerr << "Heaviest K-gram frequencies for K = 1.." << KGRAM_MAX << ": " << gpu_saca::util::join(kgram_max) << ".\n";
     }
 
     ::close(fd);
@@ -472,6 +536,8 @@ int main(int argc, char** argv)
         if(depth_hist[x] > 0)
             os << (first ? "" : ", ") << "[" << x << ", " << depth_hist[x] << "]", first = 0;
     os << "],\n";
+    os << "  \"kgram_max\": " << json_array(kgram_max) << ",\n";
+    os << "  \"kgram_pos\": " << json_array(kgram_pos) << ",\n";
     os << "  \"retire_hist\": " << json_array(retire_hist) << ",\n";
     os << "  \"payloads\": " << json_array(payloads) << ",\n";
     os << "  \"forwards\": " << json_array(forwards) << ",\n";
