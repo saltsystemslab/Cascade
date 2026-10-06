@@ -643,19 +643,81 @@ def cmd_run(a):
     sys.exit(0 if status == "ok" else 1)
 
 
+# Runs our own builder end to end on the staged input, dumping the suffix array
+# to the node-local drive so the output cost lands inside its concatenate phase
+# (bench_gpu_saca.cu:129), as their concat does in build_sa.
+def cmd_ours(a):
+    if not a.ours_bin or not os.access(a.ours_bin, os.X_OK):
+        die(f"--ours-bin/OURS_BIN must name a built bench_gpu_saca; got {a.ours_bin!r}. "
+            f"bench.sbatch builds one per tag under ~/gpu-saca-worktrees/<tag>/build.")
+
+    r = row(a.corpus_root, a.corpus, a.tokenizer)
+    _, save, ds, _ = paths(a, r)
+    short = ALIAS.get(r["label"], r["label"])
+    cpus = a.cpus or THREADS
+    n = r["bytes"] // 2
+    # --n 0 lets the driver size from the file, which is what bench.sbatch passes.
+    rid = a.run_id or f"gpu_saca_{short}-{r['tokenizer']}_token16_n0_t{cpus}_r{a.rep}"
+    rec = os.path.join(a.results_dir, rid + ".json")
+    if os.path.exists(rec) and not a.rerun:
+        return print(f"== {rid}\n   skip (record exists)")
+
+    if a.dry_run:   # Staging is `run`'s path too; this checks the invocation.
+        print(f"== {rid}\n   " + " ".join(
+            [a.ours_bin, "--input", f"{a.stage_root}/ig-stage/"
+             f"{r['label']}-{r['tokenizer']}/tokenized.0", "--corpus", short,
+             "--tokenizer", r["tokenizer"], "--run-id", rid, "--alphabet", "token16",
+             "--n", "0", "--threads", str(cpus), "--results-dir", a.results_dir,
+             "--sa-out", os.path.join(a.temp_root, "ours-<jobid>.sa"),
+             "--method-version", a.method_version]))
+        return print(f"   {r['bytes'] / 2**30:.1f} GiB in, "
+                     f"{n * 5 / 2**30:.1f} GiB out")
+
+    # The same copy their runs read, staged once by the caller before the replicates.
+    stage_dir, stage_s, staged = stage(os.path.realpath(ds),
+                                       os.path.realpath(os.path.join(save, "offset.0")),
+                                       a.stage_root, f"{r['label']}-{r['tokenizer']}")
+    real = os.path.join(stage_dir, "tokenized.0")
+    sa_out = os.path.join(a.temp_root, f"ours-{os.environ.get('SLURM_JOB_ID', os.getpid())}.sa")
+    print(f"== {rid}\n   {r['bytes'] / 2**30:.1f} GiB, {n:,} symbols, "
+          f"{n * 5 / 2**30:.1f} GiB of output -> {sa_out}\n"
+          f"   cpus {cpus}  input {real}"
+          + (f"  (staged {staged / 2**30:.1f} GiB in {stage_s}s)" if staged else ""))
+
+    cmd = [a.ours_bin, "--input", real, "--corpus", short,
+           "--tokenizer", r["tokenizer"], "--run-id", rid, "--alphabet", "token16",
+           "--n", "0", "--threads", str(cpus), "--results-dir", a.results_dir,
+           "--sa-out", sa_out, "--method-version", a.method_version]
+    t = time.monotonic()
+    try:
+        with open(os.path.join(a.results_dir, rid + ".log"), "wb") as lf:
+            code = subprocess.call(cmd, stdout=lf, stderr=subprocess.STDOUT)
+    finally:
+        # A surviving dump would fill the drive the next replicate spills onto.
+        if os.path.exists(sa_out):
+            print(f"   dumped      {os.path.getsize(sa_out):,} bytes, want {n * 5:,}")
+            os.unlink(sa_out)
+
+    print(f"   exit {code}  wall {time.monotonic() - t:.1f}s"
+          + ("" if os.path.exists(rec) else "  -- no record written"))
+    sys.exit(0 if code == 0 else 1)
+
+
 # Appends this invocation to the campaign's manifest, the only thing that tells
 # "never requested" apart from "requested but died" (summarize.py:278-291).
 # Appended, not overwritten: several jobs accumulate into one directory.
 def cmd_manifest(a):
     pairs = [x.split(":") for x in a.corpora.split()]
+    methods = a.methods.split(":")
     rows = [row(a.corpus_root, lab, tok) for lab, tok in pairs]
     path = os.path.join(a.results_dir, "manifest.json")
     m = json.load(open(path)) if os.path.exists(path) else []
     m.append({"submitted_utc": time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime()),
               "corpora": [lab for lab, _ in pairs],
               "tokenizer": ":".join(dict.fromkeys(t for _, t in pairs)),
-              "methods": ["infinigram"], "ours_tag": "",
-              "reps": a.reps, "runs_expected": a.reps * len(pairs),
+              "methods": methods,
+              "ours_tag": os.environ.get("OURS_TAG", ""),
+              "reps": a.reps, "runs_expected": a.reps * len(pairs) * len(methods),
               "corpus_root": a.corpus_root, "results": a.results_dir,
               "sizes_bytes": [r["bytes"] for r in rows],
               "commit": os.environ.get("IG_COMMIT", "unknown")})
@@ -691,10 +753,26 @@ def main():
     q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
     q.set_defaults(fn=cmd_stage)
 
+    q = s.add_parser("ours", parents=[common], help="run our builder end to end on the staged input")
+    q.add_argument("corpus")
+    q.add_argument("--tokenizer")
+    q.add_argument("--results-dir", required=True)
+    q.add_argument("--ours-bin", default=os.environ.get("OURS_BIN"))
+    q.add_argument("--method-version", default=os.environ.get("OURS_TAG", "unknown"))
+    q.add_argument("--cpus", type=int, help=f"default {THREADS}")
+    q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"))
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
+    q.add_argument("--run-id")
+    q.add_argument("--rep", type=int, default=1)
+    q.add_argument("--rerun", action="store_true")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(fn=cmd_ours)
+
     q = s.add_parser("manifest", parents=[common], help="append this job to the campaign manifest")
     q.add_argument("corpora", help="space-separated label:tokenizer pairs")
     q.add_argument("--results-dir", required=True)
     q.add_argument("--reps", type=int, default=1)
+    q.add_argument("--methods", default="infinigram")
     q.set_defaults(fn=cmd_manifest)
 
 
