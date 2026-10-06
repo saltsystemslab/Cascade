@@ -2,13 +2,17 @@
 """Tabulate the structural statistics of GPU-SACA runs, for the paper's figures.
 
     structure.py <out-dir> <corpus>.log... [--sweep <corpus>_<label>.log...]
+                 [--filtered <corpus>_<rep>.log...]
 
 Each run log is a `caps_sa_gpu` STATS run of one corpus, and is named after it.
 A `<corpus>.structure.json` next to it is `sa_structure`'s output for that run:
 it adds the repeat-depth, look-back and run statistics, each checked against the
 log exactly. The logs after `--sweep` are partition-only runs (with
 `GPU_SACA_PARTITION_ONLY=1`), named `<corpus>_<label>.log`: the labels `p...`
-form the partition-count sweep, and `k<K>` the pivot-width sweep.
+form the partition-count sweep, and `k<K>` the pivot-width sweep. The logs after
+`--filtered` are runs with the liveness filter, named `<corpus>_<rep>.log`, one
+per replicate; the `<corpus>.structure.json` next to them is `sa_structure`'s
+output for their partitioning, whose unfiltered messages they are held against.
 
 Writes pgfplots-ready TSVs into <out-dir>, with `nan` for what is unavailable:
     decay.tsv           the active set after each generation: the repeat-depth
@@ -25,7 +29,10 @@ Writes pgfplots-ready TSVs into <out-dir>, with `nan` for what is unavailable:
                         skew_p.tsv and skew_k.tsv
     partition_sizes.tsv each partition's size over B, for CDFs
     datasets.tsv        one row per corpus; also typeset as datasets.tex
-    budget.tsv          each corpus' messages per suffix, live and dead, in order of E[d]
+    budget.tsv          each corpus' messages per suffix, live and dead, in order of E[d],
+                        and the dead ones the liveness filter skips
+    filter.tsv          each generation's messages with the liveness filter, over the
+                        replicates, against the unfiltered and the live ones
     checks.txt          the consistency checks, also printed
 Exits 1 if any check fails.
 
@@ -345,6 +352,53 @@ def attach(r, tool):
     return fails
 
 
+def ablation(corpus, reps, tool):
+    """Returns the liveness filter's per-generation rows for the corpus' filtered
+    runs `reps`, its per-suffix summary, and the checks that failed; `tool` is
+    `sa_structure`'s output for their partitioning.
+
+    The filter skips the messages whose recipients are already marked retired.
+    So it changes no active set and skips no live message: generation g's inbox
+    lies between |A^(g-1)| and the unfiltered M_g, which the tool predicts
+    exactly. Whether a recipient that retires in its sender's generation is
+    marked in time depends on the pipeline's timing, so the replicates differ
+    slightly; the rows give their mean and range. The summary is per suffix, so
+    it holds for an unfiltered run of a slightly different partitioning too.
+    """
+    n, retire, pay, fwd = tool["n"], tool["retire_hist"], tool["payloads"], tool["forwards"]
+    D = len(retire) - 1
+    active = [sum(retire[t + 1:]) for t in range(D + 1)]
+    unf = [pay[t] + fwd[t] for t in range(D)]  # unf[g - 1] = the unfiltered M_g.
+    fails, inboxes = [], []
+    for r in reps:
+        if (r["n"], r["p"], r["active"]) != (n, tool["p"], active):
+            fails.append(f"{r['name']}: its n, p or active sets differ from the tool's for its partitioning")
+            continue
+        if [g for g, *_ in r["inbox"]] != list(range(1, D + 1)):
+            fails.append(f"{r['name']}: {len(r['inbox'])} inbox lines for {D} doubling generations")
+            continue
+        m = [x for _, x, _, _ in r["inbox"]]
+        bad = [g for g in range(1, D + 1) if not active[g - 1] <= m[g - 1] <= unf[g - 1]]
+        if bad:
+            fails.append(f"{r['name']}: inbox-sizes outside [|A^(g-1)|, unfiltered M_g] at generations {bad}")
+        inboxes.append(m)
+    if not inboxes:
+        return [], None, fails
+
+    rows = []
+    for g in range(1, D + 1):
+        ms = [m[g - 1] for m in inboxes]
+        live, u, mean = active[g - 1], unf[g - 1], sum(ms) / len(ms)
+        rows.append({"corpus": corpus, "g": g, "live": live, "unfiltered": u, "filtered": mean,
+                     "filtered_lo": min(ms), "filtered_hi": max(ms),
+                     "skipped_dead": (u - mean) / (u - live) if u > live else NAN})
+    U, F, A = sum(unf), sum(row["filtered"] for row in rows), sum(active)
+    summary = {"reps": len(inboxes), "skipped0": (unf[0] - rows[0]["filtered"]) / n,
+               "skipped_later": (U - unf[0] - F + rows[0]["filtered"]) / n,
+               "msg_cut": 1 - F / U, "dead_cut": (U - F) / (U - A)}
+    return rows, summary, fails
+
+
 def fmt(x):
     return f"{x:.6g}" if isinstance(x, float) else str(x)
 
@@ -403,8 +457,11 @@ LOOKBACK = ["corpus", "t", "cohort", "lam0", "lam1", "lam2p", "fwd_pred", "fwd_l
 SKEW = ["corpus", "label", "feasible", "K", "ell", "n", "p", "p_min", "floor", "B", "s", "h", "p_over_pmin", "max_B",
         "mean_full_B", "min_full_B", "q05_B", "q50_B", "q95_B", "fill", "env_B"]
 DATASETS = ["corpus", "n", "p", "ell", "G", "surv0", "Ed", "depth_lo", "depth_hi", "amp_run", "waste", "pill_ovh",
-            "flood_share", "flood_waste", "K", "depth_max", "pill_ovh_exact", "skew_work", "max_B"]
-BUDGET = ["corpus", "Ed", "live", "dead0", "dead_surv", "dead_pill", "total", "amp_run"]   # Messages per suffix.
+            "flood_share", "flood_waste", "K", "depth_max", "pill_ovh_exact", "skew_work", "max_B",
+            "msg_cut", "dead_cut"]
+BUDGET = ["corpus", "Ed", "live", "dead0", "dead_surv", "dead_pill", "total", "amp_run",    # Messages per suffix.
+          "skipped0", "skipped_later"]
+FILTER = ["corpus", "g", "live", "unfiltered", "filtered", "filtered_lo", "filtered_hi", "skipped_dead"]
 
 
 def main(argv):
@@ -417,11 +474,15 @@ def main(argv):
 
     out = pathlib.Path(argv[0])
     out.mkdir(parents=True, exist_ok=True)
-    rest = argv[1:]
-    split = rest.index("--sweep") if "--sweep" in rest else len(rest)
+    args, flag = {"": [], "--sweep": [], "--filtered": []}, ""
+    for a in argv[1:]:
+        if a in args:
+            flag = a
+        else:
+            args[flag].append(a)
 
     runs, skew, sizes, fails = [], [], [], []
-    for f in rest[:split]:
+    for f in args[""]:
         path = pathlib.Path(f)
         r = parse(path)
         if r is None or not r["active"]:
@@ -441,7 +502,7 @@ def main(argv):
             fails += attach(r, json.loads(tool.read_text()))
         runs.append(r)
 
-    for f in rest[split + 1:]:
+    for f in args["--sweep"]:
         path = pathlib.Path(f)
         corpus, _, label = path.stem.rpartition("_")
         r = parse(path)
@@ -452,6 +513,27 @@ def main(argv):
         if row:
             skew.append(row)
             sizes += rows
+
+    filtered, filt_rows, filt_sum = {}, [], {}
+    for f in args["--filtered"]:
+        path = pathlib.Path(f)
+        r = parse(path)
+        if r is None or not r["active"]:
+            fails.append(f"{f}: no STATS generation lines; is it a STATS build's log?")
+            continue
+        filtered.setdefault(path.stem.rpartition("_")[0] or path.stem, []).append(r)
+    for corpus, reps in filtered.items():
+        tool = reps[0]["path"].parent / f"{corpus}.structure.json"
+        if not tool.exists():
+            fails.append(f"{corpus}: no {tool.name} next to its filtered runs")
+            continue
+        rows, summ, bad = ablation(corpus, reps, json.loads(tool.read_text()))
+        fails += bad
+        filt_rows += rows
+        if summ:
+            filt_sum[corpus] = summ
+    for r in runs:
+        r["summary"].update(filt_sum.get(r["name"], {}))
 
     runs.sort(key=lambda r: r["n"])
     skew.sort(key=lambda row: (row["corpus"], row["label"][:1], row.get("K", 0), row.get("p_min", 0)))
@@ -470,6 +552,7 @@ def main(argv):
     summary = [r["summary"] for r in runs]
     write_tsv(out / "datasets.tsv", DATASETS, summary)
     write_tsv(out / "budget.tsv", BUDGET, sorted(summary, key=lambda s: s["Ed"]))
+    write_tsv(out / "filter.tsv", FILTER, sorted(filt_rows, key=lambda row: (row["corpus"], row["g"])))
     write_tex(out / "datasets.tex", summary)
 
     report = [f"{r['name']}: n = {r['n']}, ell = {r['ctx'][0]}, {len(r['active']) - 1} doubling generations"
@@ -477,6 +560,8 @@ def main(argv):
     report += [f"sweep {row['corpus']} {row['label']}: " + (f"p = {row['p']}, max/B = {row['max_B']:.4f}"
                                                               if row["feasible"] else "infeasible")
                for row in skew if row["label"] != "full"]
+    report += [f"filtered {c}: {s['reps']} replicate(s); {100 * s['msg_cut']:.1f}% of the messages skipped,"
+               f" {100 * s['dead_cut']:.1f}% of the dead ones" for c, s in sorted(filt_sum.items())]
     report += [f"FAIL {x}" for x in fails]
     report.append(f"{len(fails)} check(s) failed." if fails else "All checks pass.")
     (out / "checks.txt").write_text("\n".join(report) + "\n")
