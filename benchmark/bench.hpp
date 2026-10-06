@@ -345,7 +345,14 @@ namespace alpha
 // "measured as zero". No `t_e2e` field: the summarizer sums the buckets.
 struct Record
 {
+    // Major and minor, as in semantic versioning. Minor rises when a field is
+    // added, an enum gains a value, or a range loosens -- records across one
+    // major mix freely, because nothing already present changed meaning. Major
+    // rises when a field is removed, renamed, retyped, or redefined, including
+    // a change to what a timing measures; records across majors do not mix.
+    // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
+    static constexpr int schema_minor = 1;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     std::string host = host_name(), timestamp_utc = now_utc();
@@ -398,7 +405,7 @@ struct Record
         #define J_NUM(k) (o << sep << "\"" #k "\":"   << (k),             sep = ",\n    ")
         #define J_STR(k) (o << sep << "\"" #k "\":\"" << esc(k) << '"',   sep = ",\n    ")
 
-        J_NUM(schema_version);
+        J_NUM(schema_version); J_NUM(schema_minor);
         J_STR(run_id);       J_STR(commit);        J_STR(build_type);
         J_STR(host);         J_STR(timestamp_utc);
         J_STR(method);       J_STR(method_version);

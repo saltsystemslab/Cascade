@@ -14,7 +14,13 @@ import statistics
 import sys
 
 GiB = 1 << 30
-SCHEMA = 6
+
+# (major, minor), as in semantic versioning. Mixing across one major is the
+# normal case and must not warn: our method is re-measured at every tag while a
+# baseline's numbers stand, so a campaign pair will routinely span minors. Only
+# a major says a field changed meaning, and only then are the two sets of
+# numbers actually incomparable.
+SCHEMA = (6, 1)
 
 # A run is comparable to another run only if the machine was in the same state.
 # thp_alloc + thp_fallback is a constant of the workload separates the good runs
@@ -74,13 +80,33 @@ def load(d):
     return runs, bad
 
 
+def schema_of(r):
+    """-> (major, minor). A record without `schema_minor` predates the scheme."""
+    major = r.get("schema_version")
+    if not isinstance(major, int):
+        return None
+    minor = r.get("schema_minor", 0)
+    return (major, minor if isinstance(minor, int) else 0)
+
+
 def check(runs):
     """Provenance guards. Each catches a whole class of invalid table."""
     warn = []
-    schemas = {r.get("schema_version") for r in runs}
-    if schemas - {SCHEMA}:
-        warn.append(f"records span schema versions {sorted(map(str, schemas))}, "
-                    f"expected {SCHEMA}: fields may not mean the same thing")
+    seen = {schema_of(r) for r in runs}
+    if None in seen:
+        warn.append("some records carry no usable schema_version")
+        seen.discard(None)
+    majors = {v[0] for v in seen}
+    if len(majors) > 1:
+        warn.append(f"records span schema majors {sorted(majors)}: a field changed "
+                    "meaning between them, so these numbers are not comparable")
+    elif majors and majors != {SCHEMA[0]}:
+        warn.append(f"records are schema major {majors.pop()}, this summarizer is "
+                    f"{SCHEMA[0]}: a field may not mean what is printed here")
+    ahead = sorted(v for v in seen if v[0] == SCHEMA[0] and v[1] > SCHEMA[1])
+    if ahead:
+        warn.append(f"records at {ahead} were written by a newer harness than this "
+                    f"summarizer ({SCHEMA[0]}.{SCHEMA[1]}); fields it does not know are ignored")
     commits = {r.get("commit", "unknown") for r in runs}
     if "unknown" in commits:
         warn.append("some records have commit=unknown: CMake did not pass BENCH_COMMIT")
