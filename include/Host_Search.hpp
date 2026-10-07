@@ -61,6 +61,17 @@ template <typename T_sym_>
 void certify(const T_sym_* T, idx_t n, const uint8_t* SA, const uint64_t* off, const T_sym_* sym, idx_t q, const SA_Interval* I,
              unsigned long long& fail_c, unsigned long long& first, unsigned threads);
 
+// Most pages of a bracket that `prefetch` asks for whole.
+constexpr idx_t PREFETCH_PAGES = 4;
+
+// Asks the kernel to read ahead, without waiting for them, the pages of the
+// mapped suffix array `SA` of `n` entries, starting at a page, that `find`
+// first probes in the brackets `br[0, 2q)`: all of a bracket's pages if they
+// are at most `PREFETCH_PAGES`, else the page of its first probe. `threads`
+// threads ask, `0` for OpenMP's default. Returns the count of requests that the
+// kernel refused.
+idx_t prefetch(const uint8_t* SA, idx_t n, const Rank_Range* br, idx_t q, unsigned threads);
+
 // Copies `bytes` bytes from `src` to `dst` with `threads` threads, `0` for
 // OpenMP's default.
 void copy(void* dst, const void* src, std::size_t bytes, unsigned threads);

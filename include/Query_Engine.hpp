@@ -34,7 +34,9 @@
 // the searches of others. With both arrays in host memory and either pageable,
 // the host searches: the device ranks a chunk's patterns in the table, and the
 // host's cores search the brackets over the arrays, while the device ranks the
-// next chunks.
+// next chunks. A mapped suffix array is read from its drives on demand: the
+// host asks for the pages of a chunk's brackets ahead, while it searches the
+// chunk before, so that their reads overlap it and one another.
 
 namespace gpu_saca
 {
@@ -65,6 +67,7 @@ struct Query_Options
     idx_t min_chunk_symbols = idx_t(1) << 22;   // Least symbols of a chunk's share.
     unsigned host_threads = 0;  // Threads of the host's search, if it searches; `0` takes OpenMP's default, every core.
     unsigned host_lanes = 32;   // Boundary searches each such thread interleaves.
+    bool host_prefetch = true;  // Whether the host asks the kernel ahead for the pages of a mapped suffix array that a chunk's brackets probe first.
 };
 
 
@@ -169,8 +172,10 @@ private:
 
     // Finds the SA-intervals of the host-side batch `off`, `sym` of `q` queries
     // into `out[0, q)`, with the host searching: in chunks, each ranked on the
-    // device through a lane while the host searches an earlier one's brackets.
-    // The caller holds `find_lock_`.
+    // device through a lane while the host searches an earlier one's brackets;
+    // with a mapped suffix array, the pages of each chunk's brackets asked for
+    // while the host searches the chunk before, if prefetching. The caller holds
+    // `find_lock_`.
     void find_host(const uint64_t* off, const T_sym_* sym, idx_t q, SA_Interval* out) const;
 
 

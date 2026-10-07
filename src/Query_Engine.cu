@@ -988,10 +988,26 @@ void Query_Engine<T_sym_>::find_host(const uint64_t* const off, const T_sym_* co
     for(std::size_t c = 0; c < std::min(STREAM_C, chunk.size()); ++c)
         rank_chunk(lane_[c], off, sym, chunk[c].first, chunk[c].second, pinned);
 
+    // A mapped suffix array's pages come from the drives: those of a chunk's brackets are asked for once the device ranks it, so that the
+    // kernel reads them while the host searches the chunk before.
+    const bool ahead = (opt_.host_prefetch && idx_.sa_residency() == Residency::mapped);
+    const auto prefetch = [&](const std::size_t c)
+    {
+        const Lane& l = lane_[c % STREAM_C];
+        CUDA_CHECK(cudaStreamSynchronize(l.stream));
+        host_search::prefetch(SA, idx_.n(), l.br_h, chunk[c].second - chunk[c].first, opt_.host_threads);
+    };
+
+    if(ahead)
+        prefetch(0);
+
     for(std::size_t c = 0; c < chunk.size(); ++c)
     {
         const Lane& l = lane_[c % STREAM_C];
         const auto [a, b] = chunk[c];
+        if(ahead && c + 1 < chunk.size())
+            prefetch(c + 1);
+
         CUDA_CHECK(cudaStreamSynchronize(l.stream));
         host_search::find(T, idx_.n(), SA, off + a, sym, b - a, l.br_h, opt_.sort ? l.ids_h : nullptr, out + a, opt_.host_threads,
                           opt_.host_lanes);

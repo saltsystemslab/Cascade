@@ -5,10 +5,14 @@
 
 #include <omp.h>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <atomic>
 #include <climits>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 
@@ -361,6 +365,56 @@ void certify(const T_sym_* const T, const idx_t n, const uint8_t* const SA, cons
 
     fail_c += c;
     first = std::min(first, f);
+}
+
+
+idx_t prefetch(const uint8_t* const SA, const idx_t n, const Rank_Range* const br, const idx_t q, const unsigned threads)
+{
+    if(q == 0 || n == 0)
+        return 0;
+
+    const idx_t page = static_cast<idx_t>(::sysconf(_SC_PAGESIZE));
+    const idx_t last_page = (SA_WIDTH * n - 1) / page;  // The suffix array's last; the padding past it needs no reading.
+    auto* const base = const_cast<uint8_t*>(SA);   // `madvise` takes a mutable address, but does not write.
+
+    // Returns in `[p0, p1]` the pages that the search of the ranks `r` reads: the entries of `r.first` to `r.last - 1`, 8 bytes at a
+    // time, or those of its first probe if more than `PREFETCH_PAGES`; `p0 > p1` if none.
+    const auto pages = [&](const Rank_Range& r, idx_t& p0, idx_t& p1)
+    {
+        p0 = 1, p1 = 0;
+        if(r.last <= r.first)
+            return;
+
+        p0 = SA_WIDTH * r.first / page;
+        p1 = std::min(last_page, (SA_WIDTH * r.last + (sizeof(uint64_t) - SA_WIDTH) - 1) / page);
+        if(p1 - p0 + 1 > PREFETCH_PAGES)
+        {
+            const idx_t mid = r.first + ((r.last - r.first) >> 1);  // As `find` probes first.
+            p0 = SA_WIDTH * mid / page;
+            p1 = std::min(last_page, (SA_WIDTH * mid + sizeof(uint64_t) - 1) / page);
+        }
+    };
+
+    idx_t refused = 0;
+
+    #pragma omp parallel for num_threads(static_cast<int>(thread_count(threads))) schedule(static) reduction(+ : refused)  // All the threads; see `find`.
+    for(idx_t g = 0; g < q; ++g)
+    {
+        idx_t a0, a1, b0, b1;
+        pages(br[2 * g], a0, a1);
+        pages(br[2 * g + 1], b0, b1);
+        if(a0 <= a1 && b0 <= b1 && b0 <= a1 + 1 && a0 <= b1 + 1)   // The boundaries' pages overlap or abut: one request.
+        {
+            a0 = std::min(a0, b0), a1 = std::max(a1, b1);
+            b0 = 1, b1 = 0;
+        }
+
+        for(const auto& [p0, p1] : {std::pair<idx_t, idx_t>{a0, a1}, std::pair<idx_t, idx_t>{b0, b1}})
+            if(p0 <= p1 && ::madvise(base + p0 * page, (p1 - p0 + 1) * page, MADV_WILLNEED) != 0)
+                ++refused;
+    }
+
+    return refused;
 }
 
 
