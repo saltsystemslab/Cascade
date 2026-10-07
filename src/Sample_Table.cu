@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <utility>
 
 
@@ -16,6 +17,7 @@ namespace
 {
 
 constexpr idx_t HOST_PIECE_KEYS = idx_t(1) << 22;   // Keys the host packs at a time, into a pinned buffer.
+constexpr std::size_t SCAN_PIECE_BYTES = SA_WIDTH * 4096 * 400; // Bytes of a piece of a streamed suffix array, ~8 MB: whole entries, and whole 4 KB blocks.
 
 
 // Writes into `tab[0, J)` the packed prefixes of the suffixes at ranks
@@ -122,6 +124,67 @@ cudaError_t build_on_host(const Suffix_Index& idx, const idx_t stride, const idx
     }
 }
 
+
+// Builds the `J` keys of `W_` words of the table of stride `stride` over the
+// index `idx`, whose suffix array is mapped, into the device's `tab`, on the
+// host: in one pass over the suffix array's files, which streams them from the
+// drives in large reads, all at once, rather than a page at a time through the
+// mapping, and leaves the page cache as it was. A sample whose entry straddles
+// two parts is read through the mapping. Returns `false` with a reason in `err`
+// on failure.
+template <typename T_sym_, idx_t W_>
+bool build_streamed(const Suffix_Index& idx, const idx_t stride, const idx_t J, void* const tab, std::string& err)
+{
+    static_assert(W_ * sizeof(uint64_t) <= TEXT_PAD_BYTES, "a key must not read past the text's padding");
+
+    const T_sym_* const T = idx.host_text<T_sym_>();
+    const idx_t span = SA_WIDTH * stride;   // Bytes from a sample's entry to the next's.
+    const std::unique_ptr<Packed_Prefix<W_>[]> keys(new Packed_Prefix<W_>[J]);
+
+    // The samples whose entries a piece holds whole; the pieces end at whole entries but at the parts' ends.
+    const auto pack = [&](const idx_t off, const uint8_t* const p, const std::size_t len)
+    {
+        for(idx_t j = (off + span - 1) / span; j < J && j * span + SA_WIDTH <= off + len; ++j)
+            keys[j] = Packed_Prefix<W_>::pack_prefix(T + sa40::load_at(p, j * span - off));
+    };
+
+    if(!index_io::scan_sa(idx.meta(), SCAN_PIECE_BYTES, pack, err))
+        return false;
+
+    const auto& part_off = idx.meta().sa_part_off;
+    for(std::size_t i = 1; i < part_off.size(); ++i)
+    {
+        const idx_t j = (part_off[i] - 1) / span;   // The last sample to start before the part.
+        if(j < J && j * span + SA_WIDTH > part_off[i])
+            keys[j] = Packed_Prefix<W_>::pack_prefix(T + sa40::load(idx.host_sa(), j * stride));
+    }
+
+    // A copy from pageable memory may return before its last transfer lands, and the searches' streams do not wait for the default one.
+    cudaError_t e = cudaMemcpy(tab, keys.get(), J * sizeof(Packed_Prefix<W_>), cudaMemcpyHostToDevice);
+    if(e == cudaSuccess)
+        e = cudaDeviceSynchronize();
+    if(e != cudaSuccess)
+    {
+        err = std::string("copying the sample table to the device failed: ") + cudaGetErrorString(e);
+        return false;
+    }
+
+    return true;
+}
+
+
+// Dispatches `build_streamed` over the key width `W`.
+template <typename T_sym_>
+bool build_streamed(const Suffix_Index& idx, const idx_t stride, const idx_t J, const uint32_t W, void* const tab, std::string& err)
+{
+    switch(W)
+    {
+    case 1: return build_streamed<T_sym_, 1>(idx, stride, J, tab, err);
+    case 2: return build_streamed<T_sym_, 2>(idx, stride, J, tab, err);
+    default:    return build_streamed<T_sym_, 4>(idx, stride, J, tab, err);
+    }
+}
+
 }
 
 
@@ -177,20 +240,41 @@ bool Sample_Table::build(const Suffix_Index& idx, const idx_t stride, const uint
         return false;
     }
 
-    // Built on the host if it can: its cores read the text faster than the device's random reads of host memory do.
-    const bool on_host = idx.host_accessible();
-    switch(idx.sym_bytes())
+    // A mapped suffix array streams from its files. Else, built on the host if it can: its cores read the text faster than the device's
+    // random reads of host memory do.
+    if(idx.sa_residency() == Residency::mapped)
     {
-    case 1: e = (on_host ? build_on_host<uint8_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint8_t>(idx, stride, J, key_words, keys)); break;
-    case 2: e = (on_host ? build_on_host<uint16_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint16_t>(idx, stride, J, key_words, keys)); break;
-    default:    e = (on_host ? build_on_host<uint32_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint32_t>(idx, stride, J, key_words, keys));
-    }
+        bool ok = false;
+        switch(idx.sym_bytes())
+        {
+        case 1: ok = build_streamed<uint8_t>(idx, stride, J, key_words, keys, err); break;
+        case 2: ok = build_streamed<uint16_t>(idx, stride, J, key_words, keys, err); break;
+        default:    ok = build_streamed<uint32_t>(idx, stride, J, key_words, keys, err);
+        }
 
-    if(e != cudaSuccess)
+        if(!ok)
+        {
+            err = "building the sample table failed: " + err;
+            cudaFree(keys);
+            return false;
+        }
+    }
+    else
     {
-        err = std::string("building the sample table failed: ") + cudaGetErrorString(e);
-        cudaFree(keys);
-        return false;
+        const bool on_host = idx.host_accessible();
+        switch(idx.sym_bytes())
+        {
+        case 1: e = (on_host ? build_on_host<uint8_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint8_t>(idx, stride, J, key_words, keys)); break;
+        case 2: e = (on_host ? build_on_host<uint16_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint16_t>(idx, stride, J, key_words, keys)); break;
+        default:    e = (on_host ? build_on_host<uint32_t>(idx, stride, J, key_words, keys) : gpu_saca::build<uint32_t>(idx, stride, J, key_words, keys));
+        }
+
+        if(e != cudaSuccess)
+        {
+            err = std::string("building the sample table failed: ") + cudaGetErrorString(e);
+            cudaFree(keys);
+            return false;
+        }
     }
 
     keys_ = keys;

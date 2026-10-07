@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -46,6 +47,16 @@ namespace index_io
 // The range must end at or before the file's end. Returns `false` with a reason
 // in `err` on failure.
 bool read_range(const std::string& path, std::size_t off, std::size_t len, uint8_t* dst, std::string& err);
+
+// Streams the suffix array of the index `m` from its part files, in pieces that
+// end at multiples of `align` bytes into the array, or at a part's end: calls
+// `fn(off, p, len)` for every piece, with the array's bytes `[off, off + len)`
+// at `p`, followed by `SA_PAD_BYTES` zero bytes. The parts are read at once,
+// each by `GPU_SACA_QUERY_IO_THREADS` (default 16) threads, which also make the
+// calls; the reads bypass the page cache if the file system allows it. `align`
+// must be a positive multiple of 4 KB. Returns `false` with a reason in `err`
+// on failure.
+bool scan_sa(const Index_Meta& m, std::size_t align, const std::function<void(idx_t, const uint8_t*, std::size_t)>& fn, std::string& err);
 
 }
 

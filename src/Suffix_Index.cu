@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cerrno>
 #include <chrono>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <thread>
@@ -274,6 +275,115 @@ bool read_range(const std::string& path, const std::size_t off, const std::size_
         t.join();
 
     ::close(fd);
+    return !failed;
+}
+
+
+bool scan_sa(const Index_Meta& m, const std::size_t align, const std::function<void(idx_t, const uint8_t*, std::size_t)>& fn, std::string& err)
+{
+    if(align == 0 || align % IO_ALIGN != 0)
+    {
+        err = "the suffix array streams in pieces of whole 4 KB blocks";
+        return false;
+    }
+
+    // The pieces of every part, taken in turns across the parts: every drive reads at once.
+    struct Piece { std::size_t part; idx_t off; std::size_t len; };
+    const std::size_t part_c = m.sa_part.size();
+    std::vector<std::vector<Piece>> of_part(part_c);
+    for(std::size_t i = 0; i < part_c; ++i)
+        for(idx_t b = m.sa_part_off[i], e = b + m.part_bytes(i); b < e; )
+        {
+            const idx_t x = std::min<idx_t>(e, (b / align + 1) * align);
+            of_part[i].push_back(Piece{i, b, static_cast<std::size_t>(x - b)});
+            b = x;
+        }
+
+    std::vector<Piece> piece;
+    for(std::size_t k = 0, left = part_c; left > 0; ++k)
+    {
+        left = 0;
+        for(const auto& v : of_part)
+            if(k < v.size())
+                piece.push_back(v[k]), ++left;
+    }
+
+    // Parts start at pages, and pieces end at whole blocks into them but at the file's end: reads may bypass the page cache.
+    std::vector<int> fd(part_c, -1);
+    std::vector<char> direct(part_c, 0);
+    for(std::size_t i = 0; i < part_c; ++i)
+    {
+        fd[i] = ::open(m.sa_part[i].c_str(), O_RDONLY | O_DIRECT);
+        direct[i] = (fd[i] >= 0);
+        if(!direct[i])
+            fd[i] = ::open(m.sa_part[i].c_str(), O_RDONLY);
+        if(fd[i] < 0)
+        {
+            err = "cannot open " + m.sa_part[i] + ": " + std::strerror(errno);
+            for(std::size_t j = 0; j < i; ++j)
+                ::close(fd[j]);
+            return false;
+        }
+    }
+
+    std::atomic<std::size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::mutex mtx;
+    const auto fail = [&](const std::string& why)
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        if(!failed.exchange(true))
+            err = why;
+    };
+
+    const auto reader = [&]
+    {
+        const std::size_t cap = align + round_up(SA_PAD_BYTES, IO_ALIGN);
+        void* buf = nullptr;
+        if(::posix_memalign(&buf, IO_ALIGN, cap) != 0)
+        {
+            fail("cannot allocate a buffer to stream the suffix array");
+            return;
+        }
+
+        auto* const p = static_cast<uint8_t*>(buf);
+        for(std::size_t k; !failed.load(std::memory_order_relaxed) && (k = next.fetch_add(1)) < piece.size(); )
+        {
+            const Piece& pc = piece[k];
+            const std::size_t at = pc.off - m.sa_part_off[pc.part], req = (direct[pc.part] ? round_up(pc.len, IO_ALIGN) : pc.len);
+            const std::string& path = m.sa_part[pc.part];
+            std::size_t got = 0;
+            while(got < pc.len)
+            {
+                const ssize_t r = ::pread(fd[pc.part], p + got, req - got, static_cast<off_t>(at + got));
+                if(r < 0 && errno == EINTR)
+                    continue;
+
+                if(r < 0)   { fail("read failed on " + path + ": " + std::strerror(errno)); break; }
+                if(r == 0)  { fail("unexpected end of file " + path); break; }
+                got += static_cast<std::size_t>(r);
+            }
+
+            if(got < pc.len)
+                break;
+
+            std::memset(p + pc.len, 0, SA_PAD_BYTES);
+            fn(pc.off, p, pc.len);
+        }
+
+        std::free(buf);
+    };
+
+    const unsigned t_c = static_cast<unsigned>(std::min<std::size_t>(io_threads() * part_c, piece.size()));
+    std::vector<std::thread> threads;
+    for(unsigned t = 0; t < t_c; ++t)
+        threads.emplace_back(reader);
+    for(auto& t : threads)
+        t.join();
+
+    for(const int f : fd)
+        ::close(f);
+
     return !failed;
 }
 
