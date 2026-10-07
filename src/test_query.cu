@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <mutex>
 #include <numeric>
 #include <random>
 #include <string>
@@ -449,12 +450,50 @@ bool test_spot_check()
 }
 
 
+// Writes into `dir` a query index of the text `T` with the padded suffix array
+// `SA`, the suffix array split into `parts` parts. Returns `false` with a reason
+// in `err` on failure.
+template <typename T_sym_>
+bool write_index(const std::filesystem::path& dir, const std::vector<T_sym_>& T, const std::vector<uint8_t>& SA, const idx_t parts,
+                 std::string& err)
+{
+    Index_Meta m;
+    m.n = T.size();
+    m.sym_bytes = sizeof(T_sym_);
+    m.text = (dir / "text.bin").string();
+    m.sa_part_off = index_meta::part_offsets(m.sa_bytes(), parts);
+    m.sa_source = "test_query";
+    std::ofstream(m.text, std::ios::binary).write(reinterpret_cast<const char*>(T.data()), m.n * sizeof(T_sym_));
+    for(idx_t i = 0; i < parts; ++i)
+    {
+        m.sa_part.push_back((dir / ("sa.u40.part" + std::to_string(i))).string());
+        std::ofstream(m.sa_part[i], std::ios::binary).write(reinterpret_cast<const char*>(SA.data() + m.sa_part_off[i]), m.part_bytes(i));
+    }
+
+    return index_meta::write(dir.string(), m, err);
+}
+
+
+// Returns the most parts, up to `k`, that `index_meta::part_offsets` splits a
+// suffix array of `n` entries into: parts are page-aligned.
+idx_t parts_for(const idx_t n, const idx_t k)
+{
+    idx_t p = k;
+    while(p > 1 && SA_WIDTH * n < p * SA_PAGE_BYTES)
+        --p;
+
+    return p;
+}
+
+
 // Checks the host's search against the oracle on the fixture text `T` of the
 // symbols `alpha`, with some queries repeated: over the whole suffix array, and
 // within brackets of random widths around the true boundaries, some wider than
 // a window of entries; in the batch's order, and sorted with identical queries
-// adjacent; over several counts of lanes and threads. Checks also that the
-// host's certificate accepts the intervals and rejects perturbed ones.
+// adjacent; over several counts of lanes and threads; with the suffix array in
+// memory, and mapped from its files in parts, the brackets' pages asked for
+// ahead. Checks also that the host's certificate accepts the intervals and
+// rejects perturbed ones.
 template <typename T_sym_>
 bool check_host_search(const std::vector<T_sym_>& T, const std::vector<T_sym_>& alpha, const uint64_t seed, const char* const what)
 {
@@ -496,19 +535,36 @@ bool check_host_search(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
     for(idx_t g = 0; g < q; ++g)
         br_sorted[2 * g] = br[2 * ids[g]], br_sorted[2 * g + 1] = br[2 * ids[g] + 1];
 
+    // The suffix array in memory, and mapped from its files.
+    const auto dir = scratch_dir("host-search");
+    std::string err;
+    Suffix_Index idx;
+    CHECK(write_index(dir, T, SA, parts_for(n, 2), err), "%s: %s", what, err.c_str());
+    CHECK(idx.load(dir.string(), Residency::pageable, Residency::mapped, 1000, err), "%s: %s", what, err.c_str());
+    const uint8_t* const source[] = {SA.data(), idx.host_sa()};
+    const char* const where[] = {"in memory", "mapped"};
+
+    // Pages of a mapped suffix array: of brackets as wide as it, too.
+    const std::vector<Rank_Range> whole(2 * q, Rank_Range{0, n});
+    CHECK(host_search::prefetch(idx.host_sa(), n, whole.data(), q, 3) == 0, "%s: the kernel refused to read the whole brackets' pages ahead", what);
+
     const char* const how[] = {"over the whole suffix array", "within brackets", "sorted, within brackets"};
-    for(const unsigned lanes : {1u, 2u, 5u, 16u, 64u})
-        for(const unsigned threads : {1u, 3u})
-            for(int k = 0; k < 3; ++k)
-            {
-                std::vector<SA_Interval> got(q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
-                host_search::find(T.data(), n, SA.data(), off.data(), sym.data(), q, k == 0 ? nullptr : (k == 1 ? br.data() : br_sorted.data()),
-                                  k == 2 ? ids.data() : nullptr, got.data(), threads, lanes);
-                for(idx_t i = 0; i < q; ++i)
-                    CHECK(same(got[i], want[i]), "%s, %u lanes, %u threads, %s: query %" PRIu64 " (m = %" PRIu64 "): [%" PRIu64 ", %" PRIu64
-                          ") vs oracle [%" PRIu64 ", %" PRIu64 ")", what, lanes, threads, how[k], i, off[i + 1] - off[i], got[i].lo, got[i].hi,
-                          want[i].lo, want[i].hi);
-            }
+    for(int s = 0; s < 2; ++s)
+        for(const unsigned lanes : {1u, 2u, 5u, 16u, 64u})
+            for(const unsigned threads : {1u, 3u})
+                for(int k = 0; k < 3; ++k)
+                {
+                    const Rank_Range* const b = (k == 0 ? nullptr : (k == 1 ? br.data() : br_sorted.data()));
+                    if(s == 1 && b != nullptr)
+                        CHECK(host_search::prefetch(source[s], n, b, q, threads) == 0, "%s: the kernel refused to read the brackets' pages ahead", what);
+
+                    std::vector<SA_Interval> got(q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
+                    host_search::find(T.data(), n, source[s], off.data(), sym.data(), q, b, k == 2 ? ids.data() : nullptr, got.data(), threads, lanes);
+                    for(idx_t i = 0; i < q; ++i)
+                        CHECK(same(got[i], want[i]), "%s, suffix array %s, %u lanes, %u threads, %s: query %" PRIu64 " (m = %" PRIu64 "): [%" PRIu64
+                              ", %" PRIu64 ") vs oracle [%" PRIu64 ", %" PRIu64 ")", what, where[s], lanes, threads, how[k], i, off[i + 1] - off[i],
+                              got[i].lo, got[i].hi, want[i].lo, want[i].hi);
+                }
 
     unsigned long long fail_c = 0, first = q;
     host_search::certify(T.data(), n, SA.data(), off.data(), sym.data(), q, want.data(), fail_c, first, 3);
@@ -571,30 +627,6 @@ bool gpu_available()
 {
     int c = 0;
     return cudaGetDeviceCount(&c) == cudaSuccess && c > 0;
-}
-
-
-// Writes into `dir` a query index of the text `T` with the padded suffix array
-// `SA`, the suffix array split into `parts` parts. Returns `false` with a reason
-// in `err` on failure.
-template <typename T_sym_>
-bool write_index(const std::filesystem::path& dir, const std::vector<T_sym_>& T, const std::vector<uint8_t>& SA, const idx_t parts,
-                 std::string& err)
-{
-    Index_Meta m;
-    m.n = T.size();
-    m.sym_bytes = sizeof(T_sym_);
-    m.text = (dir / "text.bin").string();
-    m.sa_part_off = index_meta::part_offsets(m.sa_bytes(), parts);
-    m.sa_source = "test_query";
-    std::ofstream(m.text, std::ios::binary).write(reinterpret_cast<const char*>(T.data()), m.n * sizeof(T_sym_));
-    for(idx_t i = 0; i < parts; ++i)
-    {
-        m.sa_part.push_back((dir / ("sa.u40.part" + std::to_string(i))).string());
-        std::ofstream(m.sa_part[i], std::ios::binary).write(reinterpret_cast<const char*>(SA.data() + m.sa_part_off[i]), m.part_bytes(i));
-    }
-
-    return index_meta::write(dir.string(), m, err);
 }
 
 
@@ -754,15 +786,18 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
                 for(const Gather gather : {Gather::never, Gather::always})
                     modes.push_back({stride, key_words, sort, gather});
 
-    // Placements, and the lanes of each thread of the host's search, if the host searches.
-    struct Placement { Residency text_res, sa_res; unsigned lanes; };
-    for(const Placement pl : {Placement{Residency::device, Residency::device, 16}, Placement{Residency::device, Residency::pinned, 16},
-                              Placement{Residency::pinned, Residency::device, 16}, Placement{Residency::pinned, Residency::pinned, 16},
-                              Placement{Residency::pageable, Residency::pageable, 3}, Placement{Residency::pinned, Residency::pageable, 16},
-                              Placement{Residency::pageable, Residency::pinned, 1}})
+    // Placements, and the lanes of each thread of the host's search, if the host searches, and whether it reads a mapped suffix array's
+    // pages ahead.
+    struct Placement { Residency text_res, sa_res; unsigned lanes; bool prefetch; };
+    for(const Placement pl : {Placement{Residency::device, Residency::device, 16, true}, Placement{Residency::device, Residency::pinned, 16, true},
+                              Placement{Residency::pinned, Residency::device, 16, true}, Placement{Residency::pinned, Residency::pinned, 16, true},
+                              Placement{Residency::pageable, Residency::pageable, 3, true}, Placement{Residency::pinned, Residency::pageable, 16, true},
+                              Placement{Residency::pageable, Residency::pinned, 1, true}, Placement{Residency::pageable, Residency::mapped, 16, true},
+                              Placement{Residency::pinned, Residency::mapped, 5, true}, Placement{Residency::pageable, Residency::mapped, 3, false}})
     {
-        const std::string where = std::string(what) + " (text " + residency_name(pl.text_res) + ", suffix array " + residency_name(pl.sa_res) + ")";
-        const bool host = (pl.text_res == Residency::pageable || pl.sa_res == Residency::pageable);
+        const std::string where = std::string(what) + " (text " + residency_name(pl.text_res) + ", suffix array " + residency_name(pl.sa_res)
+                                  + (pl.prefetch ? "" : ", no prefetching") + ")";
+        const bool host = (pl.text_res == Residency::pageable || pl.sa_res == Residency::pageable || pl.sa_res == Residency::mapped);
         Query_Engine<T_sym_> eng;
         Query_Options opt{pl.text_res, pl.sa_res, 100000, 0};
         opt.chunk_queries = 7;
@@ -770,6 +805,7 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
         opt.gather_queries = 5;
         opt.host_threads = 4;
         opt.host_lanes = pl.lanes;
+        opt.host_prefetch = pl.prefetch;
         CHECK(eng.load(dir.string(), opt, err), "%s: %s", where.c_str(), err.c_str());
         CHECK(eng.host_searches() == host, "%s: the placement must pick the searcher", where.c_str());
         CHECK(eng.options().gather == (pl.sa_res == Residency::pinned && !host ? Gather::always : Gather::never),
@@ -790,6 +826,14 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
                 return false;
         }
 
+        // A mapped suffix array reads its pages anew once they are dropped.
+        if(pl.sa_res == Residency::mapped)
+        {
+            CHECK(eng.index().drop_cached_sa(err), "%s: %s", where.c_str(), err.c_str());
+            if(!check_every_way(eng, off, sym, want, where + ", its pages dropped"))
+                return false;
+        }
+
         eng.find(off.data(), sym.data(), q, got.data());
 
         CHECK(device_certify(eng, off, sym, got) == 0, "%s: the certificate rejects correct intervals", where.c_str());
@@ -807,31 +851,36 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
 
 // Checks that the sample table the engine builds for the fixture text `T` holds
 // the zero-padded packed prefixes of every `stride`-th suffix, for keys of `W_`
-// words: built on the device, and on the host from either of its tiers.
+// words, with the suffix array in `parts` parts: built on the device, on the
+// host from either of its tiers, and streamed from a mapped suffix array.
 template <typename T_sym_, idx_t W_>
-bool check_sample_table(const std::vector<T_sym_>& T, const idx_t stride, const char* const what)
+bool check_sample_table(const std::vector<T_sym_>& T, const idx_t stride, const idx_t parts, const char* const what)
 {
     const auto dir = scratch_dir("table");
     const auto SA = test::build_sa40(T);
     std::string err;
-    CHECK(write_index(dir, T, SA, 1, err), "%s: %s", what, err.c_str());
+    CHECK(write_index(dir, T, SA, parts, err), "%s: %s", what, err.c_str());
 
     const idx_t n = T.size(), J = (n + stride - 1) / stride;
     std::vector<T_sym_> padded(T);
     padded.resize(n + W_ * 8 / sizeof(T_sym_), 0);
-    for(const Residency res : {Residency::device, Residency::pinned, Residency::pageable})
+    struct Placement { Residency text_res, sa_res; };
+    for(const Placement pl : {Placement{Residency::device, Residency::device}, Placement{Residency::pinned, Residency::pinned},
+                              Placement{Residency::pageable, Residency::pageable}, Placement{Residency::pageable, Residency::mapped},
+                              Placement{Residency::pinned, Residency::mapped}})
     {
         Query_Engine<T_sym_> eng;
-        CHECK(eng.load(dir.string(), Query_Options{res, res, 0, stride, static_cast<uint32_t>(W_)}, err), "%s: %s", what, err.c_str());
+        CHECK(eng.load(dir.string(), Query_Options{pl.text_res, pl.sa_res, 0, stride, static_cast<uint32_t>(W_)}, err), "%s: %s", what, err.c_str());
         const auto& tab = eng.table();
         CHECK(tab.size() == J && tab.stride() == stride && tab.key_words() == W_ && tab.key_symbols() == W_ * 8 / sizeof(T_sym_),
-              "%s, %s arrays: unexpected table shape", what, residency_name(res));
+              "%s, text %s, suffix array %s: unexpected table shape", what, residency_name(pl.text_res), residency_name(pl.sa_res));
 
         std::vector<Packed_Prefix<W_>> got(J);
         CUDA_CHECK(cudaMemcpy(got.data(), tab.template keys<W_>(), J * sizeof(Packed_Prefix<W_>), cudaMemcpyDeviceToHost));
         for(idx_t j = 0; j < J; ++j)
             CHECK(got[j] == Packed_Prefix<W_>::pack_prefix(padded.data() + sa40::load(SA.data(), j * stride)),
-                  "%s, %s arrays: key %" PRIu64 " of stride %" PRIu64 " differs from the host's", what, residency_name(res), j, stride);
+                  "%s, %" PRIu64 " parts, text %s, suffix array %s: key %" PRIu64 " of stride %" PRIu64 " differs from the host's", what, parts,
+                  residency_name(pl.text_res), residency_name(pl.sa_res), j, stride);
     }
 
     return true;
@@ -892,7 +941,7 @@ bool test_pipeline()
     const auto SA = test::build_sa40(T);
     const auto dir = scratch_dir("pipeline");
     std::string err;
-    CHECK(write_index(dir, T, SA, 1, err), "%s", err.c_str());
+    CHECK(write_index(dir, T, SA, 2, err), "%s", err.c_str());
 
     std::vector<uint64_t> off;
     std::vector<uint16_t> sym;
@@ -982,18 +1031,22 @@ bool test_pipeline()
               "chunks of the host's search must default to 2^18 queries and 2^24 symbols");
     }
 
-    // The most for a chunk, and the least of its share of a batch; with the device searching, and the host.
+    // The most for a chunk, and the least of its share of a batch; with the device searching, and the host, over a suffix array in memory
+    // and mapped.
     struct Chunk { idx_t queries, symbols, min_queries, min_symbols; };
     struct Mode { idx_t stride; uint32_t key_words; bool sort; Gather gather; };
+    struct Placement { Residency text_res, sa_res; };
     const Query_Options dflt;
-    for(const Residency res : {Residency::device, Residency::pageable})
+    for(const Placement pl : {Placement{Residency::device, Residency::device}, Placement{Residency::pageable, Residency::pageable},
+                              Placement{Residency::pageable, Residency::mapped}})
     {
         for(const Chunk ch : {Chunk{dflt.chunk_queries, dflt.chunk_symbols, dflt.min_chunk_queries, dflt.min_chunk_symbols}, Chunk{1000, 5000, 1000, 5000},
                               Chunk{3, 2, 3, 2}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1000, 5000}, Chunk{dflt.chunk_queries, dflt.chunk_symbols, 1, 1},
                               Chunk{700, 3000, 1, 1}})
         {
             Query_Options opt;
-            opt.text_res = opt.sa_res = res;
+            opt.text_res = pl.text_res;
+            opt.sa_res = pl.sa_res;
             opt.chunk_queries = ch.queries;
             opt.chunk_symbols = ch.symbols;
             opt.min_chunk_queries = ch.min_queries;
@@ -1008,7 +1061,8 @@ bool test_pipeline()
                     continue;
 
                 CHECK(eng.configure(md.stride, md.key_words, md.sort, md.gather, err), "%s", err.c_str());
-                const std::string what = std::string(residency_name(res)) + " arrays, chunks of up to " + std::to_string(eng.options().chunk_queries)
+                const std::string what = std::string("text ") + residency_name(pl.text_res) + ", suffix array " + residency_name(pl.sa_res)
+                                         + ", chunks of up to " + std::to_string(eng.options().chunk_queries)
                                          + " queries and " + std::to_string(eng.options().chunk_symbols) + " symbols, of at least "
                                          + std::to_string(ch.min_queries) + " and " + std::to_string(ch.min_symbols) + ", stride " + std::to_string(md.stride)
                                          + ", sort " + std::to_string(md.sort) + ", gather " + std::to_string(md.gather == Gather::always);
@@ -1041,17 +1095,18 @@ bool test_sample_table()
     const std::vector<uint8_t> a8 = {0, 1, 2, 0x7F, 0x80, 0xFF};
     const std::vector<uint16_t> a16 = {0, 1, 0x00FF, 0x0100, 0xFFFE, 0xFFFF};
     const std::vector<uint32_t> a32 = {0, 1, 0x7FFFFFFFu, 0x80000000u, 0xFFFFFFFFu};
-    for(const idx_t n : {1, 5, 1000})
+    for(const idx_t n : {1, 5, 1000, 20000})
     {
         const auto T8 = random_text<uint8_t>(n, a8, 0xFF, 30, rng);
         const auto T16 = random_text<uint16_t>(n, a16, 0xFFFF, 30, rng);
         const auto T32 = random_text<uint32_t>(n, a32, 0xFFFFFFFFu, 30, rng);
+        const idx_t p = parts_for(n, 3);    // At n = 20000, entries straddle the parts' ends.
         for(const idx_t stride : {idx_t(1), idx_t(3), idx_t(64)})
-            if(!check_sample_table<uint8_t, 1>(T8, stride, "u8 W=1") || !check_sample_table<uint8_t, 2>(T8, stride, "u8 W=2")
-                || !check_sample_table<uint8_t, 4>(T8, stride, "u8 W=4") || !check_sample_table<uint16_t, 1>(T16, stride, "u16 W=1")
-                || !check_sample_table<uint16_t, 2>(T16, stride, "u16 W=2") || !check_sample_table<uint16_t, 4>(T16, stride, "u16 W=4")
-                || !check_sample_table<uint32_t, 1>(T32, stride, "u32 W=1") || !check_sample_table<uint32_t, 2>(T32, stride, "u32 W=2")
-                || !check_sample_table<uint32_t, 4>(T32, stride, "u32 W=4"))
+            if(!check_sample_table<uint8_t, 1>(T8, stride, p, "u8 W=1") || !check_sample_table<uint8_t, 2>(T8, stride, p, "u8 W=2")
+                || !check_sample_table<uint8_t, 4>(T8, stride, p, "u8 W=4") || !check_sample_table<uint16_t, 1>(T16, stride, p, "u16 W=1")
+                || !check_sample_table<uint16_t, 2>(T16, stride, p, "u16 W=2") || !check_sample_table<uint16_t, 4>(T16, stride, p, "u16 W=4")
+                || !check_sample_table<uint32_t, 1>(T32, stride, p, "u32 W=1") || !check_sample_table<uint32_t, 2>(T32, stride, p, "u32 W=2")
+                || !check_sample_table<uint32_t, 4>(T32, stride, p, "u32 W=4"))
                 return false;
     }
 
@@ -1093,6 +1148,9 @@ bool test_gpu_rejects()
     CHECK(!narrow.load(dir.string(), Query_Options{}, err), "a symbol-width mismatch must be rejected");
     CHECK(!eng.load(dir.string(), Query_Options{Residency::pageable, Residency::device, 0}, err),
           "a placement split between device and pageable memory must be rejected");
+    CHECK(!eng.load(dir.string(), Query_Options{Residency::device, Residency::mapped, 0}, err),
+          "a placement split between device and mapped memory must be rejected");
+    CHECK(!eng.load(dir.string(), Query_Options{Residency::mapped, Residency::mapped, 0}, err), "a mapped text must be rejected");
     for(const int k : {0, 1, 2})
     {
         Query_Options opt;
@@ -1153,9 +1211,87 @@ bool test_index_host_tiers()
     for(idx_t b = 0; b < SA_PAD_BYTES; ++b)
         CHECK(idx.host_sa()[SA_WIDTH * T.size() + b] == 0, "suffix-array padding is not zero");
 
+    // A mapped suffix array, its parts in one range of addresses.
+    std::string drop_err;
+    CHECK(!idx.drop_cached_sa(drop_err), "only a mapped suffix array has pages to drop");
+    CHECK(write_index(dir, T, SA, 3, err), "%s", err.c_str());
+    {
+        Suffix_Index m;
+        CHECK(m.load(dir.string(), Residency::pageable, Residency::mapped, 100000, err), "%s", err.c_str());
+        CHECK(m.sa_residency() == Residency::mapped && m.host_accessible() && !m.device_accessible() && !m.stats().spot_on_device,
+              "unexpected placement of a mapped suffix array");
+        CHECK(reinterpret_cast<std::uintptr_t>(m.host_sa()) % SA_PAGE_BYTES == 0, "a mapped suffix array must start at a page");
+        CHECK(std::memcmp(m.host_sa(), SA.data(), SA_WIDTH * T.size()) == 0, "mapped suffix array differs from its files");
+        for(idx_t b = 0; b < SA_PAD_BYTES; ++b)
+            CHECK(m.host_sa()[SA_WIDTH * T.size() + b] == 0, "padding of a mapped suffix array is not zero");
+
+        CHECK(m.drop_cached_sa(err), "%s", err.c_str());
+        CHECK(std::memcmp(m.host_sa(), SA.data(), SA_WIDTH * T.size()) == 0, "mapped suffix array differs once its pages are dropped");
+    }
+
+    Suffix_Index m;
+    CHECK(!m.load(dir.string(), Residency::mapped, Residency::pageable, 0, err), "a mapped text must be rejected");
+    CHECK(!m.load(dir.string(), Residency::device, Residency::mapped, 0, err), "a placement split between device and mapped memory must be rejected");
+
     CHECK(write_index(dir, T, test::build_sa40_byte_order(T), 1, err), "%s", err.c_str());
     CHECK(!idx.load(dir.string(), Residency::pageable, Residency::pageable, T.size(), err) && !idx.loaded(),
           "a misordered suffix array must be rejected by the host spot-check");
+    CHECK(!m.load(dir.string(), Residency::pageable, Residency::mapped, T.size(), err) && !m.loaded(),
+          "a misordered mapped suffix array must be rejected by the host spot-check");
+
+    return true;
+}
+
+
+// Checks that streaming a suffix array from its parts covers its bytes once, in
+// pieces within the parts that end at multiples of the alignment or at the
+// parts' ends, each followed by zero padding; for several counts of parts and
+// alignments. Checks also that alignments of partial blocks are rejected.
+bool test_scan_sa()
+{
+    std::mt19937_64 rng(29);
+    std::string err;
+    for(const idx_t n : {idx_t(1), idx_t(1000), idx_t(20000), idx_t(100003)})
+        for(const idx_t k : {idx_t(1), idx_t(2), idx_t(3), idx_t(7)})
+        {
+            const idx_t parts = parts_for(n, k);
+            std::vector<uint8_t> SA(SA_WIDTH * n);  // Any bytes: streaming does not decode them.
+            for(auto& b : SA)
+                b = static_cast<uint8_t>(rng());
+
+            const auto dir = scratch_dir("scan");
+            Index_Meta m;
+            CHECK(write_index(dir, std::vector<uint16_t>(n), SA, parts, err) && index_meta::read(dir.string(), m, err), "%s", err.c_str());
+            for(const std::size_t align : {std::size_t(4096), std::size_t(20480), std::size_t(1) << 20})
+            {
+                std::vector<uint8_t> got(SA.size());
+                std::vector<int> seen(SA.size(), 0);
+                std::mutex mtx;
+                std::string bad;
+                const auto take = [&](const idx_t off, const uint8_t* const p, const std::size_t len)
+                {
+                    std::lock_guard<std::mutex> lock(mtx);
+                    const std::size_t part = std::upper_bound(m.sa_part_off.begin(), m.sa_part_off.end(), off) - m.sa_part_off.begin() - 1;
+                    const idx_t end = off + len, part_end = m.sa_part_off[part] + m.part_bytes(part);
+                    if(len == 0 || len > align || end > part_end || (end % align != 0 && end != part_end))
+                        bad = "piece [" + std::to_string(off) + ", " + std::to_string(end) + ") is not within a part, aligned";
+                    for(idx_t b = 0; b < SA_PAD_BYTES; ++b)
+                        if(p[len + b] != 0)
+                            bad = "piece [" + std::to_string(off) + ", " + std::to_string(end) + ") is not padded with zeros";
+                    for(std::size_t b = 0; b < len; ++b)
+                        got[off + b] = p[b], ++seen[off + b];
+                };
+
+                const std::string what = "n=" + std::to_string(n) + ", " + std::to_string(parts) + " parts, pieces of " + std::to_string(align);
+                CHECK(index_io::scan_sa(m, align, take, err), "%s: %s", what.c_str(), err.c_str());
+                CHECK(bad.empty(), "%s: %s", what.c_str(), bad.c_str());
+                CHECK(got == SA && std::all_of(seen.begin(), seen.end(), [](const int c) { return c == 1; }),
+                      "%s: the pieces do not cover the suffix array once", what.c_str());
+            }
+
+            const auto ignore = [](idx_t, const uint8_t*, std::size_t) {};
+            CHECK(!index_io::scan_sa(m, 0, ignore, err) && !index_io::scan_sa(m, 1000, ignore, err), "pieces of partial blocks must be rejected");
+        }
 
     return true;
 }
@@ -1182,6 +1318,7 @@ int main()
         {"order spot-check",        test_spot_check,            false},
         {"host search vs oracle",   test_host_search,           false},
         {"index load, host tiers",  test_index_host_tiers,      false},
+        {"suffix-array streaming",  test_scan_sa,               false},
         {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
         {"pipeline",                test_pipeline,              true},
