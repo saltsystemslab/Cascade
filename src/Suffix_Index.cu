@@ -195,6 +195,7 @@ const char* residency_name(const Residency r)
     case Residency::device:     return "device";
     case Residency::pinned:     return "pinned";
     case Residency::pageable:   return "pageable";
+    case Residency::mapped:     return "mapped";
     }
 
     return "?";
@@ -206,6 +207,7 @@ bool parse_residency(const std::string& name, Residency& r)
     if(name == "device")        r = Residency::device;
     else if(name == "pinned")   r = Residency::pinned;
     else if(name == "pageable") r = Residency::pageable;
+    else if(name == "mapped")   r = Residency::mapped;
     else    return false;
 
     return true;
@@ -311,7 +313,14 @@ bool Suffix_Index::load(const std::string& dir, const Residency text_res, const 
         return false;
     }
 
-    const bool on_device = (text_res != Residency::pageable && sa_res != Residency::pageable);
+    if(text_res == Residency::mapped)
+    {
+        err = "only the suffix array can be mapped; the text must be in memory";
+        return false;
+    }
+
+    const auto host_only = [](const Residency r) { return r == Residency::pageable || r == Residency::mapped; };
+    const bool on_device = (!host_only(text_res) && !host_only(sa_res));
     const bool on_host = (text_res != Residency::device && sa_res != Residency::device);
     if(!on_device && !on_host)
     {
@@ -383,6 +392,9 @@ bool Suffix_Index::place(Array& a, const Residency res, const std::vector<Source
                          uint8_t* const (&stage)[2], const std::size_t stage_bytes, std::string& err)
 {
     a.res = res;
+    if(res == Residency::mapped)
+        return map_files(a, src, bytes, pad, err);
+
     if(res == Residency::device)
     {
         a.alloc_bytes = bytes + pad;
@@ -463,6 +475,80 @@ bool Suffix_Index::place(Array& a, const Residency res, const std::vector<Source
 }
 
 
+bool Suffix_Index::map_files(Array& a, const std::vector<Source>& src, const std::size_t bytes, const std::size_t pad, std::string& err)
+{
+    // Room for the files' pages, and then for the padding in anonymous pages, which read as zeros, as do the last file page's bytes
+    // past its end.
+    const std::size_t page = static_cast<std::size_t>(::sysconf(_SC_PAGESIZE));
+    a.mapped_bytes = round_up(bytes, page);
+    a.alloc_bytes = a.mapped_bytes + round_up(pad, page);
+    void* const p = ::mmap(nullptr, a.alloc_bytes, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if(p == MAP_FAILED)
+    {
+        err = "cannot map " + std::to_string(a.alloc_bytes) + " bytes of addresses: " + std::strerror(errno);
+        return false;
+    }
+
+    a.base = a.host = p;
+    for(const auto& f : src)
+    {
+        if(f.off % page != 0)
+        {
+            err = "the suffix array's part " + f.path + " does not start at a page of " + std::to_string(page) + " bytes";
+            return false;
+        }
+
+        const int fd = ::open(f.path.c_str(), O_RDONLY);
+        if(fd < 0)
+        {
+            err = "cannot open " + f.path + ": " + std::strerror(errno);
+            return false;
+        }
+
+        a.fds.push_back(fd);
+        if(::mmap(static_cast<uint8_t*>(p) + f.off, f.bytes, PROT_READ, MAP_SHARED | MAP_FIXED, fd, 0) == MAP_FAILED)
+        {
+            err = "cannot map " + f.path + ": " + std::strerror(errno);
+            return false;
+        }
+    }
+
+    if(::madvise(p, a.mapped_bytes, MADV_RANDOM) != 0)
+    {
+        err = std::string("cannot advise the kernel of random reads of the suffix array: ") + std::strerror(errno);
+        return false;
+    }
+
+    return true;
+}
+
+
+bool Suffix_Index::drop_cached_sa(std::string& err) const
+{
+    if(sa_.res != Residency::mapped || sa_.base == nullptr)
+    {
+        err = "only a mapped suffix array has pages in the page cache";
+        return false;
+    }
+
+    // The page cache keeps the pages that a process maps: this one's mappings of them go first.
+    if(::madvise(sa_.base, sa_.mapped_bytes, MADV_DONTNEED) != 0)
+    {
+        err = std::string("cannot unmap the suffix array's pages: ") + std::strerror(errno);
+        return false;
+    }
+
+    for(const int fd : sa_.fds)
+        if(const int e = ::posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED); e != 0)
+        {
+            err = std::string("cannot drop the suffix array's pages from the page cache: ") + std::strerror(e);
+            return false;
+        }
+
+    return true;
+}
+
+
 bool Suffix_Index::spot_check(const idx_t spot, std::string& err)
 {
     const idx_t n = meta_.n;
@@ -528,9 +614,12 @@ void Suffix_Index::free_array(Array& a)
         {
             for(std::size_t off = 0; off < a.registered_bytes; off += REGISTER_CHUNK)
                 cudaHostUnregister(static_cast<uint8_t*>(a.base) + off);
-            ::munmap(a.base, a.alloc_bytes);
+            ::munmap(a.base, a.alloc_bytes);    // With the files' mappings in it, if mapped.
         }
     }
+
+    for(const int fd : a.fds)
+        ::close(fd);
 
     a = Array();
 }

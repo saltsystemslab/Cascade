@@ -25,6 +25,7 @@ enum class Residency
     device,     // Device memory.
     pinned,     // Pinned host memory mapped into the device's address space: zero-copy from the device.
     pageable,   // Pageable host memory, with transparent huge pages: host-side access only.
+    mapped,     // Its files mapped into host memory, read on demand through the page cache: host-side access only; the suffix array only.
 };
 
 
@@ -75,6 +76,8 @@ private:
         void* dev = nullptr;    // Device address of the content, if device-accessible.
         void* host = nullptr;   // Host address of the content, if host-accessible.
         std::size_t registered_bytes = 0;   // Bytes registered with the device, for `pinned`.
+        std::size_t mapped_bytes = 0;   // Bytes of the files' pages, for `mapped`.
+        std::vector<int> fds;   // The open files, for `mapped`.
     };
 
     // A file contributing the bytes `[off, off + bytes)` of an array.
@@ -99,6 +102,13 @@ private:
     static bool place(Array& a, Residency res, const std::vector<Source>& src, std::size_t bytes, std::size_t pad,
                       uint8_t* const (&stage)[2], std::size_t stage_bytes, std::string& err);
 
+    // Maps the files `src` of an array of `bytes` bytes read-only into one range
+    // of host addresses, each at its offset, followed by `pad` zero bytes, into
+    // `a`: nothing is read until accessed, and then a page at a time, with no
+    // readahead. Returns `false` with a reason in `err` on failure, leaving `a`
+    // for `free_array`.
+    static bool map_files(Array& a, const std::vector<Source>& src, std::size_t bytes, std::size_t pad, std::string& err);
+
     // Spot-checks the order of `spot` random adjacent pairs of the suffix array.
     // Returns `false` with a reason in `err` on a violation.
     bool spot_check(idx_t spot, std::string& err);
@@ -120,12 +130,18 @@ public:
     // and the suffix array in `sa_res`, and spot-checks the order of `spot`
     // random adjacent pairs of the suffix array. The two arrays must both be
     // accessible either from the device (`device`, `pinned`) or from the host
-    // (`pinned`, `pageable`). Returns `false` with a reason in `err` on failure,
-    // leaving the index empty.
+    // (`pinned`, `pageable`, and `mapped` for the suffix array). Returns `false`
+    // with a reason in `err` on failure, leaving the index empty.
     bool load(const std::string& dir, Residency text_res, Residency sa_res, idx_t spot, std::string& err);
 
     // Frees the arrays, leaving the index empty.
     void release();
+
+    // Drops the pages of a mapped suffix array from the page cache, so that its
+    // next accesses read them from the drives; the pages that another process
+    // maps stay. Returns `false` with a reason in `err` on failure, or if the
+    // suffix array is not mapped.
+    bool drop_cached_sa(std::string& err) const;
 
     // Returns `true` iff an index is loaded.
     bool loaded() const { return text_.base != nullptr; }
@@ -155,6 +171,7 @@ public:
     const T_sym_* host_text() const { return static_cast<const T_sym_*>(text_.host); }
 
     // Returns the host address of the padded suffix array; `nullptr` if `device`.
+    // A mapped suffix array starts at a page.
     const uint8_t* host_sa() const { return static_cast<const uint8_t*>(sa_.host); }
 };
 
