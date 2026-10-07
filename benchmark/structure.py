@@ -33,6 +33,8 @@ Writes pgfplots-ready TSVs into <out-dir>, with `nan` for what is unavailable:
                         and the dead ones the liveness filter skips
     filter.tsv          each generation's messages with the liveness filter, over the
                         replicates, against the unfiltered and the live ones
+    kgram.tsv           each corpus' heaviest K-gram for every K, against its run's size
+                        bound B; the skew rows and datasets.tsv also carry it at their K
     checks.txt          the consistency checks, also printed
 Exits 1 if any check fails.
 
@@ -246,7 +248,7 @@ def partitioning(r, corpus, label):
     h = B * (s + 1) // n
     mean_full = sum(full) / len(full)
     row = {"corpus": corpus, "label": label, "feasible": 1, "K": K, "ell": ell, "n": n, "p": p, "p_min": p_min,
-           "floor": floor, "B": B, "s": s, "h": h, "p_over_pmin": p / p_min, "max_B": max(sz) / B,
+           "floor": floor, "B": B, "s": s, "h": h, "p_over_pmin": p / p_min, "max_sz": max(sz), "max_B": max(sz) / B,
            "mean_full_B": mean_full / B, "min_full_B": full[0] / B, "q05_B": quantile(full, 0.05) / B,
            "q50_B": quantile(full, 0.5) / B, "q95_B": quantile(full, 0.95) / B, "fill": n / (p * B),
            "env_B": mean_full / B * (1 + math.sqrt(2 * math.log(len(full)) / h)) if h > 0 else NAN}
@@ -346,6 +348,7 @@ def attach(r, tool):
     r["runs"] = [{"corpus": c, "t": t, "ctx": ell << t, "runs": runs[t], "mean_len": a[t] / runs[t] if runs[t] else NAN}
                  for t in range(min(D, G))]
     s["depth_max"] = tool["depth_max"]
+    r["kgram"] = tool.get("kgram_max")
     s["pill_ovh_exact"] = sum(fwd[1:G]) / sum(pay[:G])     # Over the logged inboxes, M_2 to M_G.
     s["dead_pill"] = sum(fwd[1:G]) / n                      # Exact, in place of the log's bracket.
     s["dead_surv"] = (sum(m[2:]) - sum(a[1:]) - sum(fwd[1:G])) / n
@@ -397,6 +400,41 @@ def ablation(corpus, reps, tool):
                "skipped_later": (U - unf[0] - F + rows[0]["filtered"]) / n,
                "msg_cut": 1 - F / U, "dead_cut": (U - F) / (U - A)}
     return rows, summary, fails
+
+
+def heaviest(kgram, skew, summary):
+    """Adds each corpus' heaviest K-gram frequency f_max to its partitionings in
+    `skew` and to its summary in `summary`, as f_max / B at their K; returns the
+    kgram.tsv rows, and the checks that failed. `kgram` maps a corpus to its
+    `sa_structure` output's `kgram_max`, f_max for K = 1, 2, ....
+
+    The suffixes that share a K-gram share a partition, so no partitioning by
+    K-prefixes has a partition smaller than f_max. A pivot-selection abort is the
+    sampled counterpart of f_max > B.
+    """
+    fails, run_B = [], {}
+    run_K = {s["corpus"]: s["K"] for s in summary}
+    for row in skew:
+        c = row["corpus"]
+        K = row["K"] if row["K"] == row["K"] else run_K.get(c, NAN)
+        if c not in kgram or "B" not in row or not 1 <= K <= len(kgram[c]):
+            continue
+        f = kgram[c][int(K) - 1]
+        row["fmax_B"] = f / row["B"]
+        if row["label"] == "full":
+            run_B[c] = row["B"]
+        if row["feasible"] and row["max_sz"] < f:
+            fails.append(f"{c} {row['label']}: its largest partition, {row['max_sz']}, is below f_max = {f} at K = {K}")
+    for s in summary:
+        c = s["corpus"]
+        if c in kgram and 1 <= s["K"] <= len(kgram[c]):
+            s["fmax"] = kgram[c][int(s["K"]) - 1]
+            s["fmax_B"] = s["fmax"] / run_B[c] if c in run_B else NAN
+    n = {s["corpus"]: s["n"] for s in summary}
+    rows = [{"corpus": c, "K": k, "fmax": f, "frac": f / n[c] if c in n else NAN,
+             "fmax_B": f / run_B[c] if c in run_B else NAN}
+            for c in sorted(kgram) for k, f in enumerate(kgram[c], 1)]
+    return rows, fails
 
 
 def fmt(x):
@@ -455,10 +493,10 @@ DECAY = ["corpus", "t", "ctx", "active", "frac", "rho", "S_ctx", "S_ctxK", "pred
 AMPLIFICATION = ["corpus", "t", "g", "rho", "amp", "lo", "hi", "cohort", "pill_lo", "pill_hi"]
 LOOKBACK = ["corpus", "t", "cohort", "lam0", "lam1", "lam2p", "fwd_pred", "fwd_log_lo", "fwd_log_hi"]
 SKEW = ["corpus", "label", "feasible", "K", "ell", "n", "p", "p_min", "floor", "B", "s", "h", "p_over_pmin", "max_B",
-        "mean_full_B", "min_full_B", "q05_B", "q50_B", "q95_B", "fill", "env_B"]
+        "mean_full_B", "min_full_B", "q05_B", "q50_B", "q95_B", "fill", "env_B", "fmax_B"]
 DATASETS = ["corpus", "n", "p", "ell", "G", "surv0", "Ed", "depth_lo", "depth_hi", "amp_run", "waste", "pill_ovh",
             "flood_share", "flood_waste", "K", "depth_max", "pill_ovh_exact", "skew_work", "max_B",
-            "msg_cut", "dead_cut"]
+            "msg_cut", "dead_cut", "fmax", "fmax_B"]
 BUDGET = ["corpus", "Ed", "live", "dead0", "dead_surv", "dead_pill", "total", "amp_run",    # Messages per suffix.
           "skipped0", "skipped_later"]
 FILTER = ["corpus", "g", "live", "unfiltered", "filtered", "filtered_lo", "filtered_hi", "skipped_dead"]
@@ -515,6 +553,7 @@ def main(argv):
             sizes += rows
 
     filtered, filt_rows, filt_sum = {}, [], {}
+    kgram = {r["name"]: [r["kgram"]] for r in runs if r.get("kgram")}
     for f in args["--filtered"]:
         path = pathlib.Path(f)
         r = parse(path)
@@ -523,17 +562,24 @@ def main(argv):
             continue
         filtered.setdefault(path.stem.rpartition("_")[0] or path.stem, []).append(r)
     for corpus, reps in filtered.items():
-        tool = reps[0]["path"].parent / f"{corpus}.structure.json"
-        if not tool.exists():
-            fails.append(f"{corpus}: no {tool.name} next to its filtered runs")
+        path = reps[0]["path"].parent / f"{corpus}.structure.json"
+        if not path.exists():
+            fails.append(f"{corpus}: no {path.name} next to its filtered runs")
             continue
-        rows, summ, bad = ablation(corpus, reps, json.loads(tool.read_text()))
+        tool = json.loads(path.read_text())
+        rows, summ, bad = ablation(corpus, reps, tool)
         fails += bad
+        if tool.get("kgram_max"):
+            kgram.setdefault(corpus, []).append(tool["kgram_max"])
         filt_rows += rows
         if summ:
             filt_sum[corpus] = summ
     for r in runs:
         r["summary"].update(filt_sum.get(r["name"], {}))
+    fails += [f"{c}: its tool runs disagree on the heaviest K-grams" for c, ks in kgram.items()
+              if ks.count(ks[0]) != len(ks)]
+    kgram_rows, bad = heaviest({c: ks[0] for c, ks in kgram.items()}, skew, [r["summary"] for r in runs])
+    fails += bad
 
     runs.sort(key=lambda r: r["n"])
     skew.sort(key=lambda row: (row["corpus"], row["label"][:1], row.get("K", 0), row.get("p_min", 0)))
@@ -553,6 +599,7 @@ def main(argv):
     write_tsv(out / "datasets.tsv", DATASETS, summary)
     write_tsv(out / "budget.tsv", BUDGET, sorted(summary, key=lambda s: s["Ed"]))
     write_tsv(out / "filter.tsv", FILTER, sorted(filt_rows, key=lambda row: (row["corpus"], row["g"])))
+    write_tsv(out / "kgram.tsv", ["corpus", "K", "fmax", "frac", "fmax_B"], kgram_rows)
     write_tex(out / "datasets.tex", summary)
 
     report = [f"{r['name']}: n = {r['n']}, ell = {r['ctx'][0]}, {len(r['active']) - 1} doubling generations"
@@ -562,6 +609,8 @@ def main(argv):
                for row in skew if row["label"] != "full"]
     report += [f"filtered {c}: {s['reps']} replicate(s); {100 * s['msg_cut']:.1f}% of the messages skipped,"
                f" {100 * s['dead_cut']:.1f}% of the dead ones" for c, s in sorted(filt_sum.items())]
+    report += [f"heaviest {s['K']}-gram of {s['corpus']}: {s['fmax']}, {100 * s['fmax_B']:.2f}% of B"
+               for s in sorted((r["summary"] for r in runs), key=lambda s: s["n"]) if "fmax" in s]
     report += [f"FAIL {x}" for x in fails]
     report.append(f"{len(fails)} check(s) failed." if fails else "All checks pass.")
     (out / "checks.txt").write_text("\n".join(report) + "\n")
