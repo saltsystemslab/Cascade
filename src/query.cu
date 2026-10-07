@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <map>
 #include <random>
@@ -39,7 +40,8 @@ R"(Usage:
              [--spot N] [--stride S,...] [--key-words W,...] [--sort 0|1,...] [--gather 0|1,...]
              [--gather-queries G] [--reps K] [--chunk-queries C] [--chunk-symbols Y]
              [--min-chunk-queries C'] [--min-chunk-symbols Y'] [--host-threads H] [--host-lanes L]
-             [--itv-out F] [--cnt-out F] [--cnt-dir D] [--validate]
+             [--host-prefetch 0|1] [--sa-cold 0|1] [--itv-out F] [--cnt-out F] [--cnt-dir D]
+             [--validate]
       Loads the index once, and finds the SA-intervals of the first N (default:
       all) queries of every query file, K times (default 3) each way: from
       device memory, and end to end, from host memory through the pipeline, both
@@ -49,8 +51,12 @@ R"(Usage:
       (default 2^24, or 2^28) in all, two per stream when their shares of the
       batch are at least C' queries (default 2^16) or Y' symbols (default
       2^22), and whole chunks if gathering; its intervals must equal those
-      from device memory. R is `device` (default), `pinned`, or `pageable`;
-      --spot sets the suffix-array order spot-checks at load (default 100000).
+      from device memory. R is `device` (default), `pinned`, `pageable`, or,
+      for the suffix array, `mapped`: its files mapped, and read from the
+      drives on demand through the page cache; --sa-cold 1 drops its pages
+      from the page cache before every timed repetition. The bytes that each
+      repetition reads from storage are reported. --spot sets the suffix-array
+      order spot-checks at load (default 100000).
       The search runs in two phases over a sample table of stride S (default
       32; 0 selects the direct mode) with keys of W words (1, 2, or 4; default
       2, or 4 for 4-byte symbols), with every batch sorted by its packed
@@ -58,9 +64,11 @@ R"(Usage:
       into device memory, G queries at a time (default 2^18), if --gather 1
       (default: iff the suffix array is pinned); lists run every combination as
       a mode, on the index loaded once. With both arrays in host memory and
-      either pageable, the host searches: the device ranks every chunk in the
-      table, and H threads (default: every core) search its brackets, each
-      interleaving L searches (default 32); the direct mode runs on the host
+      either pageable or mapped, the host searches: the device ranks every
+      chunk in the table, and H threads (default: every core) search its
+      brackets, each interleaving L searches (default 32); with a mapped
+      suffix array, they ask the kernel ahead for the pages of each chunk's
+      brackets unless --host-prefetch 0. The direct mode runs on the host
       alone, and from device memory means there and back. --validate checks
       every interval with the O(m) certificate on the device, or on the host
       if it searches.
@@ -181,6 +189,34 @@ double seconds(const cudaEvent_t a, const cudaEvent_t b)
 }
 
 
+// Returns the bytes that the process has had read from storage, its threads'
+// faults and read-aheads included, per `/proc/self/io`; `0` if unknown.
+uint64_t storage_read_bytes()
+{
+    std::ifstream is("/proc/self/io");
+    for(std::string k; is >> k; )
+    {
+        uint64_t v = 0;
+        is >> v;
+        if(k == "read_bytes:")
+            return v;
+    }
+
+    return 0;
+}
+
+
+// Returns the values `v` as a comma-separated list.
+std::string join(const std::vector<uint64_t>& v)
+{
+    std::string s;
+    for(const auto x : v)
+        s += (s.empty() ? "" : ",") + std::to_string(x);
+
+    return s;
+}
+
+
 int run_info(const Args& a)
 {
     Index_Meta m;
@@ -206,12 +242,13 @@ int run_info(const Args& a)
 
 
 // Finds the SA-intervals of the first `q_max` queries of the file `path` with
-// `eng`, `reps` times, and prints the batch's `key=value` lines. Checks the
-// intervals if `validate`, and writes them and their counts to `itv_path` and
-// `cnt_path` unless empty. Returns the exit status.
+// `eng`, `reps` times, and prints the batch's `key=value` lines; drops the
+// mapped suffix array's pages from the page cache before every repetition if
+// `cold`. Checks the intervals if `validate`, and writes them and their counts
+// to `itv_path` and `cnt_path` unless empty. Returns the exit status.
 template <typename T_sym_>
-int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const uint64_t q_max, const uint64_t reps, const bool validate,
-               const std::string& itv_path, const std::string& cnt_path)
+int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const uint64_t q_max, const uint64_t reps, const bool cold,
+               const bool validate, const std::string& itv_path, const std::string& cnt_path)
 {
     std::vector<uint64_t> off;
     std::vector<T_sym_> sym;
@@ -244,14 +281,29 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
     CUDA_CHECK(cudaEventSynchronize(e1));
     const double t_h2d = seconds(e0, e1);
 
+    // A repetition reads from storage the pages it misses in the page cache; every page of a mapped suffix array if cold.
+    const auto drop = [&]
+    {
+        std::string e;
+        if(cold && !eng.index().drop_cached_sa(e))
+        {
+            std::fprintf(stderr, "error: %s\n", e.c_str());
+            std::exit(1);
+        }
+    };
+
     std::vector<double> t_find;
+    std::vector<uint64_t> io_find, io_e2e, io_e2e_pg;
     for(uint64_t r = 0; r < reps; ++r)
     {
+        drop();
+        const uint64_t b0 = storage_read_bytes();
         CUDA_CHECK(cudaEventRecord(e0));
         eng.find_async(off_d, sym_d, q, out_d, 0);
         CUDA_CHECK(cudaEventRecord(e1));
         CUDA_CHECK(cudaEventSynchronize(e1));
         t_find.push_back(seconds(e0, e1));
+        io_find.push_back(storage_read_bytes() - b0);
     }
 
     std::vector<SA_Interval> out(q);
@@ -275,14 +327,17 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
     if(off[q] > 0)
         std::memcpy(sym_p, sym.data(), off[q] * sizeof(T_sym_));
 
-    const auto time_find = [&](const uint64_t* const o, const T_sym_* const y, SA_Interval* const r)
+    const auto time_find = [&](const uint64_t* const o, const T_sym_* const y, SA_Interval* const r, std::vector<uint64_t>& io)
     {
         std::vector<double> t;
         for(uint64_t k = 0; k < reps; ++k)
         {
+            drop();
+            const uint64_t b0 = storage_read_bytes();
             const auto t0 = std::chrono::steady_clock::now();
             eng.find(o, y, q, r);
             t.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+            io.push_back(storage_read_bytes() - b0);
         }
 
         std::sort(t.begin(), t.end());
@@ -290,8 +345,8 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
     };
 
     std::vector<SA_Interval> out_pg(q);
-    const auto t_e2e = time_find(off_p, sym_p, out_p);
-    const auto t_e2e_pg = time_find(off.data(), sym.data(), out_pg.data());
+    const auto t_e2e = time_find(off_p, sym_p, out_p, io_e2e);
+    const auto t_e2e_pg = time_find(off.data(), sym.data(), out_pg.data(), io_e2e_pg);
     const bool e2e_same = (q == 0 || (std::memcmp(out_p, out.data(), q * sizeof(SA_Interval)) == 0
                                       && std::memcmp(out_pg.data(), out.data(), q * sizeof(SA_Interval)) == 0));
     CUDA_CHECK(deallocate_host(off_p));
@@ -308,6 +363,7 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
                 reps, t_h2d, sorted.front(), sorted[sorted.size() / 2], t_d2h, q / sorted.front(), t_e2e.front(), t_e2e[t_e2e.size() / 2],
                 q / t_e2e.front(), t_e2e_pg.front(), t_e2e_pg[t_e2e_pg.size() / 2], q / t_e2e_pg.front(), e2e_same ? "pass" : "FAIL", hits, occ,
                 query_file::counts_hash(out.data(), q));
+    std::printf("io_bytes_find=%s\nio_bytes_e2e=%s\nio_bytes_e2e_pageable=%s\n", join(io_find).c_str(), join(io_e2e).c_str(), join(io_e2e_pg).c_str());
 
     int rc = 0;
     if(!e2e_same)
@@ -362,17 +418,25 @@ int run_find(const Args& a)
     std::string err;
     Query_Options opt;
     uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3, host_threads = opt.host_threads, host_lanes = opt.host_lanes;
+    uint64_t host_prefetch = opt.host_prefetch, sa_cold = 0;
     std::vector<uint64_t> strides = {opt.stride}, key_words = {0}, sorts = {0}, gathers;
     if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
         || !get_u64(a, "chunk-queries", opt.chunk_queries, err) || !get_u64(a, "chunk-symbols", opt.chunk_symbols, err)
         || !get_u64(a, "min-chunk-queries", opt.min_chunk_queries, err) || !get_u64(a, "min-chunk-symbols", opt.min_chunk_symbols, err)
         || !get_u64(a, "gather-queries", opt.gather_queries, err)
         || !get_u64(a, "host-threads", host_threads, err) || !get_u64(a, "host-lanes", host_lanes, err)
+        || !get_u64(a, "host-prefetch", host_prefetch, err) || !get_u64(a, "sa-cold", sa_cold, err)
         || !get_u64_list(a, "stride", strides, err) || !get_u64_list(a, "key-words", key_words, err) || !get_u64_list(a, "sort", sorts, err)
         || !get_u64_list(a, "gather", gathers, err)
         || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
     {
         std::fprintf(stderr, "error: %s\n", err.empty() ? "unknown residency" : err.c_str());
+        return 2;
+    }
+
+    if(sa_cold != 0 && opt.sa_res != Residency::mapped)
+    {
+        std::fprintf(stderr, "error: --sa-cold 1 drops the pages of a mapped suffix array; use --sa-res mapped\n");
         return 2;
     }
 
@@ -418,6 +482,7 @@ int run_find(const Args& a)
     opt.spot = spot;
     opt.host_threads = static_cast<unsigned>(std::min<uint64_t>(host_threads, std::numeric_limits<unsigned>::max()));
     opt.host_lanes = static_cast<unsigned>(std::min<uint64_t>(host_lanes, std::numeric_limits<unsigned>::max()));   // Too many is rejected at load.
+    opt.host_prefetch = (host_prefetch != 0);
     reps = std::max<uint64_t>(reps, 1);
 
     Query_Engine<T_sym_> eng;
@@ -435,7 +500,8 @@ int run_find(const Args& a)
     std::printf("streams=%zu\nchunk_queries=%" PRIu64 "\nchunk_symbols=%" PRIu64 "\nmin_chunk_queries=%" PRIu64 "\nmin_chunk_symbols=%" PRIu64
                 "\ngather_queries=%" PRIu64 "\n", eng.streams(), eng.options().chunk_queries, eng.options().chunk_symbols,
                 eng.options().min_chunk_queries, eng.options().min_chunk_symbols, eng.options().gather_queries);
-    std::printf("host_search=%d\nhost_threads=%u\nhost_lanes=%u\n", eng.host_searches(), eng.options().host_threads, eng.options().host_lanes);
+    std::printf("host_search=%d\nhost_threads=%u\nhost_lanes=%u\nhost_prefetch=%d\nsa_cold=%d\n", eng.host_searches(), eng.options().host_threads,
+                eng.options().host_lanes, eng.options().host_prefetch, sa_cold != 0);
 
     // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`; to `<stem>@<mode>.cnt` if several modes.
     int rc = 0;
@@ -458,7 +524,7 @@ int run_find(const Args& a)
         {
             const std::string cnt = a.has("cnt-dir") ? (std::filesystem::path(a.get("cnt-dir")) / std::filesystem::path(f).stem()).string() + tag + ".cnt"
                                                      : a.get("cnt-out");
-            rc |= find_batch(eng, f, q_max, reps, a.has("validate"), a.get("itv-out"), cnt);
+            rc |= find_batch(eng, f, q_max, reps, sa_cold != 0, a.has("validate"), a.get("itv-out"), cnt);
         }
     }
 
