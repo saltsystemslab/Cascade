@@ -259,11 +259,11 @@ template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::fixed_budget_bound() const
 {
     const auto P_sz_max = static_cast<idx_t>(std::ceil(IMBALANCE_SLACK * n_ / p_));
-    const auto slab_c = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * ((P_sz_max + CHUNK_CAP - 1) / CHUNK_CAP) + READER_C + WRITER_C; // As `setup_staging_config` sizes the pool, in full slabs.
+    const auto cap = slab_capacity(P_sz_max);
 
     return  n_ * sizeof(T_sym_) +
             Partition_ID_Map::bytes(n_, p_) +
-            slab_c * CHUNK_CAP * SLAB_ELEM_BYTES +
+            slab_count(P_sz_max, cap) * cap * SLAB_ELEM_BYTES +
             Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_) +
             Partition_Backend::fixed_budget(p_);
 }
@@ -592,35 +592,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
     const auto P_sz_max = *std::max_element(P_cap.cbegin(), P_cap.cend());
 
     // Sets the capacity of each staging-slab.
-    {
-        // A chunk-boundary `c * chunk_cap_` must be disk-block aligned in each
-        // persisted field: the suffix-lanes, and the keys (`p_sz_t`).
-        constexpr idx_t elems_per_disk_blk = std::max<idx_t>(lane::ALIGN, Direct_File::DISK_BLOCK / sizeof(p_sz_t));
-
-        // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
-        constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
-        static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
-        static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
-
-        if(P_sz_max >= CHUNK_CAP)
-            chunk_cap_ = CHUNK_CAP;
-        else    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
-            chunk_cap_ = ((P_sz_max + cap_granularity - 1) / cap_granularity) * cap_granularity;
-
-#ifdef TESTS
-        // Small slabs make even small inputs span many content-chunks per partition.
-        if(const auto cap = env::get_u64("GPU_SACA_CHUNK_CAP"); cap)
-        {
-            if(*cap == 0 || *cap % cap_granularity != 0)
-            {
-                std::cerr << "`GPU_SACA_CHUNK_CAP` must be a positive multiple of " << cap_granularity << ". Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            chunk_cap_ = *cap;
-        }
-#endif
-    }
+    chunk_cap_ = slab_capacity(P_sz_max);
 
     // Set the reader- and writer-pool sizes.
     {
@@ -638,12 +610,7 @@ void GPU_SACA<T_sym_>::setup_staging_config()
     // Sets the slab pool size.
     {
         const auto max_chunk_per_part = (P_sz_max + chunk_cap_ - 1) / chunk_cap_;
-
-        // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
-        // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer.
-        // A slab lives in exactly one of: `F`, a reader, an assembly slot (covering its timeline in `C`,
-        // at a stager, and at device), `C` and a stager again past the device, `W`, and a writer.
-        slab_c_ = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * max_chunk_per_part + reader_c_ + writer_c_;
+        slab_c_ = slab_count(P_sz_max, chunk_cap_);
 
         admit_budget_ = slab_c_;
         if(admit_budget_ < max_chunk_per_part)
@@ -668,6 +635,51 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         std::cerr << "\tSlab-pool memory: " << slab_pool_memory() << "B\n";
 #endif
     }
+}
+
+
+template <typename T_sym_>
+idx_t GPU_SACA<T_sym_>::slab_capacity(const idx_t P_sz_max)
+{
+    // A chunk-boundary `c * cap` must be disk-block aligned in each persisted
+    // field: the suffix-lanes, and the keys (`p_sz_t`).
+    constexpr idx_t elems_per_disk_blk = std::max<idx_t>(lane::ALIGN, Direct_File::DISK_BLOCK / sizeof(p_sz_t));
+
+    // A slab's inbox-range must also tile into `MSG_CHUNKS_PER_SLAB` message-chunks of whole `MSG_ALIGN`-groups.
+    constexpr idx_t cap_granularity = MSG_CHUNKS_PER_SLAB * MSG_ALIGN;
+    static_assert(cap_granularity % elems_per_disk_blk == 0, "Slab-capacity granularity must be disk-block aligned.");
+    static_assert(CHUNK_CAP % cap_granularity == 0, "`CHUNK_CAP` must be a multiple of the slab-capacity granularity.");
+
+#ifdef TESTS
+    // Small slabs make even small inputs span many content-chunks per partition.
+    if(const auto cap = env::get_u64("GPU_SACA_CHUNK_CAP"); cap)
+    {
+        if(*cap == 0 || *cap % cap_granularity != 0)
+        {
+            std::cerr << "`GPU_SACA_CHUNK_CAP` must be a positive multiple of " << cap_granularity << ". Aborting.\n";
+            std::exit(EXIT_FAILURE);
+        }
+
+        return *cap;
+    }
+#endif
+
+    if(P_sz_max >= CHUNK_CAP)
+        return CHUNK_CAP;
+
+    // Small partitions can render disk-block-rounded reads to overflow the slab's capacity, by up-to 4095 bytes.
+    return ((P_sz_max + cap_granularity - 1) / cap_granularity) * cap_granularity;
+}
+
+
+template <typename T_sym_>
+idx_t GPU_SACA<T_sym_>::slab_count(const idx_t P_sz_max, const idx_t cap)
+{
+    // `STREAM_C` partitions in the GPU; `PREFETCH_DEPTH` partitions staged ahead in the ready-queue;
+    // `WRITEBACK_DEPTH` partitions staged ahead in the write-queue; a slab per-reader and per-writer.
+    // A slab lives in exactly one of: `F`, a reader, an assembly slot (covering its timeline in `C`,
+    // at a stager, and at device), `C` and a stager again past the device, `W`, and a writer.
+    return (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * ((P_sz_max + cap - 1) / cap) + READER_C + WRITER_C;
 }
 
 

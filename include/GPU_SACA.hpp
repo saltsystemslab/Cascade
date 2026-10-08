@@ -135,6 +135,14 @@ private:
         // reader- / writer-pool sizes.
         void setup_staging_config();
 
+        // Returns the capacity of each staging-slab for partitions of at most
+        // `P_sz_max` suffixes.
+        static idx_t slab_capacity(idx_t P_sz_max);
+
+        // Returns the count of slabs, of capacity `cap`, in the pool for
+        // partitions of at most `P_sz_max` suffixes.
+        static idx_t slab_count(idx_t P_sz_max, idx_t cap);
+
         // Returns the total memory used by the slab-pool.
         std::size_t slab_pool_memory() const;
     // }
