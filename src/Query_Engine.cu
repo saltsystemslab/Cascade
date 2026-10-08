@@ -8,10 +8,14 @@
 
 #include <cub/cub.cuh>
 
+#include <unistd.h>
+
 #include <atomic>
 #include <climits>
 #include <type_traits>
 #include <cstring>
+#include <fstream>
+#include <string>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -501,6 +505,19 @@ void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool
 }
 
 
+// Returns the bytes of memory available per `/proc/meminfo`, without swapping;
+// `0` if unknown.
+idx_t available_bytes()
+{
+    std::ifstream is("/proc/meminfo");
+    for(std::string line; std::getline(is, line); )
+        if(line.rfind("MemAvailable:", 0) == 0)
+            return std::stoull(line.substr(13)) * 1024;    // In kB.
+
+    return 0;
+}
+
+
 // Returns `true` iff the host address `p` is in pinned memory: allocated or
 // registered with the device.
 bool is_pinned(const void* const p)
@@ -594,6 +611,8 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
 
     release_lanes();
     tab_.release();
+    sa_files_.close();
+    asked_.reset();
     if(!idx_.load(dir, opt.text_res, opt.sa_res, opt.spot, err))
         return false;
 
@@ -605,10 +624,12 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
     if(opt_.chunk_symbols == 0)
         opt_.chunk_symbols = idx_t(1) << (opt_.gather == Gather::always ? 28 : 24);
 
-    if(!configured || !allocate_lanes(err))
+    if(!configured || !allocate_lanes(err) || !open_sa_files(err))
     {
         release_lanes();
         tab_.release();
+        sa_files_.close();
+        asked_.reset();
         idx_.release();
         return false;
     }
@@ -730,6 +751,53 @@ void Query_Engine<T_sym_>::release_lanes()
         cudaMemPoolDestroy(pool_);
         pool_ = nullptr;
     }
+}
+
+
+template <typename T_sym_>
+bool Query_Engine<T_sym_>::open_sa_files(std::string& err)
+{
+    sa_files_.close();
+    asked_.reset();
+    asked_pages_ = asked_c_ = 0;
+    if(idx_.sa_residency() != Residency::mapped || !opt_.host_prefetch)
+        return true;
+
+    const auto& m = idx_.meta();
+    if(!sa_files_.open(m.sa_part, m.sa_part_off, opt_.host_threads, err))
+        return false;
+
+    const idx_t page = static_cast<idx_t>(::sysconf(_SC_PAGESIZE));
+    asked_pages_ = (m.sa_bytes() + page - 1) / page;
+    asked_.reset(new std::atomic<uint8_t>[asked_pages_]());
+    const idx_t avail = available_bytes();
+    asked_cap_ = (avail > 0 ? avail / page : ~idx_t(0));
+    return true;
+}
+
+
+template <typename T_sym_>
+void Query_Engine<T_sym_>::forget_asked() const
+{
+    #pragma omp parallel for num_threads(static_cast<int>(opt_.host_threads)) schedule(static) // All the host's threads; see `host_search::find`.
+    for(idx_t p = 0; p < asked_pages_; ++p)
+        asked_[p].store(0, std::memory_order_relaxed);
+
+    asked_c_ = 0;
+}
+
+
+template <typename T_sym_>
+bool Query_Engine<T_sym_>::drop_cached_sa(std::string& err) const
+{
+    std::lock_guard<std::mutex> lock(find_lock_);
+    if(!idx_.drop_cached_sa(err))
+        return false;
+
+    if(asked_ != nullptr)
+        forget_asked();
+
+    return true;
 }
 
 
@@ -990,12 +1058,15 @@ void Query_Engine<T_sym_>::find_host(const uint64_t* const off, const T_sym_* co
 
     // A mapped suffix array's pages come from the drives: those of a chunk's brackets are asked for once the device ranks it, so that the
     // kernel reads them while the host searches the chunk before.
-    const bool ahead = (opt_.host_prefetch && idx_.sa_residency() == Residency::mapped);
+    const bool ahead = (sa_files_.threads() > 0 && !chunk.empty());
     const auto prefetch = [&](const std::size_t c)
     {
         const Lane& l = lane_[c % STREAM_C];
         CUDA_CHECK(cudaStreamSynchronize(l.stream));
-        host_search::prefetch(SA, idx_.n(), l.br_h, chunk[c].second - chunk[c].first, opt_.host_threads);
+        idx_t refused = 0;
+        asked_c_ += host_search::prefetch(sa_files_, idx_.n(), l.br_h, chunk[c].second - chunk[c].first, asked_.get(), refused);
+        if(asked_c_ > asked_cap_)   // The page cache may have evicted the pages marked first: they are asked for anew.
+            forget_asked();
     };
 
     if(ahead)

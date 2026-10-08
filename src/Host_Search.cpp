@@ -5,14 +5,15 @@
 
 #include <omp.h>
 
-#include <sys/mman.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <climits>
 #include <cstring>
-#include <utility>
+#include <string>
 #include <vector>
 
 
@@ -368,14 +369,55 @@ void certify(const T_sym_* const T, const idx_t n, const uint8_t* const SA, cons
 }
 
 
-idx_t prefetch(const uint8_t* const SA, const idx_t n, const Rank_Range* const br, const idx_t q, const unsigned threads)
+bool SA_Files::open(const std::vector<std::string>& path, const std::vector<idx_t>& part_off, const unsigned threads, std::string& err)
 {
-    if(q == 0 || n == 0)
+    close();
+    if(path.empty() || path.size() != part_off.size() || threads == 0)
+    {
+        err = "the files of a suffix array open for a thread or more, with an offset for each";
+        return false;
+    }
+
+    fd_.reserve(std::size_t(threads) * path.size());
+    for(unsigned t = 0; t < threads; ++t)
+        for(const auto& p : path)
+        {
+            const int d = ::open(p.c_str(), O_RDONLY);
+            if(d < 0)
+            {
+                err = "cannot open " + p + ": " + std::strerror(errno);
+                close();
+                return false;
+            }
+
+            fd_.push_back(d);
+        }
+
+    part_off_ = part_off;
+    threads_ = threads;
+    return true;
+}
+
+
+void SA_Files::close()
+{
+    for(const int d : fd_)
+        ::close(d);
+
+    fd_.clear();
+    part_off_.clear();
+    threads_ = 0;
+}
+
+
+idx_t prefetch(const SA_Files& f, const idx_t n, const Rank_Range* const br, const idx_t q, std::atomic<uint8_t>* const asked, idx_t& refused)
+{
+    if(q == 0 || n == 0 || f.threads() == 0)
         return 0;
 
     const idx_t page = static_cast<idx_t>(::sysconf(_SC_PAGESIZE));
     const idx_t last_page = (SA_WIDTH * n - 1) / page;  // The suffix array's last; the padding past it needs no reading.
-    auto* const base = const_cast<uint8_t*>(SA);   // `madvise` takes a mutable address, but does not write.
+    const std::size_t parts = f.parts();
 
     // Returns in `[p0, p1]` the pages that the search of the ranks `r` reads: the entries of `r.first` to `r.last - 1`, 8 bytes at a
     // time, or those of its first probe if more than `PREFETCH_PAGES`; `p0 > p1` if none.
@@ -395,26 +437,69 @@ idx_t prefetch(const uint8_t* const SA, const idx_t n, const Rank_Range* const b
         }
     };
 
-    idx_t refused = 0;
+    const auto unasked = [&](const idx_t p) { return asked == nullptr || asked[p].load(std::memory_order_relaxed) == 0; };
+    idx_t asked_c = 0, refused_c = 0;
 
-    #pragma omp parallel for num_threads(static_cast<int>(thread_count(threads))) schedule(static) reduction(+ : refused)  // All the threads; see `find`.
-    for(idx_t g = 0; g < q; ++g)
+    #pragma omp parallel num_threads(static_cast<int>(f.threads())) reduction(+ : asked_c, refused_c) // All the threads of `find`; see there.
     {
-        idx_t a0, a1, b0, b1;
-        pages(br[2 * g], a0, a1);
-        pages(br[2 * g + 1], b0, b1);
-        if(a0 <= a1 && b0 <= b1 && b0 <= a1 + 1 && a0 <= b1 + 1)   // The boundaries' pages overlap or abut: one request.
-        {
-            a0 = std::min(a0, b0), a1 = std::max(a1, b1);
-            b0 = 1, b1 = 0;
-        }
+        const unsigned t = static_cast<unsigned>(omp_get_thread_num());
 
-        for(const auto& [p0, p1] : {std::pair<idx_t, idx_t>{a0, a1}, std::pair<idx_t, idx_t>{b0, b1}})
-            if(p0 <= p1 && ::madvise(base + p0 * page, (p1 - p0 + 1) * page, MADV_WILLNEED) != 0)
-                ++refused;
+        // Asks for the pages of `[p0, p1]` not yet asked for, in runs within a part: pages do not straddle parts.
+        const auto ask = [&](idx_t p0, const idx_t p1)
+        {
+            for(std::size_t i = 0; p0 <= p1; )
+            {
+                if(!unasked(p0))
+                {
+                    ++p0;
+                    continue;
+                }
+
+                while(i + 1 < parts && f.part_off(i + 1) <= p0 * page)
+                    ++i;
+
+                const idx_t end = std::min(p1 + 1, i + 1 < parts ? f.part_off(i + 1) / page : last_page + 1);
+                idx_t e = p0;
+                for(; e < end && unasked(e); ++e)
+                    if(asked != nullptr)
+                        asked[e].store(1, std::memory_order_relaxed);
+
+                if(e == p0) // Another thread asked for it meanwhile; an empty request would ask for the rest of the file.
+                {
+                    ++p0;
+                    continue;
+                }
+
+                asked_c += e - p0;
+                if(::posix_fadvise(f.fd(t, i), static_cast<off_t>(p0 * page - f.part_off(i)), static_cast<off_t>((e - p0) * page),
+                                   POSIX_FADV_WILLNEED) != 0)
+                    ++refused_c;
+
+                p0 = e;
+            }
+        };
+
+        #pragma omp for schedule(static)
+        for(idx_t g = 0; g < q; ++g)
+        {
+            idx_t a0, a1, b0, b1;
+            pages(br[2 * g], a0, a1);
+            pages(br[2 * g + 1], b0, b1);
+            if(a0 <= a1 && b0 <= b1 && b0 <= a1 + 1 && a0 <= b1 + 1)   // The boundaries' pages overlap or abut: one request.
+            {
+                a0 = std::min(a0, b0), a1 = std::max(a1, b1);
+                b0 = 1, b1 = 0;
+            }
+
+            if(a0 <= a1)
+                ask(a0, a1);
+            if(b0 <= b1)
+                ask(b0, b1);
+        }
     }
 
-    return refused;
+    refused += refused_c;
+    return asked_c;
 }
 
 

@@ -7,8 +7,11 @@
 #include "types.hpp"
 #include "query-file.hpp"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <string>
+#include <vector>
 
 
 // The host's search of a query index whose arrays are in host memory: the
@@ -61,16 +64,60 @@ template <typename T_sym_>
 void certify(const T_sym_* T, idx_t n, const uint8_t* SA, const uint64_t* off, const T_sym_* sym, idx_t q, const SA_Interval* I,
              unsigned long long& fail_c, unsigned long long& first, unsigned threads);
 
+// The part files of a mapped suffix array, open for asking the kernel to read
+// its pages ahead: a descriptor of every part for each of the threads that ask,
+// so that no two threads share a file, and the parts' byte offsets into the
+// array.
+class SA_Files
+{
+private:
+
+    std::vector<idx_t> part_off_;   // The parts' byte offsets into the array, in order.
+    std::vector<int> fd_;   // `fd_[t * parts + i]`: thread `t`'s descriptor of part `i`.
+    unsigned threads_ = 0;
+
+
+public:
+
+    SA_Files() = default;
+    ~SA_Files() { close(); }
+    SA_Files(const SA_Files&) = delete;
+    SA_Files& operator=(const SA_Files&) = delete;
+
+    // Opens the part files `path`, at the byte offsets `part_off` into the
+    // array, read-only, once for each of `threads` threads. Returns `false` with
+    // a reason in `err` on failure, leaving none open.
+    bool open(const std::vector<std::string>& path, const std::vector<idx_t>& part_off, unsigned threads, std::string& err);
+
+    // Closes the files.
+    void close();
+
+    // Returns the count of threads that the files are open for; `0` if closed.
+    unsigned threads() const { return threads_; }
+
+    // Returns the count of parts.
+    std::size_t parts() const { return part_off_.size(); }
+
+    // Returns thread `t`'s descriptor of part `i`.
+    int fd(const unsigned t, const std::size_t i) const { return fd_[t * part_off_.size() + i]; }
+
+    // Returns part `i`'s byte offset into the array.
+    idx_t part_off(const std::size_t i) const { return part_off_[i]; }
+};
+
+
 // Most pages of a bracket that `prefetch` asks for whole.
 constexpr idx_t PREFETCH_PAGES = 4;
 
 // Asks the kernel to read ahead, without waiting for them, the pages of the
-// mapped suffix array `SA` of `n` entries, starting at a page, that `find`
-// first probes in the brackets `br[0, 2q)`: all of a bracket's pages if they
-// are at most `PREFETCH_PAGES`, else the page of its first probe. `threads`
-// threads ask, `0` for OpenMP's default. Returns the count of requests that the
-// kernel refused.
-idx_t prefetch(const uint8_t* SA, idx_t n, const Rank_Range* br, idx_t q, unsigned threads);
+// mapped suffix array of `n` entries in the files `f` that `find` first probes
+// in the brackets `br[0, 2q)`: all of a bracket's pages if they are at most
+// `PREFETCH_PAGES`, else the page of its first probe. A page marked in `asked`,
+// a byte per page, is not asked for again, and those asked for are marked; if
+// `asked` is null, every page is asked for. As many threads ask as `f` is open
+// for, with their own descriptors. Returns the count of pages asked for; adds
+// the count of requests that the kernel refused to `refused`.
+idx_t prefetch(const SA_Files& f, idx_t n, const Rank_Range* br, idx_t q, std::atomic<uint8_t>* asked, idx_t& refused);
 
 // Copies `bytes` bytes from `src` to `dst` with `threads` threads, `0` for
 // OpenMP's default.

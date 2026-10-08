@@ -285,7 +285,7 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
     const auto drop = [&]
     {
         std::string e;
-        if(cold && !eng.index().drop_cached_sa(e))
+        if(cold && !eng.drop_cached_sa(e))
         {
             std::fprintf(stderr, "error: %s\n", e.c_str());
             std::exit(1);

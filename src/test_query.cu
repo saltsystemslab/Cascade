@@ -18,6 +18,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cinttypes>
 #include <climits>
 #include <cstdio>
@@ -25,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <numeric>
 #include <random>
@@ -544,9 +546,39 @@ bool check_host_search(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
     const uint8_t* const source[] = {SA.data(), idx.host_sa()};
     const char* const where[] = {"in memory", "mapped"};
 
-    // Pages of a mapped suffix array: of brackets as wide as it, too.
+    // The pages of the mapped suffix array asked for ahead: those that the brackets' searches probe first, of brackets as wide as the
+    // array too, each marked once, and none of the others; none refused.
+    host_search::SA_Files files;
+    CHECK(files.open(idx.meta().sa_part, idx.meta().sa_part_off, 3, err), "%s: %s", what, err.c_str());
     const std::vector<Rank_Range> whole(2 * q, Rank_Range{0, n});
-    CHECK(host_search::prefetch(idx.host_sa(), n, whole.data(), q, 3) == 0, "%s: the kernel refused to read the whole brackets' pages ahead", what);
+    const idx_t page = static_cast<idx_t>(::sysconf(_SC_PAGESIZE)), pages = (SA_WIDTH * n + page - 1) / page;
+    const Rank_Range* const bracket_sets[] = {whole.data(), br.data(), br_sorted.data()};
+    for(const Rank_Range* const b : bracket_sets)
+    {
+        std::vector<uint8_t> want_page(pages, 0);
+        for(idx_t k = 0; k < 2 * q; ++k)
+            if(b[k].last > b[k].first)
+            {
+                idx_t p0 = SA_WIDTH * b[k].first / page, p1 = std::min(pages - 1, (SA_WIDTH * b[k].last + 2) / page);
+                if(p1 - p0 + 1 > host_search::PREFETCH_PAGES)
+                {
+                    const idx_t mid = b[k].first + (b[k].last - b[k].first) / 2;
+                    p0 = SA_WIDTH * mid / page, p1 = std::min(pages - 1, (SA_WIDTH * mid + 7) / page);
+                }
+
+                std::fill(want_page.begin() + p0, want_page.begin() + p1 + 1, 1);
+            }
+
+        const std::unique_ptr<std::atomic<uint8_t>[]> asked(new std::atomic<uint8_t>[pages]());
+        idx_t refused = 0;
+        const idx_t c = host_search::prefetch(files, n, b, q, asked.get(), refused);
+        CHECK(refused == 0 && c >= static_cast<idx_t>(std::count(want_page.begin(), want_page.end(), 1)), "%s: %" PRIu64 " pages asked for ahead, "
+              "%" PRIu64 " requests refused", what, c, refused);
+        for(idx_t g = 0; g < pages; ++g)
+            CHECK(asked[g].load() == want_page[g], "%s: page %" PRIu64 " of %" PRIu64 " %s asked for ahead", what, g, pages,
+                  want_page[g] ? "not" : "wrongly");
+        CHECK(host_search::prefetch(files, n, b, q, asked.get(), refused) == 0 && refused == 0, "%s: pages asked for again", what);
+    }
 
     const char* const how[] = {"over the whole suffix array", "within brackets", "sorted, within brackets"};
     for(int s = 0; s < 2; ++s)
@@ -556,7 +588,11 @@ bool check_host_search(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
                 {
                     const Rank_Range* const b = (k == 0 ? nullptr : (k == 1 ? br.data() : br_sorted.data()));
                     if(s == 1 && b != nullptr)
-                        CHECK(host_search::prefetch(source[s], n, b, q, threads) == 0, "%s: the kernel refused to read the brackets' pages ahead", what);
+                    {
+                        idx_t refused = 0;
+                        host_search::prefetch(files, n, b, q, nullptr, refused);
+                        CHECK(refused == 0, "%s: the kernel refused to read the brackets' pages ahead", what);
+                    }
 
                     std::vector<SA_Interval> got(q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
                     host_search::find(T.data(), n, source[s], off.data(), sym.data(), q, b, k == 2 ? ids.data() : nullptr, got.data(), threads, lanes);
@@ -829,7 +865,7 @@ bool check_gpu_fixture(const std::vector<T_sym_>& T, const std::vector<T_sym_>& 
         // A mapped suffix array reads its pages anew once they are dropped.
         if(pl.sa_res == Residency::mapped)
         {
-            CHECK(eng.index().drop_cached_sa(err), "%s: %s", where.c_str(), err.c_str());
+            CHECK(eng.drop_cached_sa(err), "%s: %s", where.c_str(), err.c_str());
             if(!check_every_way(eng, off, sym, want, where + ", its pages dropped"))
                 return false;
         }
@@ -1296,6 +1332,68 @@ bool test_scan_sa()
     return true;
 }
 
+
+
+// Checks the pages of a mapped suffix array that the host asks for ahead, on
+// brackets picked for their edges: one whose searches read past its page, one
+// within a page, one as wide as the array, one at its end, empty ones, two that
+// share pages, and one across the parts' border; with each page asked for once,
+// and each of a part from its own file.
+bool test_prefetch_pages()
+{
+    std::string err;
+    const idx_t n = 50000, page = static_cast<idx_t>(::sysconf(_SC_PAGESIZE));
+    const idx_t last = (SA_WIDTH * n - 1) / page;   // The suffix array's last page.
+    const auto dir = scratch_dir("prefetch");
+    Index_Meta m;
+    CHECK(write_index(dir, std::vector<uint16_t>(n), std::vector<uint8_t>(SA_WIDTH * n), 2, err) && index_meta::read(dir.string(), m, err),
+          "%s", err.c_str());
+    const idx_t border = m.sa_part_off[1] / page;   // The second part's first page.
+    const idx_t r = border * page / SA_WIDTH;   // The rank whose entry ends past the border, or the one before it.
+
+    // A query's brackets, and the bytes its searches read first: `[5 first, 5 (last - 1) + 8)`, or those of the first probe if wider.
+    const std::vector<Rank_Range> br =
+    {
+        {0, 819}, {7, 7},
+        {4100, 4105}, {4100, 4105},
+        {0, n}, {n, n},
+        {n - 3, n}, {n, n},
+        {10000, 10010}, {10010, 10830},
+        {r - 2, r + 2}, {r - 2, r + 2},
+        {5, 5}, {9, 9},
+    };
+    const std::vector<std::pair<idx_t, idx_t>> bytes =    // The bytes read first, by bracket.
+    {
+        {0, SA_WIDTH * 818 + 7},
+        {SA_WIDTH * 4100, SA_WIDTH * 4104 + 7},
+        {SA_WIDTH * (n / 2), SA_WIDTH * (n / 2) + 7},
+        {SA_WIDTH * (n - 3), SA_WIDTH * (n - 1) + 7},
+        {SA_WIDTH * 10000, SA_WIDTH * 10009 + 7}, {SA_WIDTH * 10010, SA_WIDTH * 10829 + 7},
+        {SA_WIDTH * (r - 2), SA_WIDTH * (r + 1) + 7},
+    };
+    std::vector<uint8_t> want(last + 1, 0);
+    for(const auto& [b0, b1] : bytes)
+        for(idx_t g = b0 / page; g <= std::min(last, b1 / page); ++g)
+            want[g] = 1;
+    CHECK(want[border - 1] && want[border], "the brackets must cross the parts' border");
+
+    const idx_t q = br.size() / 2, want_c = std::count(want.begin(), want.end(), 1);
+    for(const unsigned threads : {1u, 3u})
+    {
+        host_search::SA_Files f;
+        CHECK(f.open(m.sa_part, m.sa_part_off, threads, err), "%s", err.c_str());
+        const std::unique_ptr<std::atomic<uint8_t>[]> asked(new std::atomic<uint8_t>[last + 1]());
+        idx_t refused = 0;
+        const idx_t c = host_search::prefetch(f, n, br.data(), q, asked.get(), refused);
+        CHECK(refused == 0 && (threads == 1 ? c == want_c : c >= want_c), "%u threads: %" PRIu64 " pages asked for, not %" PRIu64 "; %" PRIu64
+              " requests refused", threads, c, want_c, refused);
+        for(idx_t g = 0; g <= last; ++g)
+            CHECK(asked[g].load() == want[g], "%u threads: page %" PRIu64 " %s asked for", threads, g, want[g] ? "not" : "wrongly");
+        CHECK(host_search::prefetch(f, n, br.data(), q, asked.get(), refused) == 0 && refused == 0, "%u threads: pages asked for again", threads);
+    }
+
+    return true;
+}
 }
 
 
@@ -1319,6 +1417,7 @@ int main()
         {"host search vs oracle",   test_host_search,           false},
         {"index load, host tiers",  test_index_host_tiers,      false},
         {"suffix-array streaming",  test_scan_sa,               false},
+        {"pages read ahead",        test_prefetch_pages,        false},
         {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
         {"pipeline",                test_pipeline,              true},

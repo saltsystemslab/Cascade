@@ -15,6 +15,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <array>
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -126,6 +128,11 @@ private:
     std::array<Lane, STREAM_C> lane_;   // The streams of `find`.
     mutable std::mutex find_lock_;  // Held by `find`, which owns the lanes.
     cudaMemPool_t pool_ = nullptr;  // Scratch memory of `find_async`, kept across batches.
+    host_search::SA_Files sa_files_;    // A mapped suffix array's files, for the host to ask for its pages ahead, if it does.
+    std::unique_ptr<std::atomic<uint8_t>[]> asked_; // Per page of the files, whether the host asked for it since the marks were last cleared.
+    idx_t asked_pages_ = 0; // Pages of the marks.
+    idx_t asked_cap_ = 0;   // Most pages marked before the marks are cleared: about the room of the page cache, which may evict them.
+    mutable idx_t asked_c_ = 0; // Pages marked since the marks were last cleared.
 
 
     // Allocates the lanes for chunks of the options' sizes, and the pool.
@@ -134,6 +141,14 @@ private:
 
     // Frees the lanes and the pool.
     void release_lanes();
+
+    // Opens a mapped suffix array's files for each of the host's threads, and
+    // the marks of the pages asked for, if the host asks for pages ahead; else
+    // closes them. Returns `false` with a reason in `err` on failure.
+    bool open_sa_files(std::string& err);
+
+    // Clears the marks of the pages asked for.
+    void forget_asked() const;
 
     // Searches the device-side queries `sym[off[i] - off0, off[i + 1] - off0)`,
     // `i < q`, into `out[0, q)`, with the two-phase search's buffers `space` of
@@ -228,6 +243,12 @@ public:
     // Returns `true` iff the host searches the loaded index: its arrays are in
     // host memory, and the device cannot access either.
     bool host_searches() const { return idx_.loaded() && !idx_.device_accessible(); }
+
+    // Drops the pages of a mapped suffix array from the page cache, as
+    // `Suffix_Index::drop_cached_sa` does, so that they are asked for anew.
+    // Waits for a running `find`. Returns `false` with a reason in `err` on
+    // failure, or if the suffix array is not mapped.
+    bool drop_cached_sa(std::string& err) const;
 
     // Returns the loaded index.
     const Suffix_Index& index() const { return idx_; }
