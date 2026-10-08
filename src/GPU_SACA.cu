@@ -193,7 +193,7 @@ void GPU_SACA<T_sym_>::build_SA()
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_5 = now();
-    build_timing_.exponentiate = duration(t_5 - t_4);
+    build_timing_.exponentiate = duration(t_5 - t_4) - build_timing_.reload_pid;
     std::cerr << "Prefix-exponentiation completed. Time taken: " << build_timing_.exponentiate << "s.\n";
 
     // Free the inboxes' scratch-space ahead of the suffix array's output.
@@ -208,7 +208,7 @@ void GPU_SACA<T_sym_>::build_SA()
 
     {   PROFILE_SCOPE("drop_backend");              backend_.reset();   spill_->cleanup();   }
 
-    build_timing_.n = n_, build_timing_.p = p_, build_timing_.gen_c = cohort_sz.size();
+    build_timing_.n = n_, build_timing_.p = p_, build_timing_.gen_c = cohort_sz.size(), build_timing_.pid_spill = pid_spill_;
 }
 
 
@@ -1004,8 +1004,9 @@ void GPU_SACA<T_sym_>::reload_partition_IDs()
 
     backend_->raise_cap(std::max(n_ * sizeof(T_sym_), P_id.bytes()) + flag_bytes - P_id.bytes());
 
-    const auto t = timer::duration(timer::now() - t_0);
-    std::cerr << "Partition-ID map reloaded. Time taken: " << t << "s (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / t) << " GBs/s).\n";
+    build_timing_.reload_pid = timer::duration(timer::now() - t_0);
+    std::cerr   << "Partition-ID map reloaded. Time taken: " << build_timing_.reload_pid << "s"
+                << " (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / build_timing_.reload_pid) << " GBs/s).\n";
 }
 
 

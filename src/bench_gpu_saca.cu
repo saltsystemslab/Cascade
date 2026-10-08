@@ -136,10 +136,12 @@ int main(int argc, char** argv)
     rec.t_partition    = bt.partition;
     rec.t_device_setup = bt.device_setup;
     rec.t_initial_rank = bt.initial_rank;
+    rec.t_reload_pid   = bt.reload_pid;
     rec.t_exponentiate = bt.exponentiate;
     rec.t_concatenate  = bt.concatenate;
     rec.n_partitions   = bt.p;
     rec.n_generations  = bt.gen_c;
+    rec.pid_spill      = bt.pid_spill;
 
     // `t_build` is the driver's own wall time around build_SA(); t_load + t_core
     // should account for it, and a gap is worth digging.

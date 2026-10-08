@@ -356,7 +356,7 @@ struct Record
     // a change to what a timing measures; records across majors do not mix.
     // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
-    static constexpr int schema_minor = 3;
+    static constexpr int schema_minor = 4;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     // Which build of that commit. The commit alone does not identify the
@@ -396,8 +396,9 @@ struct Record
 
     // Our method's phase breakdown. -1 for the baselines.
     double      t_prepage_pid = -1, t_pivots = -1, t_partition = -1, t_device_setup = -1,
-                t_initial_rank = -1, t_exponentiate = -1, t_concatenate = -1;
+                t_initial_rank = -1, t_reload_pid = -1, t_exponentiate = -1, t_concatenate = -1;
     int64_t     n_partitions = -1, n_generations = -1;
+    int64_t     pid_spill = -1; // Whether the partition-ID map stayed on disk until the initial ranking completed.
 
     std::string notes;
 
@@ -435,8 +436,9 @@ struct Record
         J_NUM(compact_stall);J_NUM(numa_local);    J_NUM(numa_other);
         J_NUM(buddy_free);   J_NUM(buddy_free_huge);
         J_NUM(t_prepage_pid);  J_NUM(t_pivots);      J_NUM(t_partition);
-        J_NUM(t_device_setup); J_NUM(t_initial_rank);J_NUM(t_exponentiate);
-        J_NUM(t_concatenate);  J_NUM(n_partitions);  J_NUM(n_generations);
+        J_NUM(t_device_setup); J_NUM(t_initial_rank);J_NUM(t_reload_pid);
+        J_NUM(t_exponentiate); J_NUM(t_concatenate); J_NUM(n_partitions);
+        J_NUM(n_generations);  J_NUM(pid_spill);
         J_STR(notes);
 
         #undef J_NUM
