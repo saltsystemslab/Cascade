@@ -643,6 +643,76 @@ def cmd_run(a):
     sys.exit(0 if status == "ok" else 1)
 
 
+# Cuts prefixes of a corpus at `targets` billion symbols each, every one ending
+# just before the last separator at or below its target, so the prefix is whole
+# documents and still leads with one. One pass over the source feeds every
+# prefix, counting documents and hashing as it goes: corpora.tsv needs both
+# exact, since find_input matches on size and emit_offsets dies on a doc-count
+# mismatch.
+def cmd_cut(a):
+    r = row(a.corpus_root, a.corpus, a.tokenizer)
+    src = find_input(a.corpus_root, r)
+    arr = np.memmap(src, dtype="<u2", mode="r")
+    tsv = os.path.join(a.corpus_root, "corpora.tsv")
+
+    # The boundary of each prefix, from a window below its target: c4 averages
+    # ~543 symbols a document, so 1 MiB holds hundreds of separators.
+    cuts = []
+    for t in a.targets:
+        want = int(t * 1e9)
+        if want > arr.shape[0]:
+            print(f"  skip        {t}B > {arr.shape[0]:,} symbols in the source")
+            continue
+
+        lo = max(0, want - (1 << 19))
+        idx = np.flatnonzero(np.asarray(arr[lo:want]) == SEP)
+        if not idx.size:
+            die(f"no separator in the 1 MiB below {want:,}; widen the window")
+
+        lab = f"{a.prefix}{t:g}".replace(".", "_")   # 0.5 -> c4p0_5, 8 -> c4p8
+        cuts.append([lab, lo + int(idx[-1])])    # Exclusive: that separator starts the next document.
+
+    print(f"  source      {src}\n  prefixes    " + ", ".join(f"{l}@{e:,}" for l, e in cuts))
+    out = []
+    for lab, end in cuts:
+        d = os.path.join(a.corpus_root, lab)
+        os.makedirs(d, exist_ok=True)
+        f = open(os.path.join(d, f"{lab}-{r['tokenizer']}.tokenized.bin"), "wb")
+        out.append([lab, end, f, hashlib.sha256(), 0])
+
+    # One sequential read of the longest prefix, fanned out to the shorter ones.
+    pos, t0 = 0, time.monotonic()
+    while pos < max(e for _, e in cuts):
+        hi = min(pos + (1 << 27), max(e for _, e in cuts))
+        buf = np.asarray(arr[pos:hi])
+        sep = np.flatnonzero(buf == SEP)
+        for o in out:
+            if o[1] <= pos:
+                continue
+
+            take = min(o[1], hi) - pos
+            buf[:take].tofile(o[2])
+            o[3].update(memoryview(buf).cast("B")[:2 * take])
+            o[4] += int(np.searchsorted(sep, take))
+        pos = hi
+
+    print(f"  wrote       {sum(e for _, e in cuts) * 2 / 2**30:.1f} GiB in "
+          f"{time.monotonic() - t0:.0f}s")
+    with open(tsv, "a") as tf:
+        for lab, end, f, h, docs in out:
+            f.close()
+            path = os.path.join(a.corpus_root, lab, f"{lab}-{r['tokenizer']}.tokenized.bin")
+            if os.path.getsize(path) != 2 * end:
+                die(f"{path} is {os.path.getsize(path)}, want {2 * end}")
+
+            os.chmod(path, 0o444)
+            tf.write("\t".join((lab, r["tokenizer"], "first", str(end - docs), str(docs),
+                                 str(2 * end), h.hexdigest(),
+                                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()))) + "\n")
+            print(f"  {lab:<9} {end:>13,} sym  {docs:>12,} docs  "
+                  f"{end - docs:>13,} tok  ratio {ratio_of(2 * end)}")
+
+
 # Runs our own builder end to end on the staged input, dumping the suffix array
 # to the node-local drive so the output cost lands inside its concatenate phase
 # (bench_gpu_saca.cu:129), as their concat does in build_sa.
@@ -746,6 +816,15 @@ def main():
     q.add_argument("--no-chmod", action="store_true")
     q.add_argument("--force", action="store_true")
     q.set_defaults(fn=cmd_prep)
+
+    q = s.add_parser("cut", parents=[common], help="write prefix corpora and their corpora.tsv rows")
+    q.add_argument("corpus")
+    q.add_argument("--tokenizer")
+    q.add_argument("--targets", required=True,
+                   help="comma-separated billions of symbols, e.g. 0.5,1,2,4")
+    q.add_argument("--prefix", default="c4p")
+    q.set_defaults(fn=lambda a: (setattr(a, "targets",
+                   [float(x) for x in a.targets.split(",")]), cmd_cut(a))[1])
 
     q = s.add_parser("stage", parents=[common], help="copy a corpus's input to the node-local drive")
     q.add_argument("corpus")
