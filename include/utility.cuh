@@ -123,7 +123,7 @@ namespace gpu_saca  // TODO: why are all the following in the parent namespace?
 
 
     // Returns the most device-memory held at once, in bytes, since the last
-    // `device_peak_reset`, or since the process started if there was none.
+    // `reset_device_peak`, or since the process started if there was none.
     inline std::size_t device_peak_bytes()
     {
         const std::lock_guard<std::mutex> lock(dev_mem::mut);

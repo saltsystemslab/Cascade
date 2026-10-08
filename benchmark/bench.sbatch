@@ -290,9 +290,17 @@ if [ -n "${OURS_TAG}" ]; then
     fi
 
     if [ "${BUILD_IN_JOB:-1}" = 1 ]; then
-        # Same split as the baselines: configure needs network (concurrentqueue is
-        # fetched), compiling needs cores. A tag predating the driver cannot build,
-        # which is the intended signal that it is not benchmarkable under this policy.
+        # NOT the same split as the baselines. They are FetchContent, which
+        # downloads at configure; concurrentqueue is ExternalProject_Add, which
+        # downloads at BUILD, into the worktree's `external/`. So configuring on
+        # a login node does not spare a network-less compute node -- the fetch
+        # fails here instead, at 6% with a tar error. Pre-fetch once per
+        # worktree, wherever there is network:
+        #
+        #   cmake --build <build> --target prj_concurrentqueue
+        #
+        # A tag predating the driver cannot build, which is the intended signal
+        # that it is not benchmarkable under this policy.
         # -DSTATS=ON adds statistics measurable cheaply: partition-size distribution,
         # residency plan, and per-generation active set sizes (corpus's LCP distribution
         # on a dyadic ladder. Cost is a handful of `O(p)` loops and some stderr-logging.
