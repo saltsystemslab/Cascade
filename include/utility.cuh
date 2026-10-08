@@ -11,6 +11,8 @@
 #include <cstdint>
 #include <iostream>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_map>
 
 
 // CUDA error-checker.
@@ -60,6 +62,63 @@ namespace gpu_saca  // TODO: why are all the following in the parent namespace?
     inline auto deallocate_host(void* const ptr)
     {
         return cudaFreeHost(ptr);
+    }
+
+
+    // Device-memory accounting, so a record can report the peak the run actually
+    // held.
+    namespace dev_mem
+    {
+        inline std::mutex mut;
+        inline std::unordered_map<const void*, std::size_t> block;
+        inline std::size_t live = 0;
+        inline std::size_t peak = 0;
+    }
+
+
+    // Allocates `bytes` of device-memory and places its address at `ptr`,
+    // counting it toward the peak. Returns CUDA error-type encountered, if any.
+    template <typename T_>
+    auto device_allocate(T_** const ptr, const std::size_t bytes)
+    {
+        const auto err = cudaMalloc(reinterpret_cast<void**>(ptr), bytes);
+        if(err != cudaSuccess)
+            return err;
+
+        const std::lock_guard<std::mutex> lock(dev_mem::mut);
+        dev_mem::block.emplace(*ptr, bytes);
+        dev_mem::live += bytes;
+        if(dev_mem::live > dev_mem::peak)
+            dev_mem::peak = dev_mem::live;
+
+        return err;
+    }
+
+
+    // Deallocates the device-pointer `ptr`, allocated with `device_allocate`.
+    // Returns CUDA error-type encountered, if any.
+    inline auto device_free(const void* const ptr)
+    {
+        {
+            const std::lock_guard<std::mutex> lock(dev_mem::mut);
+            const auto it = dev_mem::block.find(ptr);
+            if(it != dev_mem::block.end())
+            {
+                dev_mem::live -= it->second;
+                dev_mem::block.erase(it);
+            }
+        }
+
+        return cudaFree(const_cast<void*>(ptr));
+    }
+
+
+    // Returns the most device-memory held at once, in bytes, since the process
+    // started.
+    inline std::size_t device_peak_bytes()
+    {
+        const std::lock_guard<std::mutex> lock(dev_mem::mut);
+        return dev_mem::peak;
     }
 
 

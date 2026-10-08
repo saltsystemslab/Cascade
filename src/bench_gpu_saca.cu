@@ -4,6 +4,7 @@
 // baselines, and building this does not drag in the baselines' network fetches.
 
 #include "GPU_SACA.hpp"
+#include "utility.cuh"
 
 #include "../benchmark/bench.hpp"
 
@@ -129,6 +130,9 @@ int main(int argc, char** argv)
     rec.t_core = bt.core();
     rec.t_write = a.sa_out.empty() ? 0.0 : -1.0;    // The dump is interleaved with the shuffle across a pool of writer threads,
                                                     // as such its cost cannot be separated out.
+    // The high-water mark, not a `cudaMemGetInfo` delta: the GPU is shared, so a
+    // free-delta would pick up whatever else is resident between two samples.
+    rec.peak_device = static_cast<int64_t>(gpu_saca::device_peak_bytes());
 
     // The phases as fields.
     rec.t_prepage_pid  = bt.prepage_pid;

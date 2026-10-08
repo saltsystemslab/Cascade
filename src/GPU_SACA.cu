@@ -99,20 +99,20 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     {
         for(std::size_t r = 0; r < 2; ++r)
         {
-            CUDA_CHECK(cudaFree(key_buf[b][r]));
-            CUDA_CHECK(cudaFree(suf_buf[b][r]));
-            CUDA_CHECK(cudaFree(perm_buf[b][r]));
-            CUDA_CHECK(cudaFree(beta_buf[b][r]));
+            CUDA_CHECK(device_free(key_buf[b][r]));
+            CUDA_CHECK(device_free(suf_buf[b][r]));
+            CUDA_CHECK(device_free(perm_buf[b][r]));
+            CUDA_CHECK(device_free(beta_buf[b][r]));
         }
 
-        CUDA_CHECK(cudaFree(workspace_buf[b]));
-        CUDA_CHECK(cudaFree(is_active_buf[b]));
-        CUDA_CHECK(cudaFree(msg_off_buf[b]));
+        CUDA_CHECK(device_free(workspace_buf[b]));
+        CUDA_CHECK(device_free(is_active_buf[b]));
+        CUDA_CHECK(device_free(msg_off_buf[b]));
     }
 
-    CUDA_CHECK(cudaFree(active_set_sz_d));
-    CUDA_CHECK(cudaFree(unserved_c_d));
-    CUDA_CHECK(cudaFree(pill_c_d));
+    CUDA_CHECK(device_free(active_set_sz_d));
+    CUDA_CHECK(device_free(unserved_c_d));
+    CUDA_CHECK(device_free(pill_c_d));
 }
 
 
@@ -525,20 +525,20 @@ bool GPU_SACA<T_sym_>::allocate_device_space()
         {
             for(std::size_t r = 0; r < 2; ++r)  // For each buffer in the radix-sort ping-pong
             {
-                CUDA_CHECK(cudaMalloc(&key_buf[b][r], P_sz_max * DEV_KEY_BYTES));
-                CUDA_CHECK(cudaMalloc(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
-                CUDA_CHECK(cudaMalloc(&perm_buf[b][r], P_sz_max * sizeof(p_sz_t)));
-                CUDA_CHECK(cudaMalloc(&beta_buf[b][r], P_sz_max * sizeof(beta_t)));
+                CUDA_CHECK(device_allocate(&key_buf[b][r], P_sz_max * DEV_KEY_BYTES));
+                CUDA_CHECK(device_allocate(&suf_buf[b][r], P_sz_max * sizeof(idx_t)));
+                CUDA_CHECK(device_allocate(&perm_buf[b][r], P_sz_max * sizeof(p_sz_t)));
+                CUDA_CHECK(device_allocate(&beta_buf[b][r], P_sz_max * sizeof(beta_t)));
             }
 
-            CUDA_CHECK(cudaMalloc(&workspace_buf[b], workspace_sz));
-            CUDA_CHECK(cudaMalloc(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
-            CUDA_CHECK(cudaMalloc(&msg_off_buf[b], (p_ + 1) * sizeof(p_sz_t)));
+            CUDA_CHECK(device_allocate(&workspace_buf[b], workspace_sz));
+            CUDA_CHECK(device_allocate(&is_active_buf[b], P_sz_max * sizeof(uint8_t)));
+            CUDA_CHECK(device_allocate(&msg_off_buf[b], (p_ + 1) * sizeof(p_sz_t)));
         }
 
-        CUDA_CHECK(cudaMalloc(&active_set_sz_d, p_ * sizeof(idx_t)));
-        CUDA_CHECK(cudaMalloc(&unserved_c_d, sizeof(idx_t)));
-        CUDA_CHECK(cudaMalloc(&pill_c_d, sizeof(idx_t)));
+        CUDA_CHECK(device_allocate(&active_set_sz_d, p_ * sizeof(idx_t)));
+        CUDA_CHECK(device_allocate(&unserved_c_d, sizeof(idx_t)));
+        CUDA_CHECK(device_allocate(&pill_c_d, sizeof(idx_t)));
     }
 
     return true;
@@ -753,7 +753,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     if(!pivots.empty())
     {
         const auto pivots_bytes = pivots.size() * sizeof(Pivot_Key);
-        CUDA_CHECK(cudaMalloc(&pivots_d, pivots_bytes));
+        CUDA_CHECK(device_allocate(&pivots_d, pivots_bytes));
         CUDA_CHECK(cudaMemcpy(pivots_d, pivots.data(), pivots_bytes, cudaMemcpyHostToDevice));
     }
 
@@ -768,7 +768,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     idx_t* P_sz_d;  // Global partition-size histogram at the device.
     {
-        CUDA_CHECK(cudaMalloc(&P_sz_d, p_ * sizeof(idx_t)));
+        CUDA_CHECK(device_allocate(&P_sz_d, p_ * sizeof(idx_t)));
         CUDA_CHECK(cudaMemset(P_sz_d, 0, p_ * sizeof(idx_t)));
     }
 
@@ -793,9 +793,9 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         const auto p_id_word_c = Partition_ID_Map::packed_word_c(buf_sz, P_id.bits());
         for(std::size_t b = 0; b < STREAM_C; ++b)
         {
-            CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
-            CUDA_CHECK(cudaMalloc(P_id_buf + b, p_id_buf_bytes));
-            CUDA_CHECK(cudaMalloc(P_id_word_buf + b, p_id_word_c * sizeof(uint64_t)));
+            CUDA_CHECK(device_allocate(T_buf + b, text_buf_bytes));
+            CUDA_CHECK(device_allocate(P_id_buf + b, p_id_buf_bytes));
+            CUDA_CHECK(device_allocate(P_id_word_buf + b, p_id_word_c * sizeof(uint64_t)));
             CUDA_CHECK(pinned_allocate_host(T_stage[b], buf_sz + K - 1));
             CUDA_CHECK(pinned_allocate_host(P_id_stage[b], p_id_word_c));
         }
@@ -850,12 +850,12 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
 
     // Free the buffers.
-    CUDA_CHECK(cudaFree(pivots_d));
+    CUDA_CHECK(device_free(pivots_d));
     for(std::size_t b = 0; b < STREAM_C; ++b)
     {
-        CUDA_CHECK(cudaFree(T_buf[b]));
-        CUDA_CHECK(cudaFree(P_id_buf[b]));
-        CUDA_CHECK(cudaFree(P_id_word_buf[b]));
+        CUDA_CHECK(device_free(T_buf[b]));
+        CUDA_CHECK(device_free(P_id_buf[b]));
+        CUDA_CHECK(device_free(P_id_word_buf[b]));
         CUDA_CHECK(deallocate_host(T_stage[b]));
         CUDA_CHECK(deallocate_host(P_id_stage[b]));
     }
@@ -864,7 +864,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     {
         P_cap.resize(p_);
         CUDA_CHECK(cudaMemcpy(P_cap.data(), P_sz_d, p_ * sizeof(idx_t), cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaFree(P_sz_d));
+        CUDA_CHECK(device_free(P_sz_d));
 
         P_off.resize(p_);
         P_off[0] = 0;
