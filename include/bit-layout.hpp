@@ -90,13 +90,20 @@ CUDA_SPECIFIER inline idx_t tag_of(const idx_t w) { return w >> TAG_SHIFT; }
 CUDA_SPECIFIER inline idx_t retag(const idx_t w, const idx_t tag) { return pack(w & VAL_MASK, tag); }
 
 // Returns the forward tag for a suffix whose secondary-source of the next
+// generation is the suffix `tgt`, of an `n`-length text, where `id(x)` returns
+// the partition-ID of the `x`'th suffix. Real partition-IDs are biased up by
+// `ell`, reserving the bottom `ell` tag-values for sources lying past the text's
+// end. Reserved value decreases as the source runs farther past, ordering the
+// shorter of two such sources first. In absence of a text-terminator, this keeps
+// the ranking prefix-aware.
+template <typename F_>
+inline idx_t fwd_tag(const F_& id, const idx_t tgt, const idx_t n, const idx_t ell) { return tgt < n ? static_cast<idx_t>(id(tgt)) + ell : (n + ell - 1 - tgt); }
+
+// Returns the forward tag for a suffix whose secondary-source of the next
 // generation is the suffix `tgt`, of an `n`-length text with partition-ID map
-// `P_id`. Real partition-IDs are biased up by `ell`, reserving the bottom `ell`
-// tag-values for sources lying past the text's end. Reserved value decreases as
-// the source runs farther past, ordering the shorter of two such sources first.
-// In absence of a text-terminator, this keeps the ranking prefix-aware.
+// `P_id`.
 inline idx_t fwd_tag(const Partition_ID_Map& P_id, const idx_t tgt, const idx_t n, const idx_t ell)
-{ return tgt < n ? static_cast<idx_t>(P_id[tgt]) + ell : (n + ell - 1 - tgt); }
+{ return fwd_tag([&P_id](const idx_t x){ return P_id[x]; }, tgt, n, ell); }
 
 // Returns the suffix-index held in word `w`.
 CUDA_SPECIFIER inline idx_t suffix_of(const idx_t w) { return value_of(w); }

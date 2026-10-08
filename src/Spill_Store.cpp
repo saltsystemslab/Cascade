@@ -181,6 +181,12 @@ std::string Spill_Store::path(const p_id_t p_id, const Spill_Role role) const
 }
 
 
+std::string Spill_Store::pid_path() const
+{
+    return (std::filesystem::path(drive_root_.front()) / run_dir_ / "pid_map").string();
+}
+
+
 Direct_File Spill_Store::open(p_id_t p_id, Spill_Role role, Direct_File::Mode mode) const
 {
     return Direct_File(path(p_id, role), mode);
