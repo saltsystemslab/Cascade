@@ -22,6 +22,18 @@ GiB = 1 << 30
 # numbers actually incomparable.
 SCHEMA = (6, 4)
 
+# What each minor added. Declaring a minor is a claim to carry these, so a
+# record that omits one has an emitter that fell behind -- which is a different
+# thing from a field that does not apply to the method, and the two are what a
+# bare -1 cannot tell apart. `peak_device` read as "inapplicable" for a month on
+# exactly that ambiguity. Register a field here when you bump the minor; every
+# emitter is then checked, not just the one you happened to edit.
+FIELDS_BY_MINOR = {
+    2: ("build_config",),
+    3: ("placement",),
+    4: ("io_rchar", "io_wchar", "io_read_bytes", "io_write_bytes"),
+}
+
 # A run is comparable to another run only if the machine was in the same state.
 # thp_alloc + thp_fallback is a constant of the workload separates the good runs
 # from the bad ones:
@@ -107,6 +119,21 @@ def check(runs):
     if ahead:
         warn.append(f"records at {ahead} were written by a newer harness than this "
                     f"summarizer ({SCHEMA[0]}.{SCHEMA[1]}); fields it does not know are ignored")
+    behind = {}
+    for r in runs:
+        v = schema_of(r)
+        if v is None or v[0] != SCHEMA[0]:
+            continue
+        for minor, fields in FIELDS_BY_MINOR.items():
+            if minor > v[1]:
+                continue
+            for f in fields:
+                if f not in r:
+                    behind.setdefault((r.get("method", "?"), f"{v[0]}.{v[1]}"), set()).add(f)
+    for (method, ver), fs in sorted(behind.items()):
+        warn.append(f"{method} records declare schema {ver} but omit {sorted(fs)}: "
+                    "the emitter is behind, not the field inapplicable")
+
     commits = {r.get("commit", "unknown") for r in runs}
     if "unknown" in commits:
         warn.append("some records have commit=unknown: CMake did not pass BENCH_COMMIT")
@@ -117,14 +144,24 @@ def check(runs):
     # One commit is not one binary. `bench.sbatch`'s --ours path configured
     # without PREF_KEY_WORDS for a long time, so the same source could be built
     # narrow or wide with nothing in the record to tell them apart.
+    # Per method, not across the campaign: a build identifies one method's
+    # binary, so two methods differing is expected -- our method builds from a
+    # worktree with its own prefix-key width, and infini-gram is upstream's
+    # prebuilt. Only the same method built two ways is incomparable.
     # Records predating the field do not carry it; absent is "not measured",
     # not a bad value, so they sit this check out the way pre-schema-6 records
     # sit out the fragmentation one.
-    configs = {r["build_config"] for r in runs if "build_config" in r}
-    if "unknown" in configs:
-        warn.append("some records have build_config=unknown: CMake did not pass BENCH_BUILD_CONFIG")
-    if len(configs - {"unknown"}) > 1:
-        warn.append(f"records span build configurations {sorted(configs)}: not comparable")
+    by_method = {}
+    for r in runs:
+        if "build_config" in r:
+            by_method.setdefault(r.get("method", "?"), set()).add(r["build_config"])
+    for method, configs in sorted(by_method.items()):
+        if "unknown" in configs:
+            warn.append(f"some {method} records have build_config=unknown: "
+                        "CMake did not pass BENCH_BUILD_CONFIG")
+        if len(configs - {"unknown"}) > 1:
+            warn.append(f"{method} records span build configurations "
+                        f"{sorted(configs)}: not comparable")
     hosts = {r.get("host") for r in runs}
     if len(hosts) > 1:
         warn.append(f"runs spanned hosts {sorted(hosts)}: timings are not comparable")
