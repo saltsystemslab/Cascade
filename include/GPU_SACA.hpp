@@ -59,6 +59,7 @@ private:
     // Assumed worst-case ratio of actual max partition-size to the target
     // estimated during pivots-selection.
     static constexpr double PART_SZ_IMBALANCE_SLACK = 1.20;
+    inline static const double IMBALANCE_SLACK = env::get_f64("GPU_SACA_IMBALANCE_SLACK").value_or(PART_SZ_IMBALANCE_SLACK);    // The slack in effect.
 
     const idx_t n_; // Size of the text.
     T_sym_* T_h_;   // Text.
@@ -73,9 +74,10 @@ private:
 
     std::vector<Pivot_Key> pivots;  // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
-    Partition_ID_Map P_id;  // Partition-IDs of the suffixes.
-    bool pid_spill_;    // Whether `Π` is kept on disk through partitioning, as set by `GPU_SACA_PID_SPILL`.
+    Partition_ID_Map P_id;  // Partition-IDs of the suffixes, with their retirement-flags; the flags alone while `Π` is on disk.
+    bool pid_spill_;    // Whether `Π` is kept on disk until the initial ranking completes.
     Direct_File pid_file_;  // File of `Π`'s words, while it is on disk.
+    Partition_ID_Map P_id_check_;   // Copy of `Π` while it is on disk, for the tests' checks.
 
     std::vector<idx_t> P_cap;   // Full initial sizes of the partitions.
     std::vector<idx_t> Active_sz;   // Active-set sizes of the suffix partitions.
@@ -96,6 +98,9 @@ private:
         static constexpr idx_t CHUNK_CAP = (idx_t(1) << 21);
         inline static const idx_t PREFETCH_DEPTH = env::get_u64("GPU_SACA_PREFETCH_DEPTH").value_or(0); // Complete partitions to stage ahead for the device-dispatcher.
         inline static const idx_t WRITEBACK_DEPTH = env::get_u64("GPU_SACA_WRITEBACK_DEPTH").value_or(0);   // Complete partitions to stage ahead to return to the backend.
+        inline static const idx_t READER_C = env::get_u64("GPU_SACA_READER_C").value_or(24);    // Reader-threads count. TODO: tune default.
+        inline static const idx_t WRITER_C = env::get_u64("GPU_SACA_WRITER_C").value_or(8); // Writer-threads count. TODO: tune default.
+        static constexpr std::size_t SLAB_ELEM_BYTES = LANE_BYTES + sizeof(Prefix_Key) + sizeof(beta_t) + 2 * MESSAGE_BYTES;    // Bytes per element of a slab.
 
         // Suffixes per chunk in the partition-ID computation.
         inline static const idx_t PID_CHUNK_CAP = env::get_u64("GPU_SACA_PID_CHUNK_CAP").value_or(idx_t(1) << 26);
@@ -166,9 +171,24 @@ private:
     void load_text();
 
     // Returns the fixed RAM-budget (in bytes) required in the algorithm.
-    // Currently: the text (`T`), the partition-IDs (`Π`), the scatter-buffers
-    // in partitioning, and backend's fixed space.
+    // Currently: the text (`T`) and the partition-IDs (`Π`)—or, while `Π` is on
+    // disk, the larger of the two, `Π`'s retirement-flags, and a window of it in
+    // partitioning—the slab-pool, the scatter-buffers in partitioning, and
+    // backend's fixed space.
     std::size_t fixed_budget() const;
+
+    // Returns, ahead of partitioning, a bound of the fixed RAM-budget with `T`
+    // and `Π` both resident: the slab-pool, sized by the largest partition, is
+    // sized for the partitions' mean size past the imbalance slack.
+    std::size_t fixed_budget_bound() const;
+
+    // Returns the count of suffixes per window of `Π` read back in partitioning
+    // while it is on disk.
+    idx_t pid_window() const;
+
+    // Returns the partition-ID of the `x`'th suffix: the pivots' interval of its
+    // `K`-prefix in the text, as partitioning finds it.
+    p_id_t partition_of(idx_t x) const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
@@ -213,7 +233,9 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
-    // Reads `Π` back whole from its file.
+    // Reads `Π` back whole from its file, and marks in it the retirement-flags
+    // held meanwhile; then the larger of `T`'s and `Π`'s space, and the flags',
+    // go to the backend's RAM-tier, less `Π`'s.
     void reload_partition_IDs();
 
     // Returns the active set size.

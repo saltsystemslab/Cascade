@@ -136,16 +136,18 @@ void GPU_SACA<T_sym_>::build_SA()
     build_timing_.pivots = duration(t_1 - t_0);
     std::cerr << "Pivots selection completed. Time taken: " << build_timing_.pivots << "s.\n";
 
-    pid_spill_ = (env::get_u64("GPU_SACA_PID_SPILL").value_or(0) != 0);
-    if(!pid_spill_)
-    {   PROFILE_SCOPE("fault_in_partition_IDs");    P_id = Partition_ID_Map(n_, p_), P_id.prepage();    }
+    // `Π` stays on disk until the initial ranking completes iff the host-budget cannot hold it with `T`, unless `GPU_SACA_PID_SPILL` sets otherwise.
+    const auto fixed_bound = fixed_budget_bound();
+    pid_spill_ = (env::get_u64("GPU_SACA_PID_SPILL").value_or(fixed_bound > host_budget) != 0);
+    if(pid_spill_)
+        std::cerr   << "Partition-ID map, at " << Partition_ID_Map::bits_for(p_) << " bits per entry, stays on disk until the initial ranking completes, with its retirement-flags alone in memory."
+                    << " With the text, it would take " << (fixed_bound / (1024.0 * 1024.0 * 1024.0)) << "GBs of fixed memory, of the host-budget's " << (host_budget / (1024.0 * 1024.0 * 1024.0)) << "GBs.\n";
+
+    {   PROFILE_SCOPE("fault_in_partition_IDs");    P_id = (pid_spill_ ? Partition_ID_Map(n_) : Partition_ID_Map(n_, p_)), P_id.prepage();    }
     const auto t_p = now();
     build_timing_.prepage_pid = duration(t_p - t_1);
-    if(!pid_spill_)
-        std::cerr   << "Partition-ID map prepaging completed. Time taken: " << build_timing_.prepage_pid << "s"
-                    << " (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / build_timing_.prepage_pid) << " GBs/s; " << Partition_ID_Map::bits_for(p_) << " bits per entry).\n";
-    else
-        std::cerr << "Partition-ID map is kept on disk through partitioning, as `GPU_SACA_PID_SPILL` is set; " << Partition_ID_Map::bits_for(p_) << " bits per entry.\n";
+    std::cerr   << "Partition-ID map prepaging completed. Time taken: " << build_timing_.prepage_pid << "s"
+                << " (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / build_timing_.prepage_pid) << " GBs/s; " << P_id.bits() << " bits per entry).\n";
 
     {   PROFILE_SCOPE("partition");                 partition();
         if(!partition_sizes_fit())
@@ -184,7 +186,10 @@ void GPU_SACA<T_sym_>::build_SA()
     std::cerr << "Initial ranking completed. Time taken: " << build_timing_.initial_rank << "s.\n";
 
     {   PROFILE_SCOPE("drop_text");                 util::deallocate(T_h_), T_h_ = nullptr;  }
-    backend_->raise_cap(n_ * sizeof(T_sym_));   // The text's space now goes to the backend's RAM-tier.
+    if(!pid_spill_)
+        backend_->raise_cap(n_ * sizeof(T_sym_));   // The text's space now goes to the backend's RAM-tier.
+    else
+    {   PROFILE_SCOPE("reload_partition_IDs");      reload_partition_IDs();  }
 
     {   PROFILE_SCOPE("exponentiate_prefix");       exponentiate_prefix();}
     const auto t_5 = now();
@@ -239,11 +244,42 @@ void GPU_SACA<T_sym_>::load_text()
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::fixed_budget() const
 {
-    return  n_ * sizeof(T_sym_) +   // `T`
-            Partition_ID_Map::bytes(n_, p_) +   // `Π`
+    const auto text = n_ * sizeof(T_sym_);  // `T`
+    const auto ids = Partition_ID_Map::bytes(n_, p_);   // `Π`
+    const auto held = (pid_spill_ ? std::max(text, ids) + P_id.bytes() + Partition_ID_Map::bytes(pid_window(), p_) : text + ids);   // While `Π` is on disk, the two are held one at a time.
+
+    return  held +
             slab_pool_memory() +
             Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_) +
             Partition_Backend::fixed_budget(p_);
+}
+
+
+template <typename T_sym_>
+std::size_t GPU_SACA<T_sym_>::fixed_budget_bound() const
+{
+    const auto P_sz_max = static_cast<idx_t>(std::ceil(IMBALANCE_SLACK * n_ / p_));
+    const auto slab_c = (STREAM_C + PREFETCH_DEPTH + WRITEBACK_DEPTH) * ((P_sz_max + CHUNK_CAP - 1) / CHUNK_CAP) + READER_C + WRITER_C; // As `setup_staging_config` sizes the pool, in full slabs.
+
+    return  n_ * sizeof(T_sym_) +
+            Partition_ID_Map::bytes(n_, p_) +
+            slab_c * CHUNK_CAP * SLAB_ELEM_BYTES +
+            Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_) +
+            Partition_Backend::fixed_budget(p_);
+}
+
+
+template <typename T_sym_>
+idx_t GPU_SACA<T_sym_>::pid_window() const
+{
+    return std::min(n_, std::max(Partition_ID_Map::DISK_GROUP_SZ, PID_CHUNK_CAP - PID_CHUNK_CAP % Partition_ID_Map::DISK_GROUP_SZ));
+}
+
+
+template <typename T_sym_>
+p_id_t GPU_SACA<T_sym_>::partition_of(const idx_t x) const
+{
+    return std::lower_bound(pivots.cbegin(), pivots.cend(), Pivot_Key::pack_prefix(T_h_ + x)) - pivots.cbegin();
 }
 
 
@@ -333,8 +369,7 @@ idx_t GPU_SACA<T_sym_>::partition_size_upper_bound() const
     std::size_t free_mem, total_mem;
     CUDA_CHECK(cudaMemGetInfo(&free_mem, &total_mem));
     const std::size_t raw_budget = free_mem * (1.0 - MEM_SAFETY_MARGIN);    // Total usable memory for the algorithm.
-    const double imb_slack = env::get_f64("GPU_SACA_IMBALANCE_SLACK").value_or(PART_SZ_IMBALANCE_SLACK);
-    const std::size_t budget = raw_budget / imb_slack;  // The actual partition-sizes, to be found out later, can be larger due to the probabilistic nature of pivoting.
+    const std::size_t budget = raw_budget / IMBALANCE_SLACK;    // The actual partition-sizes, to be found out later, can be larger due to the probabilistic nature of pivoting.
 
     idx_t p_sz_max; // Maximum supported suffix-count per partition.
     {
@@ -590,8 +625,8 @@ void GPU_SACA<T_sym_>::setup_staging_config()
     // Set the reader- and writer-pool sizes.
     {
         constexpr idx_t read_poster_c = 1;
-        reader_c_ = env::get_u64("GPU_SACA_READER_C").value_or(24); // TODO: tune default.
-        writer_c_ = env::get_u64("GPU_SACA_WRITER_C").value_or(8);  // TODO: tune default.
+        reader_c_ = READER_C;
+        writer_c_ = WRITER_C;
         dispatcher_c_ = STREAM_C;
         stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<idx_t>(1, omp_get_max_threads() - (read_poster_c +reader_c_ + writer_c_ + dispatcher_c_)));
         if(read_poster_c + reader_c_ + writer_c_ + dispatcher_c_ + stager_c_ > static_cast<idx_t>(omp_get_max_threads()))
@@ -653,7 +688,7 @@ void GPU_SACA<T_sym_>::setup_staging()
 template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 {
-    return slab_c_ * chunk_cap_ * (LANE_BYTES + sizeof(Prefix_Key) + sizeof(beta_t) + 2 * MESSAGE_BYTES);
+    return slab_c_ * chunk_cap_ * SLAB_ELEM_BYTES;
 }
 
 
@@ -754,8 +789,8 @@ void GPU_SACA<T_sym_>::partition()
             }
             else    // `Π` is on disk: it is read back a window at a time.
             {
-                const auto w_cap = std::max(Partition_ID_Map::DISK_GROUP_SZ, PID_CHUNK_CAP - PID_CHUNK_CAP % Partition_ID_Map::DISK_GROUP_SZ);  // Suffixes per window.
-                Partition_ID_Map window(std::min(w_cap, n_), p_);
+                const auto w_cap = pid_window();    // Suffixes per window.
+                Partition_ID_Map window(w_cap, p_);
                 for(idx_t off = 0; off < n_; off += w_cap)
                 {
                     const auto sz = std::min(w_cap, n_ - off);
@@ -772,25 +807,28 @@ void GPU_SACA<T_sym_>::partition()
                 P_buf[p_id].unwrap().flush();
         }
 
-        if(pid_spill_)  // `Π` comes back whole for the initial ranking.
-            reload_partition_IDs();
-
 #ifdef TESTS
         {
-            if(pid_spill_)  // Back from its file; a resident map is checked as it is computed.
-                std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
+            if(pid_spill_)  // `Π`'s copy, back from its file, stands in for it in the checks; a resident map is checked as it is computed.
+            {
+                P_id_check_ = Partition_ID_Map(n_, p_);
+                P_id_check_.read(pid_file_.path(), TEXT_READER_C);
+                std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id_check_) ? "Passes" : "Fails") << "\n";
+            }
 
+            const auto& ids = (pid_spill_ ? P_id_check_ : P_id);
             bool part_sz_match = true;
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_cap[p_id]);
 
             std::cerr << "Partition-sizes match verification: " << (part_sz_match ? "Passes" : "Fails") << "\n";
-            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(n_, P_id, P_cap, *backend_) ? "Passes" : "Fails") << "\n";
+            std::cerr << "Partition-contents verification: " << (test::validate_partition_contents(n_, ids, P_cap, *backend_) ? "Passes" : "Fails") << "\n";
         }
 #endif
     }
 
-    backend_->raise_cap(Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_));  // The scatter buffers' space now goes to the backend's RAM-tier.
+    // The scatter buffers' space, and that of `Π`'s window, now go to the backend's RAM-tier.
+    backend_->raise_cap(Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_) + (pid_spill_ ? Partition_ID_Map::bytes(pid_window(), p_) : 0));
 }
 
 
@@ -948,9 +986,23 @@ template <typename T_sym_>
 void GPU_SACA<T_sym_>::reload_partition_IDs()
 {
     const auto t_0 = timer::now();
-    P_id = Partition_ID_Map(n_, p_);
-    P_id.read(pid_file_.path(), TEXT_READER_C);
+    const auto flag_bytes = P_id.bytes();   // The retirement-flags held meanwhile.
+    Partition_ID_Map ids(n_, p_);
+    ids.read(pid_file_.path(), TEXT_READER_C);
+    ids.retire(P_id);
+    P_id = std::move(ids);
     pid_file_.unlink();
+
+#ifdef TESTS
+    P_id_check_ = Partition_ID_Map();
+    if(P_id.retired_count() != n_ - active_set_size())
+    {
+        std::cerr << "Retirement-flags of the reloaded partition-ID map disagree with the active-sets. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+#endif
+
+    backend_->raise_cap(std::max(n_ * sizeof(T_sym_), P_id.bytes()) + flag_bytes - P_id.bytes());
 
     const auto t = timer::duration(timer::now() - t_0);
     std::cerr << "Partition-ID map reloaded. Time taken: " << t << "s (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / t) << " GBs/s).\n";
@@ -1571,6 +1623,35 @@ void GPU_SACA<T_sym_>::stage_slab(Staging_Slab& s)
 
     auto* const beta = s.beta();
     auto* const key = s.key();
+    if constexpr(init_rank_)
+        if(pid_spill_)  // `Π` is away on disk: the partition-IDs past both ends of the contexts are searched from the text.
+        {
+            const auto id = [this](const idx_t x){ return partition_of(x); };
+            for(idx_t i = 0; i < sz; ++i)
+            {
+                const auto j = bit_layout::suffix_of(lane::load(suf, i));
+                if(i + PREFIX_KEY_GATHER_PREFETCH_D < sz)
+                {
+                    const auto j_d = bit_layout::suffix_of(lane::load(suf, i + PREFIX_KEY_GATHER_PREFETCH_D));
+                    __builtin_prefetch(T_h_ + (j_d < ell ? 0 : j_d - ell), 0, 0);
+                    __builtin_prefetch(T_h_ + j_d, 0, 0);
+                    __builtin_prefetch(T_h_ + j_d + ell, 0, 0);
+                }
+
+                key[i] = Prefix_Key::pack_prefix(T_h_ + j);
+                beta[i] = bit_layout::beta_pair(j < ell ? 0 : bit_layout::route(id(j - ell), P_id.retired(j - ell)), bit_layout::fwd_tag(id, j + ell, n_, ell));
+#ifdef TESTS
+                if((j >= ell && id(j - ell) != P_id_check_[j - ell]) || bit_layout::fwd_tag(id, j + ell, n_, ell) != bit_layout::fwd_tag(P_id_check_, j + ell, n_, ell))
+                {
+                    std::cerr << "Partition-IDs searched from the text for suffix " << j << " disagree with `Π`'s. Aborting.\n";
+                    std::exit(EXIT_FAILURE);
+                }
+#endif
+            }
+
+            return;
+        }
+
     for(idx_t i = 0; i < sz; ++i)
     {
         const auto j = bit_layout::suffix_of(lane::load(suf, i));

@@ -33,7 +33,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
 
     const auto n = self->n_;
     const auto ctx = self->ctx_;
-    const auto& P_id = self->P_id;
+    const auto& P_id = (self->P_id_check_.bytes() > 0 ? self->P_id_check_ : self->P_id);    // `Π`, or its copy while it is on disk.
     const auto p_id = s.p_id();
     const auto P_sz_max = *std::max_element(self->P_cap.cbegin(), self->P_cap.cend());
 
