@@ -121,6 +121,9 @@ int main(int argc, char** argv)
     // An empty --sa-out means no dump, which is the benchmarking default.
     gpu_saca::GPU_SACA<uint16_t> saca(a.input, a.sa_out);
 
+    // The mark is process-wide, so a run must claim its own window.
+    gpu_saca::reset_device_peak();
+
     const auto t0 = bench::Clock::now();
     saca.build_SA();
     const auto t_build = bench::since(t0);
