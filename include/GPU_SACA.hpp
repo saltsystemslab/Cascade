@@ -74,6 +74,8 @@ private:
     std::vector<Pivot_Key> pivots;  // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
     Partition_ID_Map P_id;  // Partition-IDs of the suffixes.
+    bool pid_spill_;    // Whether `Π` is kept on disk through partitioning, as set by `GPU_SACA_PID_SPILL`.
+    Direct_File pid_file_;  // File of `Π`'s words, while it is on disk.
 
     std::vector<idx_t> P_cap;   // Full initial sizes of the partitions.
     std::vector<idx_t> Active_sz;   // Active-set sizes of the suffix partitions.
@@ -193,6 +195,10 @@ private:
     // of data between the partition-backend and the device buffers.
     void setup_staging();
 
+    // Opens the spill-store on the scratch roots set by `GPU_SACA_SCRATCH`,
+    // unless open already.
+    void open_scratch();
+
     // Partitions the suffixes based on the selected pivots.
     void partition();
 
@@ -206,6 +212,9 @@ private:
 
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
+
+    // Reads `Π` back whole from its file.
+    void reload_partition_IDs();
 
     // Returns the active set size.
     idx_t active_set_size() const;

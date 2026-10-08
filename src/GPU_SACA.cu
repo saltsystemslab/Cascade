@@ -52,6 +52,7 @@ GPU_SACA<T_sym_>::GPU_SACA(const std::string& ip_path, const std::string& op_pat
     , ip_path_(ip_path)
     , op_path_(op_path)
     , p_(0)
+    , pid_spill_(false)
     , ctx_(0)
     , slab_pin_time_(0)
     , workspace_sz(0)
@@ -135,11 +136,16 @@ void GPU_SACA<T_sym_>::build_SA()
     build_timing_.pivots = duration(t_1 - t_0);
     std::cerr << "Pivots selection completed. Time taken: " << build_timing_.pivots << "s.\n";
 
+    pid_spill_ = (env::get_u64("GPU_SACA_PID_SPILL").value_or(0) != 0);
+    if(!pid_spill_)
     {   PROFILE_SCOPE("fault_in_partition_IDs");    P_id = Partition_ID_Map(n_, p_), P_id.prepage();    }
     const auto t_p = now();
     build_timing_.prepage_pid = duration(t_p - t_1);
-    std::cerr   << "Partition-ID map prepaging completed. Time taken: " << build_timing_.prepage_pid << "s"
-                << " (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / build_timing_.prepage_pid) << " GBs/s; " << Partition_ID_Map::bits_for(p_) << " bits per entry).\n";
+    if(!pid_spill_)
+        std::cerr   << "Partition-ID map prepaging completed. Time taken: " << build_timing_.prepage_pid << "s"
+                    << " (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / build_timing_.prepage_pid) << " GBs/s; " << Partition_ID_Map::bits_for(p_) << " bits per entry).\n";
+    else
+        std::cerr << "Partition-ID map is kept on disk through partitioning, as `GPU_SACA_PID_SPILL` is set; " << Partition_ID_Map::bits_for(p_) << " bits per entry.\n";
 
     {   PROFILE_SCOPE("partition");                 partition();
         if(!partition_sizes_fit())
@@ -234,7 +240,7 @@ template <typename T_sym_>
 std::size_t GPU_SACA<T_sym_>::fixed_budget() const
 {
     return  n_ * sizeof(T_sym_) +   // `T`
-            P_id.bytes() +  // `Π`
+            Partition_ID_Map::bytes(n_, p_) +   // `Π`
             slab_pool_memory() +
             Suffix_Buffer::scatter_buffer_memory(omp_get_max_threads(), p_) +
             Partition_Backend::fixed_budget(p_);
@@ -652,8 +658,40 @@ std::size_t GPU_SACA<T_sym_>::slab_pool_memory() const
 
 
 template <typename T_sym_>
+void GPU_SACA<T_sym_>::open_scratch()
+{
+    if(spill_)
+        return;
+
+    const auto scratch = env::get("GPU_SACA_SCRATCH");
+    if(!scratch)
+    {
+        std::cerr << "`GPU_SACA_SCRATCH` is not set; set it to colon-separated scratch roots for the disk-backend. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    std::vector<std::string> roots;
+    {
+        std::stringstream ss(*scratch);
+        for(std::string r; std::getline(ss, r, ':');)
+            if(!r.empty())
+                roots.push_back(r);
+    }
+
+    spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()), op_path_, lane::bytes(n_));
+}
+
+
+template <typename T_sym_>
 void GPU_SACA<T_sym_>::partition()
 {
+    if(pid_spill_)  // `Π` goes to its file in the spill-store as it is computed.
+    {
+        open_scratch();
+        pid_file_ = Direct_File(spill_->pid_path(), Direct_File::Mode::read_write);
+        pid_file_.preallocate(Partition_ID_Map::bytes(n_, p_));
+    }
+
     {
         PROFILE_SCOPE("compute_partition_IDs");
         compute_partition_IDs();
@@ -662,6 +700,9 @@ void GPU_SACA<T_sym_>::partition()
         if(env::get_u64("GPU_SACA_PARTITION_ONLY").value_or(0))
         {
             std::cerr << "Partition-IDs computed; stopping, as `GPU_SACA_PARTITION_ONLY` is set.\n";
+            if(spill_)  // Holding `Π`'s file.
+                spill_->cleanup();
+
             std::exit(partition_sizes_fit() ? EXIT_SUCCESS : EXIT_FAILURE);
         }
     }
@@ -675,24 +716,9 @@ void GPU_SACA<T_sym_>::partition()
         {
             PROFILE_SCOPE("allocate_partition_buffers");
 
-            const auto scratch = env::get("GPU_SACA_SCRATCH");
-            if(!scratch)
-            {
-                std::cerr << "`GPU_SACA_SCRATCH` is not set; set it to colon-separated scratch roots for the disk-backend. Aborting.\n";
-                std::exit(EXIT_FAILURE);
-            }
-
-            std::vector<std::string> roots;
-            {
-                std::stringstream ss(*scratch);
-                for(std::string r; std::getline(ss, r, ':');)
-                    if(!r.empty())
-                        roots.push_back(r);
-            }
-
+            open_scratch();
             setup_staging_config();
             util::file::raise_open_files_limit(SPILL_ROLE_C * p_ + 64); // Spill-files of all partitions at once, plus slack for the rest of the process.
-            spill_ = std::make_unique<Spill_Store>(std::move(roots), "run_" + std::to_string(::getpid()), op_path_, lane::bytes(n_));
             backend_ = std::make_unique<Partition_Backend>(P_cap, chunk_cap_, *spill_, host_budget, fixed_budget(), p_);
 
             P_buf.reserve(p_);
@@ -716,12 +742,29 @@ void GPU_SACA<T_sym_>::partition()
         // Add suffix indices to their corresponding partitions (through the buffers).
         {
             PROFILE_SCOPE("omp_scatter");
-            #pragma omp parallel for schedule(static)
-            for(idx_t i = 0; i < n_; ++i)
+            if(!pid_spill_)
             {
-                // TODO: skip staging for generation 0 this way:
-                // const p_id_t beta = (i >= ell ? P_id[i - ell] : 0);  // Backward tag for generation 0.
-                P_buf[P_id[i]].unwrap().add(i);
+                #pragma omp parallel for schedule(static)
+                for(idx_t i = 0; i < n_; ++i)
+                {
+                    // TODO: skip staging for generation 0 this way:
+                    // const p_id_t beta = (i >= ell ? P_id[i - ell] : 0);  // Backward tag for generation 0.
+                    P_buf[P_id[i]].unwrap().add(i);
+                }
+            }
+            else    // `Π` is on disk: it is read back a window at a time.
+            {
+                const auto w_cap = std::max(Partition_ID_Map::DISK_GROUP_SZ, PID_CHUNK_CAP - PID_CHUNK_CAP % Partition_ID_Map::DISK_GROUP_SZ);  // Suffixes per window.
+                Partition_ID_Map window(std::min(w_cap, n_), p_);
+                for(idx_t off = 0; off < n_; off += w_cap)
+                {
+                    const auto sz = std::min(w_cap, n_ - off);
+                    window.read(pid_file_, off, sz);
+
+                    #pragma omp parallel for schedule(static)
+                    for(idx_t i = 0; i < sz; ++i)
+                        P_buf[window[i]].unwrap().add(off + i);
+                }
             }
 
             #pragma omp parallel for schedule(static)
@@ -729,8 +772,14 @@ void GPU_SACA<T_sym_>::partition()
                 P_buf[p_id].unwrap().flush();
         }
 
+        if(pid_spill_)  // `Π` comes back whole for the initial ranking.
+            reload_partition_IDs();
+
 #ifdef TESTS
         {
+            if(pid_spill_)  // Back from its file; a resident map is checked as it is computed.
+                std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
+
             bool part_sz_match = true;
             for(p_id_t p_id = 0; p_id < p_; ++p_id)
                 part_sz_match = part_sz_match && (P_buf[p_id].unwrap().flushed() == P_cap[p_id]);
@@ -759,12 +808,14 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
 
     constexpr std::size_t BLOCK_SZ = 256;
     static_assert(BLOCK_SZ % Partition_ID_Map::GROUP_SZ == 0, "Text-chunks must hold whole groups of the partition-ID map.");
+    const auto bits = Partition_ID_Map::bits_for(p_);   // Bits per entry of `Π`.
     idx_t CHUNK_SZ; // Number of suffixes at each text-chunk.
     T_sym_* T_buf[STREAM_C];    // The text-chunk buffers.
     p_id_t* P_id_buf[STREAM_C]; // The partition-ID buffers.
     uint64_t* P_id_word_buf[STREAM_C];  // The packed partition-ID buffers.
     T_sym_* T_stage[STREAM_C];  // Staging buffer for the text-chunks' uploads, per stream.
-    uint64_t* P_id_stage[STREAM_C]; // Staging buffer for the packed partition-IDs' downloads, per stream.
+    uint64_t* P_id_stage[STREAM_C]; // Staging buffer for the packed partition-IDs' downloads, per stream; disk-block aligned for `Π`'s file.
+    void* P_id_stage_alloc[STREAM_C];   // Pinned allocations holding `P_id_stage`.
 
     idx_t* P_sz_d;  // Global partition-size histogram at the device.
     {
@@ -781,6 +832,9 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         const std::size_t per_idx_mem = STREAM_C * (sizeof(T_sym_) + 2 * sizeof(p_id_t));   // Space required per-index across the three sets of buffers; the packed IDs are no wider.
         CHUNK_SZ = std::min<idx_t>(PID_CHUNK_CAP, budget / per_idx_mem);
         CHUNK_SZ = (CHUNK_SZ / BLOCK_SZ) * BLOCK_SZ;    // Round-down to the nearest multiple of `BLOCK_SZ` for clean grid-partitioning.
+        if(pid_spill_)  // The chunks start at disk-blocks of `Π`'s file.
+            CHUNK_SZ = (CHUNK_SZ / Partition_ID_Map::DISK_GROUP_SZ) * Partition_ID_Map::DISK_GROUP_SZ;
+
         if(CHUNK_SZ < BLOCK_SZ) // Too low memory in the GPU to support even one block.
         {
             std::cerr << "Too low device memory available for partition-ID computation streaming. Aborting.\n";
@@ -790,14 +844,14 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         const auto buf_sz = std::min(CHUNK_SZ, n_);
         const std::size_t text_buf_bytes = (buf_sz + K - 1) * sizeof(T_sym_);
         const std::size_t p_id_buf_bytes = buf_sz * sizeof(p_id_t);
-        const auto p_id_word_c = Partition_ID_Map::packed_word_c(buf_sz, P_id.bits());
+        const auto p_id_word_c = Partition_ID_Map::packed_word_c(buf_sz, bits);
         for(std::size_t b = 0; b < STREAM_C; ++b)
         {
             CUDA_CHECK(cudaMalloc(T_buf + b, text_buf_bytes));
             CUDA_CHECK(cudaMalloc(P_id_buf + b, p_id_buf_bytes));
             CUDA_CHECK(cudaMalloc(P_id_word_buf + b, p_id_word_c * sizeof(uint64_t)));
             CUDA_CHECK(pinned_allocate_host(T_stage[b], buf_sz + K - 1));
-            CUDA_CHECK(pinned_allocate_host(P_id_stage[b], p_id_word_c));
+            pinned_allocate_aligned_host(P_id_stage[b], P_id_stage_alloc[b], p_id_word_c);
         }
     }
 
@@ -830,17 +884,20 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
                             (T_buf[s_id], chunk_suf_count, pivots_d, P_id_buf[s_id], p_, P_sz_d);
                         CUDA_CHECK(cudaGetLastError());
 
-                        // Pack this chunk's partition-IDs, asynchronously download those to staging space, and drain them to `P_id`.
-                        // The chunks start at multiples of `BLOCK_SZ`, so their packed IDs take up disjoint words.
+                        // Pack this chunk's partition-IDs, asynchronously download those to staging space, and drain them to `P_id`,
+                        // or to its file. The chunks start at multiples of `BLOCK_SZ`, so their packed IDs take up disjoint words.
                         const auto group_count = (chunk_suf_count + Partition_ID_Map::GROUP_SZ - 1) / Partition_ID_Map::GROUP_SZ;
                         pack_partition_IDs_kernel<BLOCK_SZ> <<< (group_count + BLOCK_SZ - 1) / BLOCK_SZ, BLOCK_SZ, 0, stream[s_id] >>>
-                            (P_id_buf[s_id], chunk_suf_count, P_id.bits(), P_id_word_buf[s_id]);
+                            (P_id_buf[s_id], chunk_suf_count, bits, P_id_word_buf[s_id]);
                         CUDA_CHECK(cudaGetLastError());
 
-                        const auto word_count = Partition_ID_Map::packed_word_c(chunk_suf_count, P_id.bits());
+                        const auto word_count = Partition_ID_Map::packed_word_c(chunk_suf_count, bits);
                         CUDA_CHECK(cudaMemcpyAsync(P_id_stage[s_id], P_id_word_buf[s_id], word_count * sizeof(uint64_t), cudaMemcpyDeviceToHost, stream[s_id]));
                         CUDA_CHECK(cudaStreamSynchronize(stream[s_id]));
-                        P_id.store_packed(chunk_off, chunk_suf_count, P_id_stage[s_id]);
+                        if(pid_spill_)
+                            Partition_ID_Map::write_packed(pid_file_, chunk_off, chunk_suf_count, bits, P_id_stage[s_id]);
+                        else
+                            P_id.store_packed(chunk_off, chunk_suf_count, P_id_stage[s_id]);
                     }
                 }
             );
@@ -857,7 +914,7 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
         CUDA_CHECK(cudaFree(P_id_buf[b]));
         CUDA_CHECK(cudaFree(P_id_word_buf[b]));
         CUDA_CHECK(deallocate_host(T_stage[b]));
-        CUDA_CHECK(deallocate_host(P_id_stage[b]));
+        CUDA_CHECK(deallocate_host(P_id_stage_alloc[b]));
     }
 
     // Move the partition-sizes to the host.
@@ -881,8 +938,22 @@ void GPU_SACA<T_sym_>::compute_partition_IDs()
     }
 
 #ifdef TESTS
-    std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
+    if(!pid_spill_) // A spilled map is checked once read back.
+        std::cerr << "Partition-IDs verification: " << (test::validate_partition_IDs(T_h_, n_, pivots, P_id) ? "Passes" : "Fails") << "\n";
 #endif
+}
+
+
+template <typename T_sym_>
+void GPU_SACA<T_sym_>::reload_partition_IDs()
+{
+    const auto t_0 = timer::now();
+    P_id = Partition_ID_Map(n_, p_);
+    P_id.read(pid_file_.path(), TEXT_READER_C);
+    pid_file_.unlink();
+
+    const auto t = timer::duration(timer::now() - t_0);
+    std::cerr << "Partition-ID map reloaded. Time taken: " << t << "s (" << (P_id.bytes() / (1024.0 * 1024.0 * 1024.0) / t) << " GBs/s).\n";
 }
 
 
