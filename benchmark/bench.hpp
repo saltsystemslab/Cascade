@@ -7,7 +7,9 @@
 #define BENCH_HPP
 
 #include <algorithm>
+#include <cerrno>
 #include <chrono>
+#include <csignal>
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
@@ -15,12 +17,15 @@
 #include <cstring>
 #include <ctime>
 #include <fstream>
+#include <new>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -126,10 +131,18 @@ inline std::string host_name()
 }
 
 
-// Returns the peak RSS.
-inline int64_t peak_rss_bytes()
+// Returns the peak RSS, of this process or else of its reaped children. For a
+// child, it is the kernel's high-water mark at exit, which the OOM reaper may
+// have lowered by then, so an OOM-killed child's is a floor.
+inline int64_t peak_rss_bytes(const bool of_child = false)
 {
 #if defined(__linux__)
+    if(of_child)
+    {
+        struct rusage ru;
+        return (::getrusage(RUSAGE_CHILDREN, &ru) == 0) ? static_cast<int64_t>(ru.ru_maxrss) * 1024 : 0;
+    }
+
     std::ifstream f("/proc/self/status");
     for(std::string k; f >> k; )
         if(k == "VmHWM:")
@@ -140,7 +153,8 @@ inline int64_t peak_rss_bytes()
         }
 #elif defined(__APPLE__)    // The macOS `getrusage` fallback to support local compilation.
     struct rusage ru;
-    if(::getrusage(RUSAGE_SELF, &ru) == 0)  return static_cast<int64_t>(ru.ru_maxrss);
+    if(::getrusage(of_child ? RUSAGE_CHILDREN : RUSAGE_SELF, &ru) == 0)
+        return static_cast<int64_t>(ru.ru_maxrss);
 #endif
     return 0;
 }
@@ -178,6 +192,7 @@ struct Kernel_Counter
     int64_t pgscan_direct = -1; // Direct reclaim: an allocation had to wait.
     int64_t compact_stall = -1; // Compaction entered on an allocation path.
     int64_t numa_local = -1, numa_other = -1;   // Pages served near vs far.
+    int64_t oom_kill = -1;  // Processes the OOM killer has ended.
 
     // Node-wide instantaneous levels, NOT counters: what the allocator holds at
     // the moment they are read. The value worth recording is therefore the one
@@ -187,13 +202,14 @@ struct Kernel_Counter
 };
 
 
-// Returns what the kernel currently reports, from both sources.
-inline Kernel_Counter read_kernel_counters()
+// Returns what the kernel currently reports, from both sources. The per-process
+// half is of this process, or else of its reaped children.
+inline Kernel_Counter read_kernel_counters(const bool of_child = false)
 {
     Kernel_Counter c;
 #if defined(__linux__) || defined(__APPLE__)
     struct rusage r;
-    if(::getrusage(RUSAGE_SELF, &r) == 0)   // RUSAGE_SELF sums all threads.
+    if(::getrusage(of_child ? RUSAGE_CHILDREN : RUSAGE_SELF, &r) == 0)  // Either sums all threads.
     {
         c.cpu_user = static_cast<double>(r.ru_utime.tv_sec) + r.ru_utime.tv_usec / 1e6;
         c.cpu_sys  = static_cast<double>(r.ru_stime.tv_sec) + r.ru_stime.tv_usec / 1e6;
@@ -212,12 +228,14 @@ inline Kernel_Counter read_kernel_counters()
             else if(k == "thp_fault_fallback")  c.thp_fallback  = v;
             else if(k == "pgscan_direct")       c.pgscan_direct = v;
             else if(k == "compact_stall")       c.compact_stall = v;
+            else if(k == "oom_kill")            c.oom_kill      = v;
     }
 
     {   // Per-process and cumulative from exec, like rusage above, so the value
         // is the run's own and needs no differencing. `O_DIRECT` on the spill
         // files keeps the physical counts ours; buffered writeback would be
-        // charged to a flusher thread instead.
+        // charged to a flusher thread instead. Reaping a child folds its counts
+        // into these, so they cover the child either way.
         std::ifstream f("/proc/self/io");
         std::string k;
         int64_t v = 0;
@@ -345,7 +363,7 @@ inline std::string tuning_env()
 namespace st
 {
     inline constexpr const char* OK         = "ok";
-    inline constexpr const char* OOM_HOST   = "oom_host";
+    inline constexpr const char* OOM_HOST   = "oom_host";   // Allocation refused, or the run OOM-killed.
     inline constexpr const char* OOM_DEVICE = "oom_device";
     inline constexpr const char* BAD_INPUT  = "bad_input";
     inline constexpr const char* BAD_PARAM  = "bad_param";
@@ -376,7 +394,7 @@ struct Record
     // a change to what a timing measures; records across majors do not mix.
     // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
-    static constexpr int schema_minor = 4;
+    static constexpr int schema_minor = 5;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     // Which build of that commit. The commit alone does not identify the
@@ -703,17 +721,19 @@ inline const char* verify_SA(const T_sym_* const T, const T_sa_* const SA, const
 // The single record-finalization path: stamps the status, reads required kernel
 // information, writes the record atomically, and echoes it. Returns the process
 // exit code: 0 whenever a record was written, including for a failed run. Non-
-// zero means no record exists.
+// zero means no record exists. `of_child` accounts the reaped child that ran
+// the measurement, rather than this process.
 inline int finalize(Record& rec, const std::string& results_dir,
-                    const char* const status, const int64_t code, const std::string& detail)
+                    const char* const status, const int64_t code, const std::string& detail,
+                    const bool of_child = false)
 {
     rec.status = status;
     rec.code   = code;
     rec.detail = detail;
 
-    rec.peak_rss = peak_rss_bytes();
+    rec.peak_rss = peak_rss_bytes(of_child);
 
-    const auto k = read_kernel_counters();
+    const auto k = read_kernel_counters(of_child);
 
     // Per-process and cumulative from exec: the value is the run's own.
     rec.cpu_user   = k.cpu_user;    rec.cpu_sys = k.cpu_sys;
@@ -774,6 +794,49 @@ struct Ctx
 };
 
 
+// What a run got through before it died, passed from the child that ran it to
+// the parent that reaps it.
+struct Progress
+{
+    double  t_load = -1;
+    int64_t n_symbols = 0, n_tokens = 0;
+};
+
+
+// Waits out the run in child `pid`. A child that exited has written its own
+// record, or reported why it could not; one that a signal ended has written
+// none, so the record is written here, accounted from the reaped child. The kill
+// was the OOM killer's if it was SIGKILL and the node's count of OOM kills rose
+// meanwhile -- node-wide, so ours only under `--exclusive`.
+inline int reap(const pid_t pid, Record& rec, const std::string& results_dir,
+                const Progress& prog, const Clock::time_point t0)
+{
+    int ws = 0;
+    while(::waitpid(pid, &ws, 0) < 0)
+        if(errno != EINTR)
+        {
+            std::fprintf(stderr, "FATAL: waitpid failed: %s\n", std::strerror(errno));
+            return 1;
+        }
+
+    if(WIFEXITED(ws))
+        return WEXITSTATUS(ws);
+
+    const int sig = WTERMSIG(ws);
+    const bool oom = (sig == SIGKILL && read_kernel_counters().oom_kill > counters_at_start.oom_kill);
+
+    rec.t_load    = prog.t_load;
+    rec.n_symbols = prog.n_symbols;
+    rec.n_tokens  = prog.n_tokens;
+    rec.notes     = "killed " + std::to_string(since(t0)) + "s into the run";
+
+    return finalize(rec, results_dir, oom ? st::OOM_HOST : st::LIB_ERROR, sig,
+                    oom ? std::string("killed by the kernel's OOM killer")
+                        : "killed by signal " + std::to_string(sig) + " (" + ::strsignal(sig) + ")",
+                    true);
+}
+
+
 // Owns the corpus load and the run/argument fields, then hands off to
 // `finalize`. Exit-code policy lives there.
 template <typename T_sym_, typename F_core_>
@@ -795,10 +858,27 @@ int bench_main(const Args& arg, const char* const method, const char* const meth
     const auto emit = [&](const char* const status, const int64_t code, const std::string& detail)
     { return finalize(rec, arg.results_dir, status, code, detail); };
 
+    // The run goes to a child, which this parent outlives. The OOM killer ends a
+    // run with SIGKILL, which nothing can catch, so a run it picks would write no
+    // record; this parent holds next to no memory, is never the one picked, and
+    // writes it instead.
+    void* const page = ::mmap(nullptr, sizeof(Progress), PROT_READ | PROT_WRITE,
+                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    auto* const prog = (page == MAP_FAILED) ? nullptr : new (page) Progress;
+    const auto t0 = Clock::now();
+    const pid_t pid = prog ? ::fork() : -1;
+    if(pid < 0)
+    {
+        const int e = errno;
+        return emit(st::LIB_ERROR, e, std::string("cannot supervise the run: ") + std::strerror(e));
+    }
+
+    if(pid > 0)
+        return reap(pid, rec, arg.results_dir, *prog, t0);
+
     Buffer<T_sym_> T;
     std::string    err;
 
-    const auto t0 = Clock::now();
     if(!load_prefix(arg.input, arg.n, T, err))              return emit(st::BAD_INPUT, 0, err);
     rec.t_load = since(t0);
 
@@ -806,6 +886,7 @@ int bench_main(const Args& arg, const char* const method, const char* const meth
     // byte_from_token16 reads a uint16 corpus as bytes, so symbols = 2 x tokens.
     // Throughput must be per token or its apparent work doubles.
     rec.n_tokens  = (arg.alphabet == alpha::BYTE_T16) ? T.n / 2 : T.n;
+    *prog = {rec.t_load, rec.n_symbols, rec.n_tokens};
 
     if(arg.n > 0 && T.n < arg.n)
         rec.notes = "short corpus: requested " + std::to_string(arg.n)

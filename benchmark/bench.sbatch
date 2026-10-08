@@ -257,8 +257,9 @@ for c in "${CORPORA[@]}"; do
             case "${m}" in
                 libsais)
                     # uint16 tokens natively. An over-budget run records
-                    # oom_host: vm.overcommit_memory=0 refuses an SA larger than
-                    # RAM outright, so libsais returns -2 rather than dying.
+                    # oom_host either way: vm.overcommit_memory=0 refuses an SA
+                    # larger than RAM plus swap outright, and one under that is
+                    # OOM-killed partway, which bench_main's parent records.
                     run "${SAIS}" libsais16x64 "${c}" token16 0 "${THREADS}" "${r}"
                     ;;
                 libcubwt)
