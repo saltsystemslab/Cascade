@@ -570,6 +570,14 @@ def cmd_run(a):
         "schema_version": 6, "schema_minor": 4,
         "run_id": rid, "method": "infinigram",
         "build_type": "Release",
+        # Not "unknown": that means an emitter lost the value, and summarize.py
+        # says so by blaming CMake. We never build this -- it is upstream's
+        # prebuilt binary at PIN_TAG, checked by `check_pin` -- so there is no
+        # build of ours to describe.
+        "build_config": "prebuilt",
+        # No numactl wrapper here, which is what bench.hpp records as default
+        # placement. Recorded rather than omitted so the 6.3 claim holds.
+        "placement": "",
         "method_version": PIN_TAG,
         "commit": os.environ.get("IG_COMMIT", "unknown"),
         "host": os.uname().nodename,
