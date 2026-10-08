@@ -20,7 +20,7 @@ GiB = 1 << 30
 # baseline's numbers stand, so a campaign pair will routinely span minors. Only
 # a major says a field changed meaning, and only then are the two sets of
 # numbers actually incomparable.
-SCHEMA = (6, 3)
+SCHEMA = (6, 4)
 
 # A run is comparable to another run only if the machine was in the same state.
 # thp_alloc + thp_fallback is a constant of the workload separates the good runs
@@ -315,6 +315,32 @@ def main(argv):
         print("  ".join("-" * x for x in mw))
         for r in mem:
             print("  ".join(str(x).ljust(mw[i]) for i, x in enumerate(r)))
+
+    # Logical against physical, because the gap is the page cache: a corpus
+    # re-read from cache shows read_log without read_phys, and `write_phys` is
+    # the spill traffic itself -- against the drives' sustained rate it says
+    # whether a run was I/O bound without anyone having to guess.
+    io = []
+    for (method, corpus, tok, alphabet, ntok, thr), rs in sorted(groups.items(),
+                                                                 key=lambda kv: kv[0][4]):
+        def med_io(key):
+            v = [r[key] for r in rs if r.get(key, -1) >= 0]
+            return statistics.median(v) if v else None
+
+        cells = [med_io(k) for k in ("io_rchar", "io_read_bytes", "io_wchar", "io_write_bytes")]
+        if all(c is None for c in cells):
+            continue
+        io.append([method, corpus] + [f"{c / GiB:.1f}" if c is not None else "-" for c in cells])
+
+    if io:
+        ih = ("method", "corpus", "read_log", "read_phys", "write_log", "write_phys")
+        iw = [max([len(str(h))] + [len(str(r[i])) for r in io]) for i, h in enumerate(ih)]
+        print("\nI/O per run (GiB, median). log = through read()/write(); "
+              "phys = to/from the device, so log-phys is the page cache")
+        print("  ".join(str(x).ljust(iw[i]) for i, x in enumerate(ih)))
+        print("  ".join("-" * x for x in iw))
+        for r in io:
+            print("  ".join(str(x).ljust(iw[i]) for i, x in enumerate(r)))
 
     # The matrix is no longer derivable from the script, so the manifest is the
     # only thing that distinguishes "never requested" from "requested but died".

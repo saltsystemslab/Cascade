@@ -166,6 +166,12 @@ struct Kernel_Counter
     int64_t majflt = -1;    // Major page faults: RAM miss.
     int64_t nvcsw = -1;     // Voluntary context switches.
     int64_t nivcsw = -1;    // Involuntary context switches.
+    // Logical I/O is what the process asked for, physical what reached the
+    // device; the gap between them is the page cache. Both matter here: input
+    // re-read from cache costs no device traffic, and the spill drives bound
+    // every large run.
+    int64_t io_rchar = -1, io_wchar = -1;               // Bytes through read()/write().
+    int64_t io_read_bytes = -1, io_write_bytes = -1;    // Bytes to/from the block device.
 
     // Node-wide, cumulative since boot: differences to be tracked, not the absolute values.
     int64_t thp_alloc = -1, thp_fallback = -1;  // Huge pages granted vs refused.
@@ -206,6 +212,20 @@ inline Kernel_Counter read_kernel_counters()
             else if(k == "thp_fault_fallback")  c.thp_fallback  = v;
             else if(k == "pgscan_direct")       c.pgscan_direct = v;
             else if(k == "compact_stall")       c.compact_stall = v;
+    }
+
+    {   // Per-process and cumulative from exec, like rusage above, so the value
+        // is the run's own and needs no differencing. `O_DIRECT` on the spill
+        // files keeps the physical counts ours; buffered writeback would be
+        // charged to a flusher thread instead.
+        std::ifstream f("/proc/self/io");
+        std::string k;
+        int64_t v = 0;
+        while(f >> k >> v)
+            if     (k == "rchar:")       c.io_rchar       = v;
+            else if(k == "wchar:")       c.io_wchar       = v;
+            else if(k == "read_bytes:")  c.io_read_bytes  = v;
+            else if(k == "write_bytes:") c.io_write_bytes = v;
     }
 
     for(int n = 0; ; ++n)   // numastat is per-node; sum over the nodes.
@@ -356,7 +376,7 @@ struct Record
     // a change to what a timing measures; records across majors do not mix.
     // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
-    static constexpr int schema_minor = 3;
+    static constexpr int schema_minor = 4;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     // Which build of that commit. The commit alone does not identify the
@@ -377,6 +397,7 @@ struct Record
     // resolves, and `cpus_allowed` what the kernel lets it use.
     double      cpu_user = -1, cpu_sys = -1;
     int64_t     minflt = -1, majflt = -1, nvcsw = -1, nivcsw = -1;
+    int64_t     io_rchar = -1, io_wchar = -1, io_read_bytes = -1, io_write_bytes = -1;
     int64_t     threads_avail = -1, cpus_allowed = -1;
     // How the run was placed, as the harness invoked it, e.g.
     // "numactl --cpunodebind=0". Declared rather than observed: numactl execs
@@ -429,6 +450,8 @@ struct Record
         J_NUM(peak_rss);     J_NUM(peak_device);
         J_NUM(cpu_user);     J_NUM(cpu_sys);
         J_NUM(minflt);       J_NUM(majflt);        J_NUM(nvcsw);      J_NUM(nivcsw);
+        J_NUM(io_rchar);     J_NUM(io_wchar);
+        J_NUM(io_read_bytes);J_NUM(io_write_bytes);
         J_NUM(threads_avail);J_NUM(cpus_allowed);  J_NUM(exe_hash);
         J_STR(placement);   J_STR(env_tuning);
         J_NUM(thp_alloc);    J_NUM(thp_fallback);  J_NUM(pgscan_direct);
@@ -694,6 +717,8 @@ inline int finalize(Record& rec, const std::string& results_dir,
     rec.cpu_user   = k.cpu_user;    rec.cpu_sys = k.cpu_sys;
     rec.minflt     = k.minflt;      rec.majflt  = k.majflt;
     rec.nvcsw      = k.nvcsw;       rec.nivcsw  = k.nivcsw;
+    rec.io_rchar      = k.io_rchar;      rec.io_wchar       = k.io_wchar;
+    rec.io_read_bytes = k.io_read_bytes; rec.io_write_bytes = k.io_write_bytes;
 
     // Node-wide and cumulative since boot: only the change across this run is
     // ours, and only under --exclusive.
