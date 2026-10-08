@@ -83,6 +83,9 @@ public:
     // Returns the path to the `p_id`'th partition's `role` file.
     std::string path(p_id_t p_id, Spill_Role role) const;
 
+    // Returns the path to the run's partition-ID map file, under the first root.
+    std::string pid_path() const;
+
     // Opens the `p_id`'th partitions `role` file as a direct-file with access-
     // mode `mode`, and returns it.
     Direct_File open(p_id_t p_id, Spill_Role role, Direct_File::Mode mode) const;
