@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cinttypes>
 #include <climits>
 #include <cstdio>
@@ -1435,9 +1436,11 @@ int main()
             continue;
         }
 
+        const auto t0 = std::chrono::steady_clock::now();
         const bool ok = t.fn();
         failed += !ok;
-        std::fprintf(stderr, "[test_query] %-24s %s\n", t.name, ok ? "PASS" : "FAIL");
+        std::fprintf(stderr, "[test_query] %-24s %s (%.1f s)\n", t.name, ok ? "PASS" : "FAIL",
+                     std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
     }
 
     std::error_code ec;
