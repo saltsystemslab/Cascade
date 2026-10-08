@@ -567,7 +567,8 @@ def cmd_run(a):
     # `bench.hpp`'s field set. The fault and switch counters come from RUSAGE_CHILDREN,
     # not RUSAGE_SELF: their pipeline is a subprocess tree, and these counters sum across children.
     rec = {
-        "schema_version": 6, "run_id": rid, "method": "infinigram",
+        "schema_version": 6, "schema_minor": 4,
+        "run_id": rid, "method": "infinigram",
         "build_type": "Release",
         "method_version": PIN_TAG,
         "commit": os.environ.get("IG_COMMIT", "unknown"),
@@ -593,6 +594,13 @@ def cmd_run(a):
         "cpu_sys": round(r1.ru_stime - r0.ru_stime, 6),
         "minflt": r1.ru_minflt - r0.ru_minflt, "majflt": r1.ru_majflt - r0.ru_majflt,
         "nvcsw": r1.ru_nvcsw - r0.ru_nvcsw, "nivcsw": r1.ru_nivcsw - r0.ru_nivcsw,
+        # bench.hpp takes these from /proc/self/io, which a reaped child no
+        # longer has. RUSAGE_CHILDREN carries the same physical counts in
+        # 512-byte blocks -- ru_inblock is read_bytes >> 9 -- but has no
+        # counterpart to rchar/wchar, so the logical pair stays unmeasured.
+        "io_rchar": -1, "io_wchar": -1,
+        "io_read_bytes": (r1.ru_inblock - r0.ru_inblock) * 512,
+        "io_write_bytes": (r1.ru_oublock - r0.ru_oublock) * 512,
         **kd, **buddy,
         # bench.hpp emits GPU_SACA's phase timers for every method; libsais
         # leaves them at -1 and so does this.
