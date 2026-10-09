@@ -15,7 +15,11 @@ and the counts of our batches failing the certificate, and of those whose
 intervals through the pipeline differ from those found from device memory.
 
 If the host searches our index, ours is reported end to end only: from device
-memory, its batches go to the host and back.
+memory, its batches go to the host and back. With our suffix array mapped from
+its drive, the main runs are reported per cache state, cold (every repetition
+first dropping the suffix array's pages, and infini-gram's table's) and hot,
+with the pages that each engine read from storage per query; and the other runs
+are cold.
 """
 import math
 import pathlib
@@ -29,7 +33,9 @@ KINDS = ("present", "mutated", "random", "heldout", "unigram", "batch")
 SHOWN = ("present-m1", "present-m10", "random-m5", "present-m100", "present-m1000")
 NAN = math.nan
 PLACED = {"mmap": "mapped", "ram": "in the heap"}
-TIERS = {"device": "device memory", "pinned": "pinned host memory", "pageable": "pageable host memory"}
+TIERS = {"device": "device memory", "pinned": "pinned host memory", "pageable": "pageable host memory",
+         "mapped": "a mapped file on a node-local drive"}
+PAGE = 4096
 
 
 def pairs(path):
@@ -60,6 +66,7 @@ def batches(path, engine, run):
         out.append(cur)
     for b in out:
         b.update(engine=engine, run=run, log=str(path))
+        b["cache"] = "cold" if b.get("sa_cold" if engine == "ours" else "cold") == "1" else "hot"
         if engine == "ours" and b.get("stride") == "0":
             b["config"] = "s0w0o0"  # The direct mode neither sorts nor gathers, whatever the options of its run.
         elif engine == "ours":
@@ -103,6 +110,12 @@ def load(d):
         elif b["engine"] == "ours":    # From before the pipeline: the transfers and the search, unoverlapped, from pageable memory.
             t = num(b, "t_h2d") + med + num(b, "t_d2h")
             b["qps_e2e"] = q / t if t > 0 else NAN
+        # Pages read from storage per query: ours end to end from pinned memory; infini-gram's but its first repetition, which its
+        # times drop too.
+        io = [int(x) for x in b.get("io_bytes_e2e" if b["engine"] == "ours" else "io_bytes", "").split(",") if x]
+        if b["engine"] == "ig" and len(io) > 1:
+            io = io[1:]
+        b["pages"] = median(io) / PAGE / q if io and q > 0 else NAN
     return bs, bad
 
 
@@ -148,11 +161,21 @@ def sel(bs, engine, run, config, workload, key="qps_median"):
 
 
 def is_main(run):
-    return run.startswith("main-r")
+    return re.fullmatch(r"main(-cold|-hot)?-r\d+", run) is not None
+
+
+def pages(x):
+    return "-" if math.isnan(x) else f"{x:.2f}"
 
 
 def table(head, rows, align):
     return [f"| {' | '.join(head)} |", f"|{'|'.join(align)}|"] + [f"| {' | '.join(r)} |" for r in rows]
+
+
+def filled(head, rows, align):
+    """The table without the columns that hold no value: runs that a campaign does not make."""
+    keep = [i for i in range(len(head)) if i == 0 or any(r[i] != "-" for r in rows)]
+    return [head[i] for i in keep], [[r[i] for i in keep] for r in rows], [align[i] for i in keep]
 
 
 def agreement(bs, d):
@@ -207,20 +230,22 @@ def main_rows(bs, t_all, ig_load, piped, two, host):
     return rows, speedups
 
 
-def batch_rows(bs, t_all, ig_load, host):
-    """With the host searching, ours end to end only: the direct mode, two phases unsorted and sorted, and unsorted from pageable memory."""
+def batch_rows(bs, t_all, ig_load, host, two="s32w2o0"):
+    """With the host searching, ours end to end only: the direct mode, two phases unsorted and sorted, and unsorted from pageable memory.
+    Two phases in the stride and key width of `two`."""
     rows = []
+    two0, two1 = two[:two.index("o")] + "o0", two[:two.index("o")] + "o1"
     best = lambda xs: max((x for x in xs if not math.isnan(x)), default=NAN)
     for w in sorted({b["workload"] for b in bs if b["run"] == "batch"}, key=order):
         q = int(re.sub(r"\D", "", w))
         t = min(t_all, (q + 255) // 256)
         ig = [median(sel(bs, "ig", "batch", f"direct-t{x}-p0-{ig_load}", w)) for x in sorted({t_all, t})]
         ig_best = max((x for x in ig if not math.isnan(x)), default=NAN)
-        tp = [median(sel(bs, "ours", "batch", c, w)) for c in ("s32w2o0", "s32w2o1")]
-        e2e = [median(sel(bs, "ours", "batch", c, w, "qps_e2e")) for c in ("s0w0o0", "s32w2o0", "s32w2o1")]
+        tp = [median(sel(bs, "ours", "batch", c, w)) for c in (two0, two1)]
+        e2e = [median(sel(bs, "ours", "batch", c, w, "qps_e2e")) for c in ("s0w0o0", two0, two1)]
         igs = [mq(ig[-1]), mq(ig[0]) if t < t_all else "-"]
         if host:
-            pageable = median(sel(bs, "ours", "batch", "s32w2o0", w, "qps_e2e_pageable"))
+            pageable = median(sel(bs, "ours", "batch", two0, w, "qps_e2e_pageable"))
             rows.append([f"{q:,}"] + igs + [mq(x) for x in e2e] + [mq(pageable), times(best(e2e), ig_best), times(pageable, ig_best)])
             continue
         rows.append([f"{q:,}"] + igs + [mq(median(sel(bs, "ours", "batch", "s0w0o0", w))), mq(tp[0]), mq(tp[1]), mq(e2e[0]), mq(e2e[1]),
@@ -228,13 +253,13 @@ def batch_rows(bs, t_all, ig_load, host):
     return rows
 
 
-def ablation_rows(bs, key):
+def ablation_rows(bs, key, two="s32w2o0"):
     abl = [b for b in bs if b["run"].startswith("ablation-")]
     any_run = lambda r: True
     ws = sorted({b["workload"] for b in abl}, key=order)
-    # The default mode's throughput in the ablation, else in the main runs.
-    base = {w: median(sel(abl, "ours", any_run, "s32w2o0", w, key)) for w in ws}
-    base = {w: x if not math.isnan(x) else median(sel(bs, "ours", is_main, "s32w2o0", w, key)) for w, x in base.items()}
+    # The main runs' mode's throughput in the ablation, else in the main runs.
+    base = {w: median(sel(abl, "ours", any_run, two, w, key)) for w in ws}
+    base = {w: x if not math.isnan(x) else median(sel(bs, "ours", is_main, two, w, key)) for w, x in base.items()}
     rows = []
     for c in sorted({b["config"] for b in abl}, key=lambda c: tuple(map(int, re.findall(r"\d+", c)))):
         per = {w: median(sel(abl, "ours", any_run, c, w, key)) for w in ws}
@@ -277,6 +302,39 @@ def variant_rows(bs, t_all, ig_load, other):
     return rows
 
 
+def ssd_main_rows(bs, cache, t_all, two):
+    """Ours end to end from pinned memory against infini-gram, in the cache state `cache`, with the pages read per query."""
+    at = [b for b in bs if b["cache"] == cache and is_main(b["run"])]
+    rows, speedups = [], []
+    for w in sorted({b["workload"] for b in at}, key=order):
+        ig = sel(at, "ig", is_main, f"direct-t{t_all}-p0-mmap", w)
+        ours = sel(at, "ours", is_main, two, w, "qps_e2e")
+        q = next(b["q"] for b in at if b["workload"] == w)
+        speedups.append(median(ours) / median(ig) if ig else NAN)
+        rows.append([w, f"{int(q):,}", spread(ig), spread(ours), times(median(ours), median(ig)),
+                     pages(median(sel(at, "ig", is_main, f"direct-t{t_all}-p0-mmap", w, "pages"))),
+                     pages(median(sel(at, "ours", is_main, two, w, "pages")))])
+    return rows, speedups
+
+
+def ssd_ablation_rows(bs, two):
+    """Ours cold, end to end from pinned memory: the main runs' mode, not asking for pages ahead, the suffix array split over the
+    drives, asking and not, and the direct mode; each with its pages read per query."""
+    runs = (("main", lambda r: is_main(r), two), ("prefetch-p0", lambda r: r == "prefetch-p0", two),
+            ("stripe-p1", lambda r: r == "stripe-p1", two), ("stripe-p0", lambda r: r == "stripe-p0", two),
+            ("direct", lambda r: r == "direct", "s0w0o0"))
+    cold = [b for b in bs if b["engine"] == "ours" and b["cache"] == "cold"]
+    present = [name for name, run, c in runs if any(run(b["run"]) and b["config"] == c for b in cold)]
+    rows = []
+    for w in sorted({b["workload"] for b in cold if any(run(b["run"]) for _, run, _ in runs)}, key=order):
+        row = [w]
+        for name, run, c in runs:
+            if name in present:
+                row += [mq(median(sel(cold, "ours", run, c, w, "qps_e2e"))), pages(median(sel(cold, "ours", run, c, w, "pages")))]
+        rows.append(row)
+    return present, rows
+
+
 def setup_lines(bs, two):
     """Load times: ours per process of the main runs; infini-gram's page-cache warm-up and heap loads."""
     procs = {}
@@ -285,17 +343,92 @@ def setup_lines(bs, two):
             procs.setdefault(b["run"], b)
     ours = [(num(b, "t_load_text"), num(b, "t_load_sa"), num(b, "t_spot")) for b in procs.values()]
     tab = [num(b, "t_table") for b in bs if b["engine"] == "ours" and is_main(b["run"]) and b["config"] == two]
+    stride = next((b.get("stride") for b in bs if b["engine"] == "ours" and b["config"] == two), "?")
     warm = [num(b, "t_prewarm") for b in bs if b["engine"] == "ig" and num(b, "prewarm_bytes") > 0]
+    lock = list({b["log"]: num(b, "t_lock") for b in bs if b["engine"] == "ig" and b.get("lock_text") == "1"}.values())
     heap = list({b["log"]: num(b, "t_load") for b in bs if b["engine"] == "ig" and b.get("load") == "ram"}.values())
     out = []
     if ours:
         out.append(f"- Ours, per process (median of {len(ours)}): text {median([x[0] for x in ours]):.1f} s, "
                    f"suffix array {median([x[1] for x in ours]):.1f} s, order spot-check {median([x[2] for x in ours]):.3f} s; "
-                   f"sample table (stride 32) {median(tab):.3f} s.")
+                   f"sample table (stride {stride}) {median(tab):.3f} s.")
     if warm:
         out.append(f"- infini-gram: page-cache warm-up {max(warm):.1f} s, once; index read into the heap "
                    f"{median(heap):.1f} s per process." if heap else f"- infini-gram: page-cache warm-up {max(warm):.1f} s, once.")
+    if lock:
+        out.append(f"- infini-gram: text read in and locked in memory in {median(lock):.1f} s per process (median of {len(lock)}).")
     return out
+
+
+def ssd_lines(bs, t_all, two):
+    """The report of runs with our suffix array mapped from its drive."""
+    md = []
+    for cache in ("cold", "hot"):
+        rows, speedups = ssd_main_rows(bs, cache, t_all, two)
+        if not rows:
+            continue
+        md += ["", f"## Main, {cache}: infini-gram's `_find_thread` against ours", "",
+               "Median over processes (min-max). Ours end to end from pinned memory, in two phases (" + two + "): the device ranks "
+               "every chunk in the sample table, the host asks the kernel for the pages of its brackets, and the host's cores search "
+               "them. " + ("Every repetition starts with none of the suffix array's pages in the page cache, nor of infini-gram's "
+               "table." if cache == "cold" else "The repetitions after the first find their pages cached.") + " Pages: read from "
+               "storage per query, median over repetitions.", ""]
+        md += table(["workload", "q", "infini-gram", "ours", "speedup", "pages, infini-gram", "pages, ours"], rows, ["---"] + ["--:"] * 6)
+        sp = [x for x in speedups if not math.isnan(x)]
+        if sp:
+            md += ["", f"Ours over infini-gram, {cache}: {times(min(sp), 1)} to {times(max(sp), 1)} across workloads, median "
+                       f"{times(statistics.median(sp), 1)}."]
+
+    cold = [b for b in bs if b["cache"] == "cold"]
+    rows = batch_rows(cold, t_all, "mmap", True, two)
+    if rows:
+        md += ["", "## Batch size, cold: present patterns, m = 10", "",
+               "infini-gram with every core, and with a pool no larger than the batch's 256-query chunks; ours end to end. The "
+               "speedups are over the better of infini-gram's two.", ""]
+        md += table(*filled(["q", "infini-gram", "infini-gram, small pool", "ours, direct", "two-phase", "two-phase, sorted",
+                             "two-phase, pageable", "speedup", "pageable"], rows, ["--:"] * 9))
+
+    present, rows = ssd_ablation_rows(bs, two)
+    if len(present) > 1:
+        names = {"main": "one drive", "prefetch-p0": "one drive, not asking ahead", "stripe-p1": "two drives",
+                 "stripe-p0": "two drives, not asking ahead", "direct": "direct mode"}
+        md += ["", "## Our suffix array's drive, cold", "",
+               "Ours end to end from pinned memory, and the pages read per query: the suffix array on one drive, asking the kernel "
+               "for the brackets' pages ahead (the main runs) and not; split over two drives, asking and not; and the direct mode, "
+               "which binary-searches the whole suffix array with no table, on a prefix of the queries.", ""]
+        md += table(["workload"] + [x for n in present for x in (names[n], "pages")], rows, ["---"] + ["--:"] * (2 * len(present)))
+
+    rows = ablation_rows(cold, "qps_e2e", two)
+    if rows:
+        md += ["", "## Ablation, cold: stride (s), key words (w)", "",
+               f"Relative: the median over workloads of the throughput relative to the main runs' mode, {two}, end to end.", ""]
+        md += table(["mode", "table GB", "build s", "relative"] + list(SHOWN), rows, ["---"] + ["--:"] * (3 + len(SHOWN)))
+
+    for prefix, knob, title in (("host-l", "host_lanes", "searches each thread interleaves"), ("host-t", "host_threads", "threads")):
+        runs = [b for b in bs if b["engine"] == "ours" and re.fullmatch(prefix + r"\d+", b["run"])]
+        ws = sorted({b["workload"] for b in runs}, key=order)
+        rows = [[str(x)] + [mq(median(sel([b for b in runs if b.get(knob) == str(x)], "ours", lambda r: True, two, w, "qps_e2e"))) for w in ws]
+                for x in sorted({int(b[knob]) for b in runs if knob in b})]
+        if rows:
+            md += ["", f"## Our host search, cold: {title}", "", f"End to end from pinned memory, in {two}.", ""]
+            md += table([knob.split("_")[1]] + ws, rows, ["--:"] * (1 + len(ws)))
+
+    ws, rows = thread_rows(bs, "mmap")
+    if rows:
+        md += ["", "## infini-gram's pool size, cold", ""] + table(["threads"] + ws, rows, ["--:"] * (1 + len(ws)))
+
+    rows = variant_rows(cold, t_all, "mmap", "ram")
+    if rows:
+        md += ["", "## infini-gram's variants, cold", "",
+               "`_find_thread` is the main runs'; `find` is the engine's API, which starts a thread per shard for every query; "
+               "prefetching is at the engine's default depths, on the first 1e5 queries.", ""]
+        md += table(*filled(["workload", "`_find_thread`", "`find`", "prefetching", f"`_find_thread`, {PLACED['ram']}",
+                             "`find` / `_find_thread`"], rows, ["---"] + ["--:"] * 5))
+
+    lines = setup_lines(bs, two)
+    if lines:
+        md += ["", "## Setup", ""] + lines
+    return md
 
 
 def main(argv):
@@ -337,8 +470,14 @@ def main(argv):
     # End to end: through the pipeline if the results have it; from before it, the transfers and the search added up.
     piped = any("t_e2e_median" in b for b in bs)
     e2e = "end to end" if piped else "with transfers"
-    # Our two-phase mode of the main runs: unsorted if they ran it, else sorted.
-    two = next((c for c in ("s32w2o0", "s32w2o1") if any(b["config"] == c and is_main(b["run"]) for b in bs)), "s32w2o0")
+    # Our two-phase mode of the main runs: unsorted if they ran it, else sorted; stride 32 and 2-word keys if they ran several.
+    modes = {b["config"] for b in bs if b["engine"] == "ours" and is_main(b["run"]) and b["config"] != "s0w0o0"}
+    two = next((c for c in ("s32w2o0", "s32w2o1") if c in modes), None) or min(modes, key=lambda c: (not c.endswith("o0"), c), default="s32w2o0")
+    mapped = any(b.get("sa_res") == "mapped" for b in bs if b["engine"] == "ours")
+    if mapped:
+        md += ssd_lines(bs, t_all, two)
+        (d / "summary.md").write_text("\n".join(md) + "\n", encoding="utf-8")
+        return 0
     rows, speedups = main_rows(bs, t_all, ig_load, piped, two, host)
     sorted_ = ", sorted" if two.endswith("o1") else ""
     if rows and host:
