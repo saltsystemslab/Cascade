@@ -146,8 +146,8 @@ verify "${CUBWT}" libcubwt     byte_from_token16 0          "${SA_DIR}/cubwt.sa"
 
 # 2. Cross-verification. This is the load-bearing one: every cross-method
 #    comparison assumes libsais and libcubwt order suffixes the same way
-#    (shorter-suffix-first, no appended sentinel). Both drivers write canonical
-#    little-endian uint64 regardless of native width, so agreement is a `cmp`.
+#    (shorter-suffix-first, no appended sentinel). Both drivers write 5-byte
+#    little-endian lanes regardless of native width, so agreement is a `cmp`.
 #
 #    Note the pairing: both sides read the SAME bytes. libsais16x64 on tokens
 #    against libcubwt on those tokens-as-bytes would NOT be comparable, because

@@ -394,7 +394,7 @@ struct Record
     // a change to what a timing measures; records across majors do not mix.
     // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
-    static constexpr int schema_minor = 5;
+    static constexpr int schema_minor = 6;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     // Which build of that commit. The commit alone does not identify the
@@ -528,7 +528,7 @@ struct Args
     std::string method_version;         // Overrides the library's own version string.
     std::string placement;              // What the harness wrapped the run in, for the record.
     std::string results_dir = ".";
-    std::string sa_out;                 // Writing the SA is opt-in: github's would be 472 GiB.
+    std::string sa_out;                 // Writing the SA is opt-in: github's would be 298 GiB.
 
     int64_t n = 0;                      // Symbols to read; <= 0 reads the whole file.
     int64_t threads = 0;                // 0 defers to the library's default.
@@ -626,29 +626,45 @@ inline bool load_prefix(const std::string& path, const int64_t n_req, Buffer<T_s
 }
 
 
-// Always writes `n` little-endian uint64 values, whatever width the library
-// produced, so cross-checking two methods is a plain `cmp` of two files.
+// Writes `n` 5-byte little-endian lanes, whatever width the library produced:
+// the width our method outputs at, and infini-gram's from 2^32 bytes of text,
+// so every method writes as many bytes, and two drivers' outputs cross-check
+// with a plain `cmp`. The write is durable on return: the `fsync` is part of its
+// cost, as it is in ours.
 template <typename T_sa_>
 inline bool write_SA(const std::string& path, const T_sa_* const SA, const int64_t n, std::string& err)
 {
+    constexpr int64_t LANE = 5;
+    if(n > (int64_t(1) << (8 * LANE)))
+    {
+        err = "suffix array of " + std::to_string(n) + " entries exceeds 5-byte lanes";
+        return false;
+    }
+
     const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if(fd < 0)  { err = "cannot open for write: " + path; return false; }
 
     const auto fail = [&](const std::string& m) { err = m; ::close(fd); return false; };
 
-    // Chunked: keeps the widening buffer small and respects pwrite's ~2 GB cap.
-    constexpr int64_t CHUNK = 1 << 20;
-    std::vector<uint64_t> out(static_cast<std::size_t>(std::min(CHUNK, n)));
+    // Chunked: keeps the packing buffer small and respects pwrite's ~2 GB cap.
+    // Packing is parallel so that the drive, not this loop, sets the pace.
+    constexpr int64_t CHUNK = int64_t(1) << 24;
+    std::vector<uint8_t> out(static_cast<std::size_t>(std::min(CHUNK, n) * LANE));
 
     for(int64_t off = 0; off < n; )
     {
         const int64_t m = std::min(CHUNK, n - off);
+        #pragma omp parallel for schedule(static)
         for(int64_t i = 0; i < m; ++i)
-            out[static_cast<std::size_t>(i)] = static_cast<uint64_t>(SA[off + i]);
+        {
+            const auto v = static_cast<uint64_t>(SA[off + i]);
+            for(int64_t b = 0; b < LANE; ++b)
+                out[static_cast<std::size_t>(i * LANE + b)] = static_cast<uint8_t>(v >> (8 * b));
+        }
 
         const char* src  = reinterpret_cast<const char*>(out.data());
-        std::size_t want = static_cast<std::size_t>(m) * sizeof(uint64_t);
-        off_t       at   = static_cast<off_t>(off) * static_cast<off_t>(sizeof(uint64_t));
+        std::size_t want = static_cast<std::size_t>(m * LANE);
+        off_t       at   = static_cast<off_t>(off * LANE);
 
         while(want > 0)
         {
@@ -659,6 +675,9 @@ inline bool write_SA(const std::string& path, const T_sa_* const SA, const int64
 
         off += m;
     }
+
+    if(::fsync(fd) != 0)
+        return fail("fsync failed: " + path);
 
     if(::close(fd) != 0)    { err = "close failed: " + path; return false; }
     return true;
