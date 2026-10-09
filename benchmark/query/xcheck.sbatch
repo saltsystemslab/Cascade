@@ -25,13 +25,18 @@
 #   XC_SORT         batch orders of the modes, as `query find --sort`; default 0
 #   XC_RES          tier of both arrays: device (default), pinned, or pageable
 #   XC_TEXT_RES     tier of the text; default XC_RES
-#   XC_SA_RES       tier of the suffix array; default XC_RES
+#   XC_SA_RES       tier of the suffix array; default XC_RES; or mapped, which
+#                   places infini-gram's index alike: its text locked in memory,
+#                   its table mapped from its drive, and not read in first
 #   XC_NUMA         our process's NUMA placement: none (default), or interleave,
 #                   its memory interleaved over every node, as the host's search
 #                   wants
 #   XC_STAGE        node-local directory to stage both indexes and the held-out
 #                   text under first, as timed.sbatch does; default none: they
-#                   are read in place
+#                   are read in place. With the suffix array mapped, a failed
+#                   staging ends the job
+#   XC_TEXT_STAGE   node-local directory to stage the text in, apart from the
+#                   rest, as timed.sbatch does; default with our index
 #   XC_KEEP_STAGE   1 keeps the staged copies for later runs; by default the job
 #                   deletes them when it ends
 #   XC_SPOT         suffix-array order spot-checks at load; default 100000
@@ -109,18 +114,23 @@ SIDX="${IDX}"
 SIG="${IG}"
 HELDOUT="${XC_HELDOUT:-}"
 if [ "${XC_STAGE:-none}" != none ]; then
-    # The copies go when the job does, however it ends, unless kept.
-    staged=("${XC_STAGE}/ours-$(basename "${IDX}")" "${XC_STAGE}/ig-$(basename "${IG}")" "${XC_STAGE}/heldout")
+    text_dir=""
+    [ -n "${XC_TEXT_STAGE:-}" ] && text_dir="${XC_TEXT_STAGE}/text-$(basename "${IDX}")"
+
+    # The copies go when the job does, however it ends, unless kept; and then the text's staging directory, if left empty.
+    staged=("${XC_STAGE}/ours-$(basename "${IDX}")" "${XC_STAGE}/ig-$(basename "${IG}")" "${XC_STAGE}/heldout" "${text_dir}")
     if [ "${XC_KEEP_STAGE:-0}" != 1 ]; then
-        trap 'unstage "${XC_STAGE}" "${staged[@]}"' EXIT
+        trap 'unstage "${XC_STAGE}" "${staged[@]}"; [ -n "${XC_TEXT_STAGE:-}" ] && rmdir -- "${XC_TEXT_STAGE}" 2> /dev/null' EXIT
         trap 'exit 143' TERM
     fi
 
-    stamp "stage: ${XC_STAGE}"
-    if stage_indexes "${IDX}" "${IG}" "${XC_STAGE}" && { [ -z "${HELDOUT}" ] || stage_file "${HELDOUT}" "${XC_STAGE}/heldout"; }; then
+    stamp "stage: ${XC_STAGE}${text_dir:+, the text into ${text_dir}}"
+    if stage_indexes "${IDX}" "${IG}" "${XC_STAGE}" "${text_dir}" && { [ -z "${HELDOUT}" ] || stage_file "${HELDOUT}" "${XC_STAGE}/heldout"; }; then
         [ -n "${HELDOUT}" ] && HELDOUT="${XC_STAGE}/heldout/$(basename "${HELDOUT}")"
         stamp "stage: done; $(staged_sizes "${SIDX}" "${SIG}")"
     else
+        # A mapped suffix array read in place would page every probe from the shared file system: too slow to finish.
+        [ "${SA_RES}" = mapped ] && { stamp "FATAL: staging failed"; exit 1; }
         SIDX="${IDX}"
         SIG="${IG}"
         HELDOUT="${XC_HELDOUT:-}"
@@ -154,14 +164,20 @@ stamp "ours"
     --stride "${XC_STRIDE:-0,32}" --sort "${XC_SORT:-0}" --validate --reps 1 --cnt-dir "${OUT}/ours" > "${OUT}/ours/find.log" 2>&1
 stamp "ours: rc=$?"
 
+# A process over every workload, its index read in first; beside a mapped suffix array, its text locked instead, and its table read
+# from its drive.
 stamp "infini-gram"
-first=1
-for f in "${OUT}"/qry/*.qry; do
-    s=$(basename "${f}" .qry)
-    "${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${f}" --mode direct --threads "${THREADS}" --reps 1 \
-        --prewarm ${first} --cnt-out "${OUT}/ig/${s}.cnt" > "${OUT}/ig/${s}.log" 2>&1 || stamp "infini-gram failed: ${s}"
-    first=0
-done
+place=(--prewarm 1)
+[ "${SA_RES}" = mapped ] && place=(--prewarm 0 --lock-text 1)
+"${B}/benchmark/bench_infinigram_query" --index "${SIG}" --queries "${files}" --mode direct --threads "${THREADS}" --reps 1 \
+    "${place[@]}" --cnt-dir "${OUT}/ig" > "${OUT}/ig/find.log" 2>&1 || stamp "infini-gram failed"
+
+# Returns infini-gram's rate on the workload $1.
+ig_qps()
+{
+    awk -F= -v w="$1" '$1 == "queries" { n = split($2, p, "/"); c = p[n]; sub(/[.]qry$/, "", c) } $1 == "qps" && c == w { print $2; exit }' \
+        "${OUT}/ig/find.log"
+}
 
 # Every mode's counts of a workload must equal infini-gram's.
 stamp "compare"
@@ -170,7 +186,7 @@ for c in "${OUT}"/ours/*.cnt; do
     s=$(basename "${c}" .cnt)
     w=${s%@*}
     if cmp -s "${c}" "${OUT}/ig/${w}.cnt"; then r=same; else r=DIFFERENT; fail=$((fail + 1)); fi
-    printf '%-24s %-9s ig %s q/s\n' "${s}" "${r}" "$(grep -m1 '^qps=' "${OUT}/ig/${w}.log" | cut -d= -f2)"
+    printf '%-24s %-9s ig %s q/s\n' "${s}" "${r}" "$(ig_qps "${w}")"
 done > "${OUT}/summary.txt"
 cat "${OUT}/summary.txt"
 stamp "compare: ${fail} of $(ls "${OUT}"/ours/*.cnt | wc -l) count files differ; certificate: $(grep -c '^validate=pass' "${OUT}/ours/find.log") pass, $(grep -c '^validate=FAIL' "${OUT}/ours/find.log") fail"
