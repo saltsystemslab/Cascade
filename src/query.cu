@@ -10,6 +10,11 @@
 
 #include <cuda_runtime.h>
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
@@ -23,6 +28,7 @@
 #include <random>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
 
 
@@ -204,6 +210,56 @@ uint64_t storage_read_bytes()
 
     return 0;
 }
+
+
+// A file mapped read-only into memory, its pages read as they are touched, at
+// random: no readahead. Unmapped when destroyed.
+class Mapped_File
+{
+private:
+
+    void* data_ = nullptr;
+    std::size_t bytes_ = 0;
+
+
+public:
+
+    // Maps the file at `path`; nothing if `path` is empty, or if the file cannot
+    // be mapped, leaving `data()` null.
+    explicit Mapped_File(const std::string& path)
+    {
+        if(path.empty())
+            return;
+
+        const int fd = ::open(path.c_str(), O_RDONLY);
+        struct stat st;
+        if(fd >= 0 && ::fstat(fd, &st) == 0 && st.st_size > 0)
+        {
+            void* const p = ::mmap(nullptr, st.st_size, PROT_READ, MAP_SHARED, fd, 0);
+            if(p != MAP_FAILED)
+            {
+                ::madvise(p, st.st_size, MADV_RANDOM);
+                data_ = p;
+                bytes_ = static_cast<std::size_t>(st.st_size);
+            }
+        }
+
+        if(fd >= 0)
+            ::close(fd);    // The mapping keeps the file.
+    }
+
+    ~Mapped_File()
+    {
+        if(data_ != nullptr)
+            ::munmap(data_, bytes_);
+    }
+
+    Mapped_File(const Mapped_File&) = delete;
+    Mapped_File& operator=(const Mapped_File&) = delete;
+
+    const void* data() const { return data_; }
+    std::size_t bytes() const { return bytes_; }
+};
 
 
 // Returns the values `v` as a comma-separated list.
@@ -568,25 +624,16 @@ int run_gen(const Args& a)
         return 1;
     }
 
-    // The text to draw substrings from: the index's, or a held-out one of the same symbols.
+    // The text to draw substrings from: the index's, or a held-out one of the same symbols; mapped, so that only the pages that the
+    // substrings touch are read.
     const std::string source = a.get("source", m.text);
-    std::vector<T_sym_> T;
-    if(from_text)
+    const Mapped_File text(from_text ? source : std::string());
+    const T_sym_* const T = static_cast<const T_sym_*>(text.data());
+    const uint64_t n = text.bytes() / sizeof(T_sym_);
+    if(from_text && (T == nullptr || n == 0 || text.bytes() % sizeof(T_sym_) != 0))
     {
-        std::error_code ec;
-        const auto bytes = std::filesystem::file_size(source, ec);
-        if(ec || bytes == 0 || bytes % sizeof(T_sym_) != 0)
-        {
-            std::fprintf(stderr, "error: cannot use %s as a text of %zu-byte symbols\n", source.c_str(), sizeof(T_sym_));
-            return 1;
-        }
-
-        T.resize(bytes / sizeof(T_sym_));
-        if(!index_io::read_range(source, 0, bytes, reinterpret_cast<uint8_t*>(T.data()), err))
-        {
-            std::fprintf(stderr, "error: %s\n", err.c_str());
-            return 1;
-        }
+        std::fprintf(stderr, "error: cannot use %s as a text of %zu-byte symbols\n", source.c_str(), sizeof(T_sym_));
+        return 1;
     }
 
     std::mt19937_64 rng(seed);
@@ -602,14 +649,37 @@ int run_gen(const Args& a)
             off.push_back(sym.size());
         }
     }
+    else if(kind == "substring")
+    {
+        // The substrings' places first, as the seed draws them; then their symbols, copied by every core at once.
+        std::vector<uint64_t> pos(q);
+        for(uint64_t i = 0; i < q; ++i)
+        {
+            const uint64_t len = std::min<uint64_t>(lens[rng() % lens.size()], n);
+            pos[i] = rng() % (n - len + 1);
+            off.push_back(off.back() + len);
+        }
+
+        sym.resize(off.back());
+        const uint64_t t_c = std::min<uint64_t>(std::max(1u, std::thread::hardware_concurrency()), std::max<uint64_t>(q, 1));
+        std::vector<std::thread> pool;
+        for(uint64_t t = 0; t < t_c; ++t)
+            pool.emplace_back([&, t]
+            {
+                for(uint64_t i = q * t / t_c; i < q * (t + 1) / t_c; ++i)
+                    std::copy(T + pos[i], T + pos[i] + (off[i + 1] - off[i]), sym.begin() + off[i]);
+            });
+        for(auto& th : pool)
+            th.join();
+    }
     else
         for(uint64_t i = 0; i < q; ++i)
         {
-            const uint64_t len = (from_text ? std::min<uint64_t>(lens[rng() % lens.size()], T.size()) : lens[rng() % lens.size()]);
+            const uint64_t len = (from_text ? std::min<uint64_t>(lens[rng() % lens.size()], n) : lens[rng() % lens.size()]);
             if(from_text)
             {
-                const uint64_t pos = rng() % (T.size() - len + 1);
-                sym.insert(sym.end(), T.begin() + pos, T.begin() + pos + len);
+                const uint64_t pos = rng() % (n - len + 1);
+                sym.insert(sym.end(), T + pos, T + pos + len);
                 if(kind == "mutated" && len > 0 && vocab > 1)  // One symbol replaced by a different one.
                 {
                     T_sym_& x = sym[sym.size() - len + rng() % len];
