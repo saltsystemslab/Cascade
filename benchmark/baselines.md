@@ -308,5 +308,7 @@ mid-token. Such a check fails correctly and wastes a day.
   `set +u` (module init scripts reference unset variables freely) and try, in
   order: `/usr/share/lmod/lmod/init/bash`, `/etc/profile.d/lmod.sh`,
   `/etc/profile.d/modules.sh`, `/usr/share/Modules/init/bash`.
-- github's SA at 5 B/suffix is **298 GiB**, so `--sa-out` stays off except on the
-  small cross-check runs.
+- github's SA at 5 B/suffix is **298 GiB**, so `--sa-out` stays off in
+  `bench.sbatch`'s campaigns, which time construction alone. The end-to-end runs
+  (`infinigram/e2e.sbatch`, METHODS=libsais) turn it on, as ours and
+  infini-gram's builds both write theirs.

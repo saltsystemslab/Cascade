@@ -789,6 +789,68 @@ def cmd_ours(a):
     sys.exit(0 if code == 0 else 1)
 
 
+# Runs libsais end to end on the staged input their runs and ours read, its SA
+# written to the node-local drive as ours dumps it, so that t_load + t_core +
+# t_write spans what their build_sa and our run do. `--unstaged` reads the
+# corpus in place instead, for runs that end before they would write.
+def cmd_libsais(a):
+    if not a.libsais_bin or not os.access(a.libsais_bin, os.X_OK):
+        die(f"--libsais-bin/LIBSAIS_BIN must name a built bench_libsais; got {a.libsais_bin!r}")
+
+    r = row(a.corpus_root, a.corpus, a.tokenizer)
+    _, save, ds, _ = paths(a, r)
+    short = ALIAS.get(r["label"], r["label"])
+    cpus = a.cpus or THREADS
+    n = r["bytes"] // 2
+    rid = a.run_id or f"libsais16x64_{short}-{r['tokenizer']}_token16_n0_t{cpus}_r{a.rep}"
+    rec = os.path.join(a.results_dir, rid + ".json")
+    if os.path.exists(rec) and not a.rerun:
+        return print(f"== {rid}\n   skip (record exists)")
+
+    if not a.unstaged and not os.path.exists(os.path.join(save, "offset.0")):
+        die("offset.0 missing -- run `prep` first, or pass --unstaged.")
+
+    # Same wrapper and same recorded string as bench.sbatch's, so placement
+    # groups the same whichever harness ran it.
+    place = ["numactl"] + a.numactl.split() if a.numactl else []
+    sa_out = os.path.join(a.temp_root, f"libsais-{os.environ.get('SLURM_JOB_ID', os.getpid())}.sa")
+    if a.unstaged:
+        real, note = find_input(a.corpus_root, r), "unstaged"
+    elif a.dry_run:     # Staging is the real run's; this checks the invocation.
+        real, note = os.path.join(a.stage_root, "ig-stage", f"{r['label']}-{r['tokenizer']}", "tokenized.0"), ""
+    else:
+        stage_dir, stage_s, staged = stage(os.path.realpath(ds),
+                                           os.path.realpath(os.path.join(save, "offset.0")),
+                                           a.stage_root, f"{r['label']}-{r['tokenizer']}")
+        real = os.path.join(stage_dir, "tokenized.0")
+        note = f"staged {staged / 2**30:.1f} GiB in {stage_s}s" if staged else ""
+
+    cmd = place + [a.libsais_bin, "--input", real, "--corpus", short,
+                   "--tokenizer", r["tokenizer"], "--run-id", rid, "--alphabet", "token16",
+                   "--n", "0", "--threads", str(cpus), "--placement", " ".join(place),
+                   "--results-dir", a.results_dir, "--sa-out", sa_out]
+    print(f"== {rid}\n   {r['bytes'] / 2**30:.1f} GiB, {n:,} symbols, "
+          f"{n * 5 / 2**30:.1f} GiB of output -> {sa_out}\n"
+          f"   cpus {cpus}  placement {' '.join(place) or 'default'}  input {real}"
+          + (f"  ({note})" if note else ""))
+    if a.dry_run:
+        return print("   " + " ".join(cmd) + "\nDRY RUN")
+
+    t = time.monotonic()
+    try:
+        with open(os.path.join(a.results_dir, rid + ".log"), "wb") as lf:
+            code = subprocess.call(cmd, stdout=lf, stderr=subprocess.STDOUT)
+    finally:
+        # A surviving SA would fill the drive the next run spills onto.
+        if os.path.exists(sa_out):
+            print(f"   wrote       {os.path.getsize(sa_out):,} bytes, want {n * 5:,}")
+            os.unlink(sa_out)
+
+    print(f"   exit {code}  wall {time.monotonic() - t:.1f}s"
+          + ("" if os.path.exists(rec) else "  -- no record written"))
+    sys.exit(0 if code == 0 else 1)
+
+
 # Appends this invocation to the campaign's manifest, the only thing that tells
 # "never requested" apart from "requested but died" (summarize.py:278-291).
 # Appended, not overwritten: several jobs accumulate into one directory.
@@ -862,6 +924,23 @@ def main():
     q.add_argument("--rerun", action="store_true")
     q.add_argument("--dry-run", action="store_true")
     q.set_defaults(fn=cmd_ours)
+
+    q = s.add_parser("libsais", parents=[common], help="run libsais end to end on the staged input")
+    q.add_argument("corpus")
+    q.add_argument("--tokenizer")
+    q.add_argument("--results-dir", required=True)
+    q.add_argument("--libsais-bin", default=os.environ.get("LIBSAIS_BIN"))
+    q.add_argument("--cpus", type=int, help=f"default {THREADS}")
+    q.add_argument("--numactl", default=os.environ.get("NUMACTL", ""),
+                   help='placement, e.g. --numactl=--cpunodebind=0 (the = is needed)')
+    q.add_argument("--unstaged", action="store_true", help="read the corpus in place")
+    q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"))
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
+    q.add_argument("--run-id")
+    q.add_argument("--rep", type=int, default=1)
+    q.add_argument("--rerun", action="store_true")
+    q.add_argument("--dry-run", action="store_true")
+    q.set_defaults(fn=cmd_libsais)
 
     q = s.add_parser("manifest", parents=[common], help="append this job to the campaign manifest")
     q.add_argument("corpora", help="space-separated label:tokenizer pairs")

@@ -5,11 +5,16 @@
 #OURS_BIN=${HOME}/gpu-saca-worktrees/v0.8.0/build/src/bench_gpu_saca \
 #          benchmark/infinigram/e2e.sbatch <results-dir>
 # CORPORA: space-separated label:tokenizer pairs, ascending size.
-# METHODS: colon-separated, of infinigram and gpu_saca. Defaults to gpu_saca
+# METHODS: colon-separated, of infinigram, gpu_saca and libsais. Defaults to gpu_saca
 # alone: `run.sbatch` already measures theirs end to end -- their t_core covers
 # make-part's read of the staged copy, concat's write, and the fsync -- so their
 # baseline is banked, and re-taking it on every version bump of ours would spend
 # hours of node time to reproduce a number that has not moved.
+# libsais needs LIBSAIS_BIN, a bench_libsais built at the commit under test, and
+# takes NUMACTL (e.g. "--cpunodebind=0") as its placement. UNSTAGED=1 reads the
+# corpus in place instead of staging it, for libsais runs refused or OOM-killed
+# before they would write: their input path does not matter, and staging c4
+# alone copies 396 GB.
 # --gres: ours needs the GPU; their baseline ignores it.
 
 #SBATCH --job-name=e2e
@@ -33,10 +38,29 @@ if [ -r "${REPO}/benchmark/local.env" ]; then
     set +u; . "${REPO}/benchmark/local.env"; set -u
 fi
 
+METHODS="${METHODS:-gpu_saca}"
+declare -a BINS=()
+UNSTAGED_ARG=""
+if [ "${UNSTAGED:-0}" = 1 ]; then
+    [ "${METHODS}" = libsais ] || { echo "FATAL: UNSTAGED=1 is for METHODS=libsais alone; the others read the staged copy"; exit 1; }
+    UNSTAGED_ARG=--unstaged
+fi
+
 # Building is bench.sbatch's job, keyed on a tag; this consumes the artifact so
 # the two campaigns cannot disagree about what the binary is.
-[ -x "${OURS_BIN:-}" ] || { echo "FATAL: OURS_BIN must name a built bench_gpu_saca; got '${OURS_BIN:-}'"; exit 1; }
-export OURS_BIN OURS_TAG="${OURS_TAG:-unknown}"
+case ":${METHODS}:" in
+    *:gpu_saca:*)
+        [ -x "${OURS_BIN:-}" ] || { echo "FATAL: OURS_BIN must name a built bench_gpu_saca; got '${OURS_BIN:-}'"; exit 1; }
+        BINS+=("${OURS_BIN}")
+        ;;
+esac
+case ":${METHODS}:" in
+    *:libsais:*)
+        [ -x "${LIBSAIS_BIN:-}" ] || { echo "FATAL: LIBSAIS_BIN must name a built bench_libsais; got '${LIBSAIS_BIN:-}'"; exit 1; }
+        BINS+=("${LIBSAIS_BIN}")
+        ;;
+esac
+export OURS_BIN="${OURS_BIN:-}" OURS_TAG="${OURS_TAG:-unknown}" LIBSAIS_BIN="${LIBSAIS_BIN:-}"
 
 # Two node-local NVMe drives: input is staged on one, temp and output on the
 # other. Ours stripes its spill across both, so the staged input shares /tmp2
@@ -59,13 +83,15 @@ fi
 # Executable is not loadable: ours links libcudart, which only a loaded cuda
 # module puts on the loader path, and `-x` above cannot see that. Checked here
 # rather than at the first run, which is past staging the corpus.
-"${OURS_BIN}" >/dev/null 2>&1
-if [ $? -eq 127 ]; then
-    echo "FATAL: ${OURS_BIN} will not load. MODULES='${MODULES:-}'; missing:"
-    ldd "${OURS_BIN}" 2>&1 | grep 'not found'
-    echo "Set MODULES (see benchmark/local.env) so the job loads the cuda runtime."
-    exit 1
-fi
+for b in ${BINS[@]+"${BINS[@]}"}; do
+    "${b}" >/dev/null 2>&1
+    if [ $? -eq 127 ]; then
+        echo "FATAL: ${b} will not load. MODULES='${MODULES:-}'; missing:"
+        ldd "${b}" 2>&1 | grep 'not found'
+        echo "Set MODULES (see benchmark/local.env) so the job loads the cuda runtime."
+        exit 1
+    fi
+done
 
 # Stamp the binary under test into every record.
 if [ -r "${HERE}/pin" ]; then
@@ -76,11 +102,11 @@ fi
 
 # igbench defaults to 128; set CPUS to override.
 CPUS="${CPUS:-}"
-METHODS="${METHODS:-gpu_saca}"
 mkdir -p "${RESULTS}"
 [ -r "${HERE}/pin" ] && cp "${HERE}/pin" "${RESULTS}/pin"
 echo "host $(hostname)  cpus ${CPUS:-<igbench default>}  methods ${METHODS}"
-echo "ours ${OURS_TAG} ${OURS_BIN}"
+echo "ours ${OURS_TAG} ${OURS_BIN:-<none>}"
+echo "libsais ${LIBSAIS_BIN:-<none>}  placement ${NUMACTL:-default}${UNSTAGED_ARG:+  unstaged}"
 echo "stage ${IG_STAGE_ROOT}  temp ${IG_TEMP_ROOT}  spill ${GPU_SACA_SCRATCH}  results ${RESULTS}"
 python3 "${HERE}/igbench.py" manifest "${CORPORA:?CORPORA required}" \
         --results-dir "${RESULTS}" --reps "${REPS:-1}" --methods "${METHODS}"
@@ -90,7 +116,7 @@ df -h "${IG_TEMP_ROOT}" "${IG_STAGE_ROOT}" 2>/dev/null | awk 'NR==1 || /^\/dev/ 
 for pair in ${CORPORA:?CORPORA required}; do
     # Stage once, before the replicates, so none of them carries the copy. Same
     # layout `run.sbatch` stages, so ours reads the bytes off the drive theirs did.
-    python3 "${HERE}/igbench.py" stage "${pair%%:*}" --tokenizer "${pair##*:}"
+    [ -n "${UNSTAGED_ARG}" ] || python3 "${HERE}/igbench.py" stage "${pair%%:*}" --tokenizer "${pair##*:}"
 
     # Both subcommands skip themselves when their record exists, so a resubmit
     # resumes. Each record carries thp_refused and huge@start, which is what
@@ -107,6 +133,12 @@ for pair in ${CORPORA:?CORPORA required}; do
                 gpu_saca)   python3 "${HERE}/igbench.py" ours "${pair%%:*}" \
                         --tokenizer "${pair##*:}" --results-dir "${RESULTS}" \
                         --rep "${r}" ${CPUS:+--cpus "${CPUS}"} ;;
+                # --numactl=, joined: argparse would read a separate
+                # "--cpunodebind=0" as an option of its own.
+                libsais)    python3 "${HERE}/igbench.py" libsais "${pair%%:*}" \
+                        --tokenizer "${pair##*:}" --results-dir "${RESULTS}" \
+                        --rep "${r}" ${CPUS:+--cpus "${CPUS}"} \
+                        ${NUMACTL:+--numactl="${NUMACTL}"} ${UNSTAGED_ARG} ;;
                 *) echo "FATAL: unknown method '${m}'"; exit 1 ;;
             esac
             echo "    exit $?"
