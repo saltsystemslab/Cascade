@@ -119,7 +119,7 @@ if [ "${XC_STAGE:-none}" != none ]; then
     stamp "stage: ${XC_STAGE}"
     if stage_indexes "${IDX}" "${IG}" "${XC_STAGE}" && { [ -z "${HELDOUT}" ] || stage_file "${HELDOUT}" "${XC_STAGE}/heldout"; }; then
         [ -n "${HELDOUT}" ] && HELDOUT="${XC_STAGE}/heldout/$(basename "${HELDOUT}")"
-        stamp "stage: done; $(du -shL "${SIDX}" | cut -f1) ours, $(du -shL "${SIG}" | cut -f1) infini-gram"
+        stamp "stage: done; $(staged_sizes "${SIDX}" "${SIG}")"
     else
         SIDX="${IDX}"
         SIG="${IG}"

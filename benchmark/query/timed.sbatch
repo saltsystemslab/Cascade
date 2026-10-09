@@ -233,7 +233,7 @@ if [ "${STAGE}" != none ]; then
     stamp "stage: ${STAGE}"
     if stage_indexes "${IDX}" "${IG}" "${STAGE}"; then
         BQ="${STAGE}/batch-qry-$(basename "${IDX}")"
-        stamp "stage: done; $(du -shL "${SIDX}" | cut -f1) ours, $(du -shL "${SIG}" | cut -f1) infini-gram"
+        stamp "stage: done; $(staged_sizes "${SIDX}" "${SIG}")"
     else
         SIDX="${IDX}"
         SIG="${IG}"
