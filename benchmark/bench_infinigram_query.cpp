@@ -13,7 +13,9 @@
 //   --mode      find: the engine's `find`, which starts a thread per shard for
 //               every query (default). direct: the engine's `_find_thread` over
 //               every whole shard, called from the pool.
-//   --threads   pool size; default: the hardware concurrency.
+//   --threads   pool size; default: the hardware concurrency. The threads take
+//               the queries in chunks of up to 256: fewer in a batch too small
+//               to make 8 chunks per thread.
 //   --load      mmap: the files memory-mapped with `MADV_RANDOM`, the engine's
 //               default (default). ram: read into the heap.
 //   --prefetch  0: no prefetching, as the public API server runs (default).
@@ -62,7 +64,8 @@ R"(Usage: bench_infinigram_query --index DIR --queries Q1.qry[,Q2.qry,...] [--q 
            [--lock-text 0|1] [--cold 0|1] [--cnt-out F] [--cnt-dir D]
 )";
 
-constexpr std::size_t CHUNK = 256;  // Queries a pool thread takes at a time.
+constexpr std::size_t CHUNK = 256;  // Queries a pool thread takes at a time, at most.
+constexpr std::size_t CHUNKS_PER_THREAD = 8;    // Chunks per pool thread that a batch is cut into, at least, if it has the queries.
 
 
 double seconds_since(const std::chrono::steady_clock::time_point t0)
@@ -219,9 +222,12 @@ int count_batch(const Engine<U16>& engine, const std::string& path, const uint64
 
     const uint64_t q = off.size() - 1;
     const std::size_t shards = engine.get_num_shards();
-    std::printf("queries=%s\nq=%" PRIu64 "\nsym_c=%" PRIu64 "\n", path.c_str(), q, off[q]);
+    // Chunks of fewer queries for a batch too small to give every thread a few: else its threads would idle, which costs
+    // the most with cold caches, where every query waits on its reads.
+    const uint64_t chunk = std::clamp<uint64_t>(q / (threads * CHUNKS_PER_THREAD), 1, CHUNK);
+    std::printf("queries=%s\nq=%" PRIu64 "\nsym_c=%" PRIu64 "\nchunk=%" PRIu64 "\n", path.c_str(), q, off[q], chunk);
 
-    // One run over the batch: every pool thread takes `CHUNK` queries at a time.
+    // One run over the batch: every pool thread takes `chunk` queries at a time.
     std::vector<uint64_t> cnt(q);
     const auto run = [&]
     {
@@ -230,8 +236,8 @@ int count_batch(const Engine<U16>& engine, const std::string& path, const uint64
         for(uint64_t t = 0; t < threads; ++t)
             pool.emplace_back([&]
             {
-                for(uint64_t b; (b = next.fetch_add(CHUNK)) < q; )
-                    for(uint64_t i = b; i < std::min(q, b + CHUNK); ++i)
+                for(uint64_t b; (b = next.fetch_add(chunk)) < q; )
+                    for(uint64_t i = b; i < std::min(q, b + chunk); ++i)
                     {
                         const U16* const P = sym.data() + off[i];
                         const uint64_t m = off[i + 1] - off[i];
