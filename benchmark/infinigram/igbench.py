@@ -567,7 +567,7 @@ def cmd_run(a):
     # `bench.hpp`'s field set. The fault and switch counters come from RUSAGE_CHILDREN,
     # not RUSAGE_SELF: their pipeline is a subprocess tree, and these counters sum across children.
     rec = {
-        "schema_version": 6, "schema_minor": 6,
+        "schema_version": 6, "schema_minor": 7,
         "run_id": rid, "method": "infinigram",
         "build_type": "Release",
         # Not "unknown": that means an emitter lost the value, and summarize.py
@@ -616,6 +616,7 @@ def cmd_run(a):
                              "t_device_setup", "t_initial_rank", "t_reload_pid",
                              "t_exponentiate", "t_concatenate")},
         "n_partitions": -1, "n_generations": -1, "pid_spill": -1,
+        "host_budget": -1, "host_fixed": -1,
         "exe_hash": int(sha256(binary)[:16], 16),
         "env_tuning": ";".join(sorted(f"{k}={v}" for k, v in os.environ.items()
                                       if k.startswith(("OMP_", "GPU_SACA_")))),

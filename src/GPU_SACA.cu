@@ -91,6 +91,9 @@ GPU_SACA<T_sym_>::~GPU_SACA()
     if(slab_pinner_.joinable()) // The slab-pinner may still be alive if the build failed to reach its await.
         slab_pinner_.join();
 
+    if(spill_)  // A build refused at plan time has not removed its run directory.
+        spill_->cleanup();
+
     util::deallocate(T_h_);
 
     for(std::size_t s = 0; s < STREAM_C; ++s)
@@ -767,7 +770,8 @@ void GPU_SACA<T_sym_>::partition()
             open_scratch();
             setup_staging_config();
             util::file::raise_open_files_limit(SPILL_ROLE_C * p_ + 64); // Spill-files of all partitions at once, plus slack for the rest of the process.
-            backend_ = std::make_unique<Partition_Backend>(P_cap, chunk_cap_, *spill_, host_budget, fixed_budget(), p_);
+            build_timing_.host_budget = host_budget, build_timing_.host_fixed = fixed_budget();
+            backend_ = std::make_unique<Partition_Backend>(P_cap, chunk_cap_, *spill_, host_budget, build_timing_.host_fixed, p_);
 
             P_buf.reserve(p_);
             for(p_id_t p_id = 0; p_id < p_; ++p_id)

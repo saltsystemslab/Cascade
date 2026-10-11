@@ -125,7 +125,16 @@ int main(int argc, char** argv)
     gpu_saca::reset_device_peak();
 
     const auto t0 = bench::Clock::now();
-    saca.build_SA();
+    try
+    {
+        saca.build_SA();
+    }
+    catch(const gpu_saca::Host_Budget_Refusal& e)   // A budget sweep's floor, found at plan time: recorded like a baseline's OOM.
+    {
+        rec.host_budget = static_cast<int64_t>(e.budget);
+        rec.host_fixed  = static_cast<int64_t>(e.fixed);
+        return emit(bench::st::OOM_HOST, 0, e.what());
+    }
     const auto t_build = bench::since(t0);
 
     const auto& bt = saca.timings();
@@ -149,6 +158,8 @@ int main(int argc, char** argv)
     rec.n_partitions   = bt.p;
     rec.n_generations  = bt.gen_c;
     rec.pid_spill      = bt.pid_spill;
+    rec.host_budget    = static_cast<int64_t>(bt.host_budget);
+    rec.host_fixed     = static_cast<int64_t>(bt.host_fixed);
 
     // `t_build` is the driver's own wall time around build_SA(); t_load + t_core
     // should account for it, and a gap is worth digging.

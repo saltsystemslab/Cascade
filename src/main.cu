@@ -22,6 +22,7 @@ int main(int argc, char** argv)
     const std::string ip_path(argv[1]);
     const std::string op_path(argv[2]);
 
+    try
     {
         gpu_saca::GPU_SACA<T_sym_> saca(ip_path, op_path);
 
@@ -29,6 +30,11 @@ int main(int argc, char** argv)
         saca.build_SA();
         const auto t_1 = gpu_saca::timer::now();
         std::cerr << "Time taken: " << gpu_saca::timer::duration(t_1 - t_0) << "s.\n";
+    }
+    catch(const gpu_saca::Host_Budget_Refusal& e)
+    {
+        std::cerr << e.what() << " Aborting.\n";
+        std::exit(EXIT_FAILURE);
     }
 
 #if defined(TESTS) || defined(VALIDATE)

@@ -20,7 +20,7 @@ GiB = 1 << 30
 # baseline's numbers stand, so a campaign pair will routinely span minors. Only
 # a major says a field changed meaning, and only then are the two sets of
 # numbers actually incomparable.
-SCHEMA = (6, 6)
+SCHEMA = (6, 7)
 
 # What each minor added. Declaring a minor is a claim to carry these, so a
 # record that omits one has an emitter that fell behind -- which is a different
@@ -34,6 +34,7 @@ FIELDS_BY_MINOR = {
     4: ("io_rchar", "io_wchar", "io_read_bytes", "io_write_bytes"),
     5: ("t_reload_pid", "pid_spill"),   # Also widened oom_host to an OOM-killed run.
     6: (),  # A written SA became 5-byte lanes, fsynced inside t_write.
+    7: ("host_budget", "host_fixed"),   # Also widened oom_host to a refused host-budget.
 }
 
 # A run is comparable to another run only if the machine was in the same state.

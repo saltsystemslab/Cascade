@@ -304,7 +304,8 @@ public:
 
     ~GPU_SACA();
 
-    // Builds the suffix array into the file at the output path.
+    // Builds the suffix array into the file at the output path. Throws
+    // `Host_Budget_Refusal` if the host-budget cannot fit the fixed allocation.
     void build_SA();
 
     // Returns per-phase timings of the method's execution.

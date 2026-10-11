@@ -6,6 +6,8 @@
 
 #include "types.hpp"
 
+#include <cstddef>
+
 
 namespace gpu_saca
 {
@@ -27,6 +29,8 @@ struct Build_Timing
     p_id_t p = 0;   // Count of partitions.
     idx_t  gen_c = 0;   // Doubling generations executed.
     bool   pid_spill = false;   // Whether the partition-ID map stayed on disk until the initial ranking completed.
+    std::size_t host_budget = 0;    // Bytes of the host-memory budget.
+    std::size_t host_fixed = 0; // Bytes of the budget the fixed allocation takes, the rest going to the RAM-tiers.
 
     // Returns the time spent in the core of the method: everything except text-
     // read.

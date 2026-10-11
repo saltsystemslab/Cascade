@@ -7,10 +7,22 @@
 #include "types.hpp"
 
 #include <cstddef>
+#include <stdexcept>
 #include <vector>
 
 namespace gpu_saca
 {
+
+// Refusal of a host-budget that cannot fit the fixed requirement: at plan time,
+// before anything spills. Thrown so that a caller can record it.
+struct Host_Budget_Refusal : std::runtime_error
+{
+    const std::size_t budget;   // Bytes of the host-budget refused.
+    const std::size_t fixed;    // Bytes of the fixed requirement it cannot fit.
+
+    Host_Budget_Refusal(std::size_t budget, std::size_t fixed);
+};
+
 
 // Host-residency plan of the partitions' content at the first barrier: per
 // field, a leading run of each partition's chunks starts in RAM.
@@ -35,7 +47,8 @@ public:
     // partitions' largest-first, then as many chunks of the partition next as
     // fit, with the keys starting in disk. Or, with `GPU_SACA_CHUNK_PLAN=0`,
     // whole partitions' data (suffixes and keys) is placed, largest-first, as
-    // far as the budget admits.
+    // far as the budget admits. Throws `Host_Budget_Refusal` if `budget` cannot
+    // fit `fixed_bytes`.
     Residency_Plan(const std::vector<idx_t>& P_cap, idx_t chunk_cap, std::size_t budget, std::size_t fixed_bytes);
 
     // Returns the count of the `p_id`'th partition's chunks.

@@ -5,13 +5,37 @@
 
 #include <numeric>
 #include <string>
+#include <sstream>
 #include <iostream>
-#include <cstdlib>
 #include <algorithm>
 
 
 namespace gpu_saca
 {
+
+namespace
+{
+
+// Returns the refusal's message for host-budget `budget` and fixed requirement
+// `fixed`, in bytes.
+std::string refusal_message(const std::size_t budget, const std::size_t fixed)
+{
+    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+
+    std::ostringstream os;
+    os << "The host memory-budget of " << GB(budget) << "GBs cannot fit the fixed requirement of " << GB(fixed) << "GBs.";
+    return os.str();
+}
+
+}
+
+
+Host_Budget_Refusal::Host_Budget_Refusal(const std::size_t budget, const std::size_t fixed):
+      std::runtime_error(refusal_message(budget, fixed))
+    , budget(budget)
+    , fixed(fixed)
+{}
+
 
 Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const idx_t chunk_cap, const std::size_t budget, const std::size_t fixed_bytes):
       chunk_c_(P_cap.size())
@@ -25,10 +49,7 @@ Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const idx_t chun
     constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
 
     if(budget < fixed_bytes)
-    {
-        std::cerr << "The host memory-budget of " << GB(budget) << "GBs cannot fit the fixed requirement of " << GB(fixed_bytes) << "GBs. Aborting.\n";
-        std::exit(EXIT_FAILURE);
-    }
+        throw Host_Budget_Refusal(budget, fixed_bytes);
 
     cap_ = (force_spill_ ? 0 : budget - fixed_bytes);
 

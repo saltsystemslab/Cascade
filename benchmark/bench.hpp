@@ -363,7 +363,7 @@ inline std::string tuning_env()
 namespace st
 {
     inline constexpr const char* OK         = "ok";
-    inline constexpr const char* OOM_HOST   = "oom_host";   // Allocation refused, or the run OOM-killed.
+    inline constexpr const char* OOM_HOST   = "oom_host";   // Allocation refused, the run OOM-killed, or its host-budget refused.
     inline constexpr const char* OOM_DEVICE = "oom_device";
     inline constexpr const char* BAD_INPUT  = "bad_input";
     inline constexpr const char* BAD_PARAM  = "bad_param";
@@ -394,7 +394,7 @@ struct Record
     // a change to what a timing measures; records across majors do not mix.
     // A record without `schema_minor` predates the scheme and reads as minor 0.
     static constexpr int schema_version = 6;
-    static constexpr int schema_minor = 6;
+    static constexpr int schema_minor = 7;
 
     std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
     // Which build of that commit. The commit alone does not identify the
@@ -438,6 +438,7 @@ struct Record
                 t_initial_rank = -1, t_reload_pid = -1, t_exponentiate = -1, t_concatenate = -1;
     int64_t     n_partitions = -1, n_generations = -1;
     int64_t     pid_spill = -1; // Whether the partition-ID map stayed on disk until the initial ranking completed.
+    int64_t     host_budget = -1, host_fixed = -1;  // Bytes of the host-memory budget, and of its fixed allocation.
 
     std::string notes;
 
@@ -480,6 +481,7 @@ struct Record
         J_NUM(t_device_setup); J_NUM(t_initial_rank);J_NUM(t_reload_pid);
         J_NUM(t_exponentiate); J_NUM(t_concatenate); J_NUM(n_partitions);
         J_NUM(n_generations);  J_NUM(pid_spill);
+        J_NUM(host_budget);    J_NUM(host_fixed);
         J_STR(notes);
 
         #undef J_NUM
