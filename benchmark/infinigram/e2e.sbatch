@@ -15,6 +15,10 @@
 # corpus in place instead of staging it, for libsais runs refused or OOM-killed
 # before they would write: their input path does not matter, and staging c4
 # alone copies 396 GB.
+# RESET=1 runs benchmark/reset_memory before every replicate, then re-reads the
+# staged input into the page cache, as staging left it for the first. A run's
+# huge-page supply otherwise depends on whatever ran before it: libsais's c4p64
+# replicates took 13,157, 11,102 and 9,042 s in turn as the node recovered.
 # --gres: ours needs the GPU; their baseline ignores it.
 
 #SBATCH --job-name=e2e
@@ -100,6 +104,13 @@ else
     echo "WARN: no ${HERE}/pin; records will say commit=unknown"
 fi
 
+RESET_BIN=""
+if [ "${RESET:-0}" = 1 ]; then
+    RESET_BIN="/tmp/reset_memory-${SLURM_JOB_ID:-$$}"
+    g++ -std=c++17 -O2 -fopenmp -I "${REPO}/benchmark" "${REPO}/benchmark/reset_memory.cpp" -o "${RESET_BIN}" \
+        || { echo "FATAL: cannot build reset_memory"; exit 1; }
+fi
+
 # igbench defaults to 128; set CPUS to override.
 CPUS="${CPUS:-}"
 mkdir -p "${RESULTS}"
@@ -123,6 +134,11 @@ for pair in ${CORPORA:?CORPORA required}; do
     # tells whether a campaign run weeks apart from another is comparable to it.
     for m in ${METHODS//:/ }; do
         for r in $(seq 1 "${REPS:-1}"); do
+            if [ -n "${RESET_BIN}" ]; then
+                echo "  reset before ${m} r${r}"
+                "${RESET_BIN}"
+                [ -n "${UNSTAGED_ARG}" ] || cat "${IG_STAGE_ROOT}/ig-stage/${pair%%:*}-${pair##*:}/tokenized.0" > /dev/null
+            fi
             case "${m}" in
                 # --force: a table.0 from a killed earlier attempt must not make
                 # build_sa() skip the shard and report success.
