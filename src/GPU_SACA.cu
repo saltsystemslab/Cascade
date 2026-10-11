@@ -600,11 +600,12 @@ void GPU_SACA<T_sym_>::setup_staging_config()
         reader_c_ = READER_C;
         writer_c_ = WRITER_C;
         dispatcher_c_ = STREAM_C;
-        stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<idx_t>(1, omp_get_max_threads() - (read_poster_c +reader_c_ + writer_c_ + dispatcher_c_)));
+        const int64_t spare_thread_c = omp_get_max_threads() - static_cast<int64_t>(read_poster_c + reader_c_ + writer_c_ + dispatcher_c_); // Negative when the other pools oversubscribe the CPU-threads.
+        stager_c_ = env::get_u64("GPU_SACA_STAGER_C").value_or(std::max<int64_t>(1, spare_thread_c));
         if(read_poster_c + reader_c_ + writer_c_ + dispatcher_c_ + stager_c_ > static_cast<idx_t>(omp_get_max_threads()))
             std::cerr <<    "Warning: the staging workers (read-posters, readers, writers, stagers, and dispatchers)"
                             ": (" << read_poster_c << ", " << reader_c_ << ", " << writer_c_ << ", " << stager_c_ << ", " << dispatcher_c_ << ")"
-                            " oversubscribe the " << omp_get_max_threads() << "available CPU-threads.\n";
+                            " oversubscribe the " << omp_get_max_threads() << " available CPU-threads.\n";
     }
 
     // Sets the slab pool size.
