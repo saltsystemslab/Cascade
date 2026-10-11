@@ -16,7 +16,8 @@
 # before they would write: their input path does not matter, and staging c4
 # alone copies 396 GB.
 # RESET=1 runs benchmark/reset_memory before every replicate, then re-reads the
-# staged input into the page cache, as staging left it for the first. A run's
+# staged input into the page cache, as staging left it for the first; not for
+# ours, which reads it with O_DIRECT, past the page cache. A run's
 # huge-page supply otherwise depends on whatever ran before it: libsais's c4p64
 # replicates took 13,157, 11,102 and 9,042 s in turn as the node recovered.
 # --gres: ours needs the GPU; their baseline ignores it.
@@ -137,7 +138,8 @@ for pair in ${CORPORA:?CORPORA required}; do
             if [ -n "${RESET_BIN}" ]; then
                 echo "  reset before ${m} r${r}"
                 "${RESET_BIN}"
-                [ -n "${UNSTAGED_ARG}" ] || cat "${IG_STAGE_ROOT}/ig-stage/${pair%%:*}-${pair##*:}/tokenized.0" > /dev/null
+                [ -n "${UNSTAGED_ARG}" ] || [ "${m}" = gpu_saca ] \
+                    || cat "${IG_STAGE_ROOT}/ig-stage/${pair%%:*}-${pair##*:}/tokenized.0" > /dev/null
             fi
             case "${m}" in
                 # --force: a table.0 from a killed earlier attempt must not make
