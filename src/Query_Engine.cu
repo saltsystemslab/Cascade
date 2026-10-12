@@ -32,6 +32,7 @@ constexpr int BLOCK = 256;
 constexpr idx_t WINDOW_MAX_BYTES = 1024;    // Bytes of a bracket's slot of gathered suffix-array entries, at most.
 constexpr idx_t WINDOW_PAD_BYTES = 16;  // Bytes past the last slot: the decoding of an entry reads the word past its last byte.
 constexpr idx_t NO_SLOT = ~idx_t(0);
+constexpr idx_t MARKS_PER_ITEM = idx_t(1) << 20;  // Page marks that a thread clears at a time.
 
 
 // Gathered suffix-array bytes of a bracket: the bytes `[b0, b1)` of the suffix
@@ -634,6 +635,9 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
         return false;
     }
 
+    if(host_searches())
+        host_search::team(opt_.host_threads);   // Its threads start now, rather than in the first batch.
+
     return true;
 }
 
@@ -779,10 +783,14 @@ bool Query_Engine<T_sym_>::open_sa_files(std::string& err)
 template <typename T_sym_>
 void Query_Engine<T_sym_>::forget_asked() const
 {
-    #pragma omp parallel for num_threads(static_cast<int>(opt_.host_threads)) schedule(static) // All the host's threads; see `host_search::find`.
-    for(idx_t p = 0; p < asked_pages_; ++p)
-        asked_[p].store(0, std::memory_order_relaxed);
+    const auto clear = [&](unsigned, host_search::Team::Claim& claim)  // On the host search's team; see `host_search::Team`.
+    {
+        for(idx_t k; (k = claim.next()) != host_search::Team::Claim::NONE; )
+            for(idx_t p = k * MARKS_PER_ITEM; p < std::min(asked_pages_, (k + 1) * MARKS_PER_ITEM); ++p)
+                asked_[p].store(0, std::memory_order_relaxed);
+    };
 
+    host_search::team(opt_.host_threads).run((asked_pages_ + MARKS_PER_ITEM - 1) / MARKS_PER_ITEM, clear);
     asked_c_ = 0;
 }
 

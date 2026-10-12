@@ -1,18 +1,27 @@
 
 #include "Host_Search.hpp"
 #include "CPU_Reference.hpp"
+#include "env.hpp"
 #include "sa40.hpp"
 
 #include <omp.h>
 
+#include <immintrin.h>
 #include <fcntl.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <climits>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -32,6 +41,61 @@ constexpr idx_t BLOCK_MIN = 32; // Least positions of a block of a batch, a thre
 constexpr idx_t BLOCK_MAX = 1024;   // Most positions of a block.
 constexpr idx_t BLOCKS_PER_THREAD = 16; // Blocks a batch splits into per thread, within the bounds of a block.
 constexpr std::size_t COPY_PIECE = std::size_t(1) << 16;    // Bytes a thread copies at a time: a chunk's few MB spread over every thread.
+
+constexpr unsigned NUMBER_SHIFT = 40;   // The low bits of `Team::next_`, the next item to take; the loop's number is in the rest.
+constexpr idx_t ITEM_MASK = (idx_t(1) << NUMBER_SHIFT) - 1;
+constexpr uint32_t NUMBER_MAX = (uint32_t(1) << (64 - NUMBER_SHIFT)) - 1;  // The loops' numbers cycle through `[1, NUMBER_MAX]`.
+// How long a team's thread spins, waiting, before it sleeps: while a loop is still running, for a thread busy with an item of it, which
+// the kernel may have displaced from its core, and the sleepers' idle cores then take in; and once the team is idle, for the next loop.
+const auto SPIN_RUNNING = std::chrono::microseconds(env::get_u64("GPU_SACA_HOST_SPIN_RUNNING_US").value_or(200));
+const auto SPIN_IDLE = std::chrono::microseconds(env::get_u64("GPU_SACA_HOST_SPIN_IDLE_US").value_or(2000));
+
+
+// Sleeps until the word `w` is no longer `v`, or a wake-up.
+void futex_wait(std::atomic<uint32_t>& w, const uint32_t v)
+{
+    ::syscall(SYS_futex, reinterpret_cast<uint32_t*>(&w), FUTEX_WAIT_PRIVATE, v, nullptr, nullptr, 0);
+}
+
+
+// Wakes the threads asleep on the word `w`.
+void futex_wake(std::atomic<uint32_t>& w)
+{
+    ::syscall(SYS_futex, reinterpret_cast<uint32_t*>(&w), FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0);
+}
+
+
+// Waits until `ready()`, which a change of the word `w` turns true: spinning
+// for `SPIN_RUNNING` while `running()`, or for `SPIN_IDLE` from when it is not,
+// and then asleep on `w`, counted in `asleep` meanwhile. A thread that changes
+// `w` wakes the sleepers if `asleep` counts any.
+template <typename F_, typename G_>
+void await(std::atomic<uint32_t>& w, std::atomic<uint32_t>& asleep, const F_& ready, const G_& running)
+{
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+    auto idle = clock::time_point::max();   // When the team was first seen idle.
+    for(unsigned k = 1; !ready(); ++k)
+    {
+        _mm_pause();
+        if(k % 64 == 0)
+        {
+            const auto t = clock::now();
+            if(running() ? t - t0 >= SPIN_RUNNING : t - (idle = std::min(idle, t)) >= SPIN_IDLE)
+            {
+                for(uint32_t v = w.load(); !ready(); v = w.load())
+                {
+                    asleep.fetch_add(1);
+                    if(!ready())    // A change past it has seen the count, or this sees the change.
+                        futex_wait(w, v);
+                    asleep.fetch_sub(1);
+                }
+
+                return;
+            }
+        }
+    }
+}
 
 
 // Prefetches the cache line of the address `p`.
@@ -224,14 +288,14 @@ inline bool same_query(const Batch<T_sym_>& x, const idx_t i, const idx_t j)
 
 
 // Searches blocks of `block` positions of the batch `x` of `q` positions over
-// the lanes `lane`, taking the block `next_block` whenever the current one has
-// no boundary left to start, until none is left: a lane starts on the next
+// the lanes `lane`, taking the next block of `claim` whenever the current one
+// has no boundary left to start, until none is left: a lane starts on the next
 // boundary as soon as it is done with one, across blocks. With the positions
 // sorted, `dup[g]` marks a position `g` whose query repeats the one before it
 // in its block, and which then takes that one's interval once the thread's
 // searches are done.
 template <typename T_sym_>
-void search_blocks(const Batch<T_sym_>& x, const idx_t q, const idx_t block, std::atomic<idx_t>& next_block, std::vector<Lane<T_sym_>>& lane,
+void search_blocks(const Batch<T_sym_>& x, const idx_t q, const idx_t block, Team::Claim& claim, std::vector<Lane<T_sym_>>& lane,
                    uint8_t* const dup)
 {
     idx_t g0 = 0;   // The current block's first position.
@@ -248,8 +312,8 @@ void search_blocks(const Batch<T_sym_>& x, const idx_t q, const idx_t block, std
         {
             if(next == end)
             {
-                const idx_t k = (left ? next_block.fetch_add(1, std::memory_order_relaxed) : q);
-                if(k * block >= q)
+                const idx_t k = (left ? claim.next() : Team::Claim::NONE);
+                if(k == Team::Claim::NONE)
                 {
                     left = false;
                     return;
@@ -326,6 +390,132 @@ unsigned thread_count(const unsigned requested)
 }
 
 
+idx_t Team::Claim::next()
+{
+    if(first_ != NONE)
+    {
+        const idx_t k = first_;
+        first_ = NONE;
+        return k;
+    }
+
+    // The loop is not done while this thread holds its first item: the number of the loop that this takes from is its own.
+    const idx_t k = team_.next_.fetch_add(1, std::memory_order_relaxed) & ITEM_MASK;
+    if(k >= items_)
+        return NONE;
+
+    ++taken_;
+    return k;
+}
+
+
+Team::Team(const unsigned threads)
+{
+    for(unsigned t = 1; t < threads; ++t)
+        worker_.emplace_back([this, t] { work(t); });
+}
+
+
+Team::~Team()
+{
+    stop_.store(true);
+    started_.fetch_add(1);
+    futex_wake(started_);
+    for(auto& w : worker_)
+        w.join();
+}
+
+
+uint32_t Team::start(const idx_t items, const Body body, void* const f)
+{
+    if(items > ITEM_MASK)
+    {
+        std::fprintf(stderr, "A loop of %llu items exceeds a team's most, %llu. Aborting.\n", static_cast<unsigned long long>(items),
+                     static_cast<unsigned long long>(ITEM_MASK));
+        std::exit(EXIT_FAILURE);
+    }
+
+    // The description first, and then the items open, numbered with the loop: a thread late for the last loop may take an item of
+    // this one, which then counts only if the description is of the same loop, read whole.
+    const uint32_t s = last_ % NUMBER_MAX + 1;
+    last_ = s;
+    loop_.store(0, std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_release);
+    items_.store(items, std::memory_order_relaxed);
+    body_.store(body, std::memory_order_relaxed);
+    f_.store(f, std::memory_order_relaxed);
+    done_.store(0, std::memory_order_relaxed);
+    loop_.store(s, std::memory_order_release);
+    next_.store(uint64_t(s) << NUMBER_SHIFT, std::memory_order_release);
+
+    started_.store(s);
+    if(asleep_.load() > 0)
+        futex_wake(started_);
+
+    return s;
+}
+
+
+void Team::take_part(const unsigned t)
+{
+    // An item taken counts if it is of the loop that the description is of, read whole between two equal numbers, and one of its
+    // items; else the loop it is of is done, or its description is changing for the next one, which this thread then leaves.
+    const uint64_t c = next_.fetch_add(1, std::memory_order_acq_rel);
+    const uint32_t s = static_cast<uint32_t>(c >> NUMBER_SHIFT);
+    const idx_t k = c & ITEM_MASK;
+    const uint32_t s0 = loop_.load(std::memory_order_acquire);
+    const idx_t items = items_.load(std::memory_order_relaxed);
+    const Body body = body_.load(std::memory_order_relaxed);
+    void* const f = f_.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if(s0 != s || loop_.load(std::memory_order_relaxed) != s || k >= items)
+        return;
+
+    Claim claim(*this, items, k);
+    body(f, t, claim);
+    if(done_.fetch_add(claim.taken_, std::memory_order_acq_rel) + claim.taken_ == items)
+    {
+        finished_.store(s);
+        if(caller_asleep_.load() > 0)
+            futex_wake(finished_);
+    }
+}
+
+
+void Team::wait_for(const uint32_t s)
+{
+    await(finished_, caller_asleep_, [&] { return finished_.load() == s; }, [] { return true; });
+}
+
+
+void Team::work(const unsigned t)
+{
+    for(uint32_t seen = 0; ; )
+    {
+        await(started_, asleep_, [&] { return started_.load() != seen; }, [&] { return finished_.load() != started_.load(); });
+        seen = started_.load();
+        if(stop_.load())
+            return;
+
+        take_part(t);
+    }
+}
+
+
+Team& team(const unsigned threads)
+{
+    // The teams last as long as the process, their threads asleep through its exit: no static object outlives them.
+    static std::mutex lock;
+    static auto& teams = *new std::map<unsigned, std::unique_ptr<Team>>();
+    const std::lock_guard<std::mutex> guard(lock);
+    auto& t = teams[std::max(1u, threads)];
+    if(t == nullptr)
+        t = std::make_unique<Team>(std::max(1u, threads));
+
+    return *t;
+}
+
+
 template <typename T_sym_>
 void find(const T_sym_* const T, const idx_t n, const uint8_t* const SA, const uint64_t* const off, const T_sym_* const sym, const idx_t q,
           const Rank_Range* const br, const uint32_t* const ids, SA_Interval* const out, const unsigned threads, const unsigned lanes)
@@ -338,15 +528,13 @@ void find(const T_sym_* const T, const idx_t n, const uint8_t* const SA, const u
     const idx_t block = std::min(BLOCK_MAX, std::max(BLOCK_MIN, q / (BLOCKS_PER_THREAD * t)));
     const Batch<T_sym_> x{T, n, SA, off, sym, br, ids, out};
     std::vector<uint8_t> dup(ids != nullptr ? q : 0);
-    std::atomic<idx_t> next_block(0);
-
-    // Every team of the host's search is of the same threads, those without a block idling: libgomp ends the threads that a smaller
-    // team leaves out, and a larger team then starts them anew.
-    #pragma omp parallel num_threads(static_cast<int>(t))
+    const auto search = [&](unsigned, Team::Claim& claim)
     {
         std::vector<Lane<T_sym_>> lane(std::max(1u, lanes));
-        search_blocks(x, q, block, next_block, lane, dup.data());
-    }
+        search_blocks(x, q, block, claim, lane, dup.data());
+    };
+
+    team(static_cast<unsigned>(t)).run((q + block - 1) / block, search);
 }
 
 
@@ -354,18 +542,27 @@ template <typename T_sym_>
 void certify(const T_sym_* const T, const idx_t n, const uint8_t* const SA, const uint64_t* const off, const T_sym_* const sym, const idx_t q,
              const SA_Interval* const I, unsigned long long& fail_c, unsigned long long& first, const unsigned threads)
 {
-    unsigned long long c = 0, f = ULLONG_MAX;
+    const idx_t t = thread_count(threads);
+    const idx_t block = std::min(BLOCK_MAX, std::max(BLOCK_MIN, q / (BLOCKS_PER_THREAD * t)));
+    std::atomic<unsigned long long> c(0), f(ULLONG_MAX);
+    const auto check = [&](unsigned, Team::Claim& claim)
+    {
+        unsigned long long c_t = 0, f_t = ULLONG_MAX;
+        for(idx_t k; (k = claim.next()) != Team::Claim::NONE; )
+            for(idx_t i = k * block; i < std::min(q, (k + 1) * block); ++i)
+                if(!ref::certify(T, n, SA, sym + off[i], off[i + 1] - off[i], I[i]))
+                {
+                    ++c_t;
+                    f_t = std::min<unsigned long long>(f_t, i);
+                }
 
-    #pragma omp parallel for num_threads(static_cast<int>(thread_count(threads))) schedule(static) reduction(+ : c) reduction(min : f)
-    for(idx_t i = 0; i < q; ++i)
-        if(!ref::certify(T, n, SA, sym + off[i], off[i + 1] - off[i], I[i]))
-        {
-            ++c;
-            f = std::min<unsigned long long>(f, i);
-        }
+        c.fetch_add(c_t);
+        for(unsigned long long f0 = f.load(); f_t < f0 && !f.compare_exchange_weak(f0, f_t); ) {}
+    };
 
-    fail_c += c;
-    first = std::min(first, f);
+    team(static_cast<unsigned>(t)).run((q + block - 1) / block, check);
+    fail_c += c.load();
+    first = std::min(first, f.load());
 }
 
 
@@ -438,11 +635,11 @@ idx_t prefetch(const SA_Files& f, const idx_t n, const Rank_Range* const br, con
     };
 
     const auto unasked = [&](const idx_t p) { return asked == nullptr || asked[p].load(std::memory_order_relaxed) == 0; };
-    idx_t asked_c = 0, refused_c = 0;
-
-    #pragma omp parallel num_threads(static_cast<int>(f.threads())) reduction(+ : asked_c, refused_c) // All the threads of `find`; see there.
+    const idx_t block = std::min(BLOCK_MAX, std::max(BLOCK_MIN, q / (BLOCKS_PER_THREAD * f.threads())));
+    std::atomic<idx_t> asked_c(0), refused_c(0);
+    const auto ask_blocks = [&](const unsigned t, Team::Claim& claim)   // The threads of `find`, each with its own descriptors.
     {
-        const unsigned t = static_cast<unsigned>(omp_get_thread_num());
+        idx_t asked_t = 0, refused_t = 0;
 
         // Asks for the pages of `[p0, p1]` not yet asked for, in runs within a part: pages do not straddle parts.
         const auto ask = [&](idx_t p0, const idx_t p1)
@@ -470,36 +667,40 @@ idx_t prefetch(const SA_Files& f, const idx_t n, const Rank_Range* const br, con
                     continue;
                 }
 
-                asked_c += e - p0;
+                asked_t += e - p0;
                 if(::posix_fadvise(f.fd(t, i), static_cast<off_t>(p0 * page - f.part_off(i)), static_cast<off_t>((e - p0) * page),
                                    POSIX_FADV_WILLNEED) != 0)
-                    ++refused_c;
+                    ++refused_t;
 
                 p0 = e;
             }
         };
 
-        #pragma omp for schedule(static)
-        for(idx_t g = 0; g < q; ++g)
-        {
-            idx_t a0, a1, b0, b1;
-            pages(br[2 * g], a0, a1);
-            pages(br[2 * g + 1], b0, b1);
-            if(a0 <= a1 && b0 <= b1 && b0 <= a1 + 1 && a0 <= b1 + 1)   // The boundaries' pages overlap or abut: one request.
+        for(idx_t k; (k = claim.next()) != Team::Claim::NONE; )
+            for(idx_t g = k * block; g < std::min(q, (k + 1) * block); ++g)
             {
-                a0 = std::min(a0, b0), a1 = std::max(a1, b1);
-                b0 = 1, b1 = 0;
+                idx_t a0, a1, b0, b1;
+                pages(br[2 * g], a0, a1);
+                pages(br[2 * g + 1], b0, b1);
+                if(a0 <= a1 && b0 <= b1 && b0 <= a1 + 1 && a0 <= b1 + 1)   // The boundaries' pages overlap or abut: one request.
+                {
+                    a0 = std::min(a0, b0), a1 = std::max(a1, b1);
+                    b0 = 1, b1 = 0;
+                }
+
+                if(a0 <= a1)
+                    ask(a0, a1);
+                if(b0 <= b1)
+                    ask(b0, b1);
             }
 
-            if(a0 <= a1)
-                ask(a0, a1);
-            if(b0 <= b1)
-                ask(b0, b1);
-        }
-    }
+        asked_c.fetch_add(asked_t, std::memory_order_relaxed);
+        refused_c.fetch_add(refused_t, std::memory_order_relaxed);
+    };
 
-    refused += refused_c;
-    return asked_c;
+    team(f.threads()).run((q + block - 1) / block, ask_blocks);
+    refused += refused_c.load();
+    return asked_c.load();
 }
 
 
@@ -513,12 +714,16 @@ void copy(void* const dst, const void* const src, const std::size_t bytes, const
         return;
     }
 
-    #pragma omp parallel for num_threads(static_cast<int>(thread_count(threads))) schedule(static)  // All the threads; see `find`.
-    for(std::size_t p = 0; p < pieces; ++p)
+    const auto copy_pieces = [&](unsigned, Team::Claim& claim)
     {
-        const std::size_t b = p * COPY_PIECE;
-        std::memcpy(static_cast<uint8_t*>(dst) + b, static_cast<const uint8_t*>(src) + b, std::min(COPY_PIECE, bytes - b));
-    }
+        for(idx_t p; (p = claim.next()) != Team::Claim::NONE; )
+        {
+            const std::size_t b = p * COPY_PIECE;
+            std::memcpy(static_cast<uint8_t*>(dst) + b, static_cast<const uint8_t*>(src) + b, std::min(COPY_PIECE, bytes - b));
+        }
+    };
+
+    team(thread_count(threads)).run(pieces, copy_pieces);
 }
 
 

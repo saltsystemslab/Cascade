@@ -1334,6 +1334,72 @@ bool test_scan_sa()
 }
 
 
+// The host search's teams: every item of a loop taken once, as threads `t` of
+// the team, over loops of sizes from none to many per thread, back to back so
+// that threads late for a loop meet the next; with a thread held up in the
+// middle of an item, and from callers running loops at once.
+bool test_host_team()
+{
+    for(const unsigned threads : {1u, 3u, 8u})
+    {
+        host_search::Team& team = host_search::team(threads);
+        CHECK(team.threads() == threads && &host_search::team(threads) == &team, "%u threads: a team of %u threads", threads, team.threads());
+        std::vector<std::atomic<uint32_t>> taken(4096);
+        std::atomic<unsigned> bad_t(0);
+        for(int r = 0; r < 3000; ++r)
+        {
+            const idx_t items = (r % 7 == 0 ? 0 : (r % 5 == 0 ? 4096 : r % 23));
+            for(idx_t k = 0; k < items; ++k)
+                taken[k].store(0, std::memory_order_relaxed);
+            const auto take = [&](const unsigned t, host_search::Team::Claim& c)
+            {
+                if(t >= threads)
+                    bad_t.fetch_add(1);
+                for(idx_t k; (k = c.next()) != host_search::Team::Claim::NONE; )
+                    taken[k].fetch_add(1, std::memory_order_relaxed);
+            };
+
+            team.run(items, take);
+            for(idx_t k = 0; k < items; ++k)
+                CHECK(taken[k].load() == 1, "%u threads, loop %d of %" PRIu64 " items: item %" PRIu64 " taken %u times", threads, r, items, k,
+                      taken[k].load());
+        }
+
+        CHECK(bad_t.load() == 0, "%u threads: a thread outside the team", threads);
+
+        // A thread held up in an item: the loop is done with it, the other items taken by the others meanwhile.
+        std::atomic<idx_t> count(0);
+        const auto slow = [&](unsigned, host_search::Team::Claim& c)
+        {
+            for(idx_t k; (k = c.next()) != host_search::Team::Claim::NONE; count.fetch_add(1))
+                if(k == 0)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        };
+        team.run(1000, slow);
+        CHECK(count.load() == 1000, "%u threads: %" PRIu64 " of 1000 items done with a thread held up", threads, count.load());
+    }
+
+    // Callers at once: their loops run one after another.
+    std::atomic<idx_t> sum(0);
+    std::vector<std::thread> callers;
+    for(int c = 0; c < 4; ++c)
+        callers.emplace_back([&]
+        {
+            const auto add = [&](unsigned, host_search::Team::Claim& cl)
+            {
+                for(idx_t k; (k = cl.next()) != host_search::Team::Claim::NONE; )
+                    sum.fetch_add(k + 1, std::memory_order_relaxed);
+            };
+            for(int r = 0; r < 200; ++r)
+                host_search::team(3).run(100, add);
+        });
+    for(auto& c : callers)
+        c.join();
+    CHECK(sum.load() == idx_t(4) * 200 * (100 * 101 / 2), "concurrent callers: sum %" PRIu64, sum.load());
+
+    return true;
+}
+
 
 // Checks the pages of a mapped suffix array that the host asks for ahead, on
 // brackets picked for their edges: one whose searches read past its page, one
@@ -1419,6 +1485,7 @@ int main()
         {"index load, host tiers",  test_index_host_tiers,      false},
         {"suffix-array streaming",  test_scan_sa,               false},
         {"pages read ahead",        test_prefetch_pages,        false},
+        {"host search's teams",     test_host_team,             false},
         {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
         {"pipeline",                test_pipeline,              true},
