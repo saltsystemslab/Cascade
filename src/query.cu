@@ -25,6 +25,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <random>
 #include <set>
 #include <string>
@@ -42,12 +43,18 @@ const char* const USAGE =
 R"(Usage:
   query info --index DIR
       Prints the index's metadata and whether it fits the device.
+  query plan --index DIR [--device-budget B] [--host-budget B'] [--text-res R] [--sa-res R]
+             [--stride S] [--key-words W] [--gather 0|1] [--gather-queries G] [--chunk-queries C]
+             [--chunk-symbols Y] [--host-prefetch 0|1]
+      Prints the placement that `find` loads the index in, without loading it:
+      the plan, the tiers, and the table, of those set as in `find` (default:
+      all automatic), and the memory they take.
   query find --index DIR --queries Q1.qry[,Q2.qry,...] [--q N] [--text-res R] [--sa-res R]
              [--spot N] [--stride S,...] [--key-words W,...] [--sort 0|1,...] [--gather 0|1,...]
              [--gather-queries G] [--reps K] [--chunk-queries C] [--chunk-symbols Y]
              [--min-chunk-queries C'] [--min-chunk-symbols Y'] [--host-threads H] [--host-lanes L]
              [--host-prefetch 0|1] [--sa-cold 0|1] [--itv-out F] [--cnt-out F] [--cnt-dir D]
-             [--validate]
+             [--device-budget B] [--host-budget B'] [--validate]
       Loads the index once, and finds the SA-intervals of the first N (default:
       all) queries of every query file, K times (default 3) each way: from
       device memory, and end to end, from host memory through the pipeline, both
@@ -78,6 +85,14 @@ R"(Usage:
       alone, and from device memory means there and back. --validate checks
       every interval with the O(m) certificate on the device, or on the host
       if it searches.
+      R, S, and W may be `auto`: the planner picks the first plan that fits
+      the budgets, less a margin: A, both arrays on the device; B, the text on
+      the device and the suffix array pinned; C, both pageable; D, the text
+      pageable and the suffix array mapped. Its table is of stride 32, doubled
+      until it fits the device memory left, with keys of 2 words (4 for 4-byte
+      symbols) if the device searches, else 4; S = auto picks the keys too,
+      unless W is set. The budgets are the device's free memory, and the
+      host's available memory, at load, or B and B' bytes.
       The counts of a single query file and mode go to --cnt-out, or those of
       each to D/<stem>.cnt, or D/<stem>@s<S>w<W>o<sort>g<gather>.cnt for several
       modes.
@@ -156,9 +171,9 @@ bool get_u64(const Args& a, const std::string& k, uint64_t& v, std::string& err)
 
 
 // Parses the comma-separated unsigned integers of the option `k` of `a` into
-// `v`, keeping `v` if absent. Returns `false` with a reason in `err` if
-// malformed.
-bool get_u64_list(const Args& a, const std::string& k, std::vector<uint64_t>& v, std::string& err)
+// `v`, keeping `v` if absent; `auto` into `auto_v`, if set. Returns `false`
+// with a reason in `err` if malformed.
+bool get_u64_list(const Args& a, const std::string& k, std::vector<uint64_t>& v, std::string& err, const std::optional<uint64_t> auto_v = std::nullopt)
 {
     if(!a.has(k))
         return true;
@@ -171,9 +186,15 @@ bool get_u64_list(const Args& a, const std::string& k, std::vector<uint64_t>& v,
         {
             const auto e = std::min(l.find(',', b), l.size());
             std::size_t used = 0;
-            v.push_back(std::stoull(l.substr(b, e - b), &used));
-            if(used != e - b)
-                throw std::invalid_argument(k);
+            if(auto_v && l.compare(b, e - b, "auto") == 0)
+                v.push_back(*auto_v);
+            else
+            {
+                v.push_back(std::stoull(l.substr(b, e - b), &used));
+                if(used != e - b)
+                    throw std::invalid_argument(k);
+            }
+
             b = e + 1;
         }
 
@@ -181,7 +202,7 @@ bool get_u64_list(const Args& a, const std::string& k, std::vector<uint64_t>& v,
     }
     catch(const std::exception&) {}
 
-    err = "option --" + k + " expects comma-separated unsigned integers";
+    err = "option --" + k + " expects comma-separated unsigned integers" + (auto_v ? " or `auto`" : "");
     return false;
 }
 
@@ -270,6 +291,28 @@ std::string join(const std::vector<uint64_t>& v)
         s += (s.empty() ? "" : ",") + std::to_string(x);
 
     return s;
+}
+
+
+// Prints the `key=value` lines of the placement `p`, and a warning on stderr if
+// the planner mapped a suffix array whose files are over a network.
+void print_placement(const Placement& p)
+{
+    std::string picked;
+    for(const auto& [on, what] : {std::make_pair(p.auto_text_res, "text_res"), std::make_pair(p.auto_sa_res, "sa_res"),
+                                  std::make_pair(p.auto_stride, "stride"), std::make_pair(p.auto_key_words, "key_words")})
+        if(on)
+            picked += (picked.empty() ? "" : ",") + std::string(what);
+
+    std::printf("plan=%s\nplan_auto=%s\nplan_fits=%d\nplan_text_res=%s\nplan_sa_res=%s\nplan_stride=%" PRIu64 "\nplan_key_words=%u\nplan_table_bytes=%" PRIu64
+                "\nplan_device_budget=%" PRIu64 "\nplan_device_margin=%" PRIu64 "\nplan_device_bytes=%" PRIu64 "\nplan_host_budget=%" PRIu64
+                "\nplan_host_margin=%" PRIu64 "\nplan_host_bytes=%" PRIu64 "\nplan_sa_fs=%s\nplan_sa_local=%d\n",
+                plan_name(p.plan), picked.empty() ? "-" : picked.c_str(), p.fits, residency_name(p.text_res), residency_name(p.sa_res), p.stride,
+                p.key_words, p.table_bytes, p.device_budget, p.device_margin, p.device_bytes, p.host_budget, p.host_margin, p.host_bytes,
+                p.sa_fs.c_str(), p.sa_local);
+    if(p.auto_sa_res && p.sa_res == Residency::mapped && !p.sa_local)
+        std::fprintf(stderr, "warning: the suffix array is mapped from files on %s, a network file system: its pages will be read slowly; "
+                             "stage them on a local drive\n", p.sa_fs.c_str());
 }
 
 
@@ -482,22 +525,23 @@ int run_find(const Args& a)
         || !get_u64(a, "gather-queries", opt.gather_queries, err)
         || !get_u64(a, "host-threads", host_threads, err) || !get_u64(a, "host-lanes", host_lanes, err)
         || !get_u64(a, "host-prefetch", host_prefetch, err) || !get_u64(a, "sa-cold", sa_cold, err)
-        || !get_u64_list(a, "stride", strides, err) || !get_u64_list(a, "key-words", key_words, err) || !get_u64_list(a, "sort", sorts, err)
-        || !get_u64_list(a, "gather", gathers, err)
+        || !get_u64_list(a, "stride", strides, err, AUTO_STRIDE) || !get_u64_list(a, "key-words", key_words, err, AUTO_KEY_WORDS)
+        || !get_u64_list(a, "sort", sorts, err) || !get_u64_list(a, "gather", gathers, err)
+        || !get_u64(a, "device-budget", opt.device_budget, err) || !get_u64(a, "host-budget", opt.host_budget, err)
         || !parse_residency(a.get("text-res", "device"), opt.text_res) || !parse_residency(a.get("sa-res", "device"), opt.sa_res))
     {
         std::fprintf(stderr, "error: %s\n", err.empty() ? "unknown residency" : err.c_str());
         return 2;
     }
 
-    if(sa_cold != 0 && opt.sa_res != Residency::mapped)
+    if(sa_cold != 0 && opt.sa_res != Residency::mapped && opt.sa_res != Residency::automatic)
     {
         std::fprintf(stderr, "error: --sa-cold 1 drops the pages of a mapped suffix array; use --sa-res mapped\n");
         return 2;
     }
 
     // Every combination of the listed strides, key widths, orders, and gathers is a mode; the direct mode ignores the key width and
-    // the gather.
+    // the gather, and an automatic stride picks its keys too, unless they are listed.
     std::vector<Gather> gather = {Gather::automatic};
     if(!gathers.empty())
     {
@@ -508,8 +552,9 @@ int run_find(const Args& a)
 
     struct Mode { idx_t stride; uint32_t key_words; bool sort; Gather gather; };
     std::vector<Mode> modes;
+    const std::vector<uint64_t> auto_keys = {AUTO_KEY_WORDS};
     for(const auto st : strides)
-        for(const auto w : (st == 0 ? std::vector<uint64_t>{0} : key_words))
+        for(const auto w : (st == 0 ? std::vector<uint64_t>{0} : (st == AUTO_STRIDE && !a.has("key-words") ? auto_keys : key_words)))
             for(const auto so : sorts)
                 for(const auto ga : (st == 0 ? std::vector<Gather>{gather.front()} : gather))
                     modes.push_back({st, static_cast<uint32_t>(w), so != 0, ga});
@@ -553,6 +598,13 @@ int run_find(const Args& a)
     std::printf("index=%s\nn=%" PRIu64 "\nsym_bytes=%u\ntext_res=%s\nsa_res=%s\nt_load_text=%.3f\nt_load_sa=%.3f\nspot_pairs=%" PRIu64 "\nt_spot=%.3f\n",
                 a.get("index").c_str(), idx.n(), idx.sym_bytes(), residency_name(idx.text_residency()), residency_name(idx.sa_residency()),
                 st.t_text, st.t_sa, st.spot_pairs, st.t_spot);
+    print_placement(eng.placement());
+    if(sa_cold != 0 && idx.sa_residency() != Residency::mapped)
+    {
+        std::fprintf(stderr, "error: --sa-cold 1 drops the pages of a mapped suffix array; the planner placed it %s\n", residency_name(idx.sa_residency()));
+        return 2;
+    }
+
     std::printf("streams=%zu\nchunk_queries=%" PRIu64 "\nchunk_symbols=%" PRIu64 "\nmin_chunk_queries=%" PRIu64 "\nmin_chunk_symbols=%" PRIu64
                 "\ngather_queries=%" PRIu64 "\n", eng.streams(), eng.options().chunk_queries, eng.options().chunk_symbols,
                 eng.options().min_chunk_queries, eng.options().min_chunk_symbols, eng.options().gather_queries);
@@ -585,6 +637,53 @@ int run_find(const Args& a)
     }
 
     return rc;
+}
+
+
+template <typename T_sym_>
+int run_plan(const Args& a, const Index_Meta& m)
+{
+    // The planner's every pick, unless set.
+    std::string err;
+    Query_Options opt;
+    opt.text_res = opt.sa_res = Residency::automatic;
+    uint64_t host_prefetch = opt.host_prefetch;
+    std::vector<uint64_t> strides = {AUTO_STRIDE}, key_words = {AUTO_KEY_WORDS}, gathers;
+    if(!get_u64(a, "device-budget", opt.device_budget, err) || !get_u64(a, "host-budget", opt.host_budget, err)
+        || !get_u64(a, "chunk-queries", opt.chunk_queries, err) || !get_u64(a, "chunk-symbols", opt.chunk_symbols, err)
+        || !get_u64(a, "gather-queries", opt.gather_queries, err) || !get_u64(a, "host-prefetch", host_prefetch, err)
+        || !get_u64_list(a, "stride", strides, err, AUTO_STRIDE) || !get_u64_list(a, "key-words", key_words, err, AUTO_KEY_WORDS)
+        || !get_u64_list(a, "gather", gathers, err)
+        || !parse_residency(a.get("text-res", "auto"), opt.text_res) || !parse_residency(a.get("sa-res", "auto"), opt.sa_res))
+    {
+        std::fprintf(stderr, "error: %s\n", err.empty() ? "unknown residency" : err.c_str());
+        return 2;
+    }
+
+    if(strides.size() != 1 || key_words.size() != 1 || gathers.size() > 1)
+    {
+        std::fprintf(stderr, "error: a plan takes a single stride, key width, and gather\n");
+        return 2;
+    }
+
+    opt.stride = strides.front();
+    opt.key_words = static_cast<uint32_t>(key_words.front());
+    opt.gather = (gathers.empty() ? Gather::automatic : (gathers.front() != 0 ? Gather::always : Gather::never));
+    opt.host_prefetch = (host_prefetch != 0);
+
+    Placement p;
+    if(!Query_Engine<T_sym_>::plan(m, opt, p, err))
+    {
+        std::fprintf(stderr, "error: %s\n", err.c_str());
+        return 1;
+    }
+
+    std::printf("index=%s\nn=%" PRIu64 "\nsym_bytes=%u\ntext_bytes=%" PRIu64 "\nsa_bytes=%" PRIu64 "\n", a.get("index").c_str(), m.n, m.sym_bytes,
+                m.n * m.sym_bytes, m.sa_bytes());
+    print_placement(p);
+    std::printf("host_search=%d\ngather=%d\nchunk_queries=%" PRIu64 "\nchunk_symbols=%" PRIu64 "\n", p.host_search, p.gather, p.chunk_queries,
+                p.chunk_symbols);
+    return 0;
 }
 
 
@@ -724,18 +823,26 @@ int main(const int argc, char** const argv)
     if(a.cmd == "info")
         return run_info(a);
 
-    if(a.cmd != "find" && a.cmd != "gen")
+    if(a.cmd != "find" && a.cmd != "gen" && a.cmd != "plan")
     {
         std::fprintf(stderr, "error: unknown command `%s`\n%s", a.cmd.c_str(), USAGE);
         return 2;
     }
 
     Index_Meta m;
-    if(!index_meta::read(a.get("index"), m, err))
+    if(!index_meta::read(a.get("index"), m, err) || (a.cmd == "plan" && !index_meta::validate_files(m, err)))
     {
         std::fprintf(stderr, "error: %s\n", err.c_str());
         return 1;
     }
+
+    if(a.cmd == "plan")
+        switch(m.sym_bytes)
+        {
+        case 1: return run_plan<uint8_t>(a, m);
+        case 2: return run_plan<uint16_t>(a, m);
+        default:    return run_plan<uint32_t>(a, m);
+        }
 
     switch(m.sym_bytes)
     {

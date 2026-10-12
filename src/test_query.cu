@@ -31,6 +31,7 @@
 #include <mutex>
 #include <numeric>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -667,6 +668,254 @@ bool gpu_available()
 }
 
 
+// Returns the metadata of an index of `n` symbols of `sym_bytes` bytes, whose
+// files are all at `path`, for the planner, which reads none of them.
+Index_Meta sized_meta(const idx_t n, const uint32_t sym_bytes, const std::string& path)
+{
+    Index_Meta m;
+    m.n = n;
+    m.sym_bytes = sym_bytes;
+    m.text = path;
+    m.sa_part = {path};
+    m.sa_part_off = {0};
+    return m;
+}
+
+
+// Returns options that leave every pick to the planner, within budgets of
+// `device` and `host` bytes; `0` measures one.
+Query_Options auto_options(const idx_t device = 0, const idx_t host = 0)
+{
+    Query_Options opt;
+    opt.text_res = opt.sa_res = Residency::automatic;
+    opt.stride = AUTO_STRIDE;
+    opt.key_words = AUTO_KEY_WORDS;
+    opt.device_budget = device;
+    opt.host_budget = host;
+    return opt;
+}
+
+
+// Returns the options `opt` with the tiers named `text_res` and `sa_res`.
+Query_Options with_tiers(Query_Options opt, const Residency text_res, const Residency sa_res)
+{
+    opt.text_res = text_res;
+    opt.sa_res = sa_res;
+    return opt;
+}
+
+
+// Checks the planner on indexes of synthetic sizes, with set budgets: the
+// campaigns' indexes on the benchmark node pick its plans and tables; over
+// shrinking budgets, every plan, the first that fits at the least stride that
+// fits, and none past the last; the edges of a fit; gathered brackets that
+// would no longer fit their windows; named tiers, tables, gathers, and chunks
+// mixed with the planner's picks; symbols of every width; and budgets
+// measured.
+bool test_planner()
+{
+    using P = Query_Engine<uint16_t>;
+    const std::string path = scratch_dir("planner").string();   // On a local file system.
+    const auto dev = Residency::device, pin = Residency::pinned, pg = Residency::pageable, map = Residency::mapped;
+    std::string err;
+    Placement p;
+
+    // The benchmark node: the device's free memory at load, and the host's available memory.
+    const idx_t node_dev = 101388779520ull, node_host = idx_t(993) << 30;
+    struct Case { const char* what; idx_t n; Plan plan; Residency text_res, sa_res; idx_t stride; uint32_t key_words; idx_t table_bytes; };
+    const Case cases[] =
+    {
+        {"dolmasample", 8039098124ull, Plan::A, dev, dev, 32, 2, 4019549072ull},
+        {"arxiv", 30214423492ull, Plan::B, dev, pin, 32, 2, 15107211760ull},
+        {"github", 63944091504ull, Plan::C, pg, pg, 32, 4, 63944091520ull},
+        {"c4", 198079545568ull, Plan::D, pg, map, 128, 4, 49519886400ull},
+        {"pile", 238429547834ull, Plan::D, pg, map, 128, 4, 59607386976ull},
+    };
+
+    for(const auto& c : cases)
+    {
+        CHECK(P::plan(sized_meta(c.n, 2, path), auto_options(node_dev, node_host), p, err), "%s: %s", c.what, err.c_str());
+        CHECK(p.plan == c.plan && p.text_res == c.text_res && p.sa_res == c.sa_res && p.stride == c.stride && p.key_words == c.key_words
+              && p.table_bytes == c.table_bytes, "%s: plan %s, text %s, suffix array %s, stride %" PRIu64 ", %u key words, %" PRIu64 " table bytes",
+              c.what, plan_name(p.plan), residency_name(p.text_res), residency_name(p.sa_res), p.stride, p.key_words, p.table_bytes);
+        CHECK(p.fits && p.auto_text_res && p.auto_sa_res && p.auto_stride && p.auto_key_words && p.device_budget == node_dev
+              && p.host_budget == node_host && p.device_margin == node_dev / 16 && p.host_margin == node_host / 16
+              && p.device_bytes + p.device_margin <= node_dev && p.host_bytes + p.host_margin <= node_host
+              && p.host_search == (c.plan == Plan::C || c.plan == Plan::D) && p.gather == (c.plan == Plan::B) && p.sa_local,
+              "%s: unexpected placement", c.what);
+        CHECK(p.chunk_queries == (idx_t(1) << (p.gather ? 24 : 18)) && p.chunk_symbols == (idx_t(1) << (p.gather ? 28 : 24)),
+              "%s: chunks of the placement's default sizes", c.what);
+    }
+
+    // Over shrinking budgets: the first plan that fits, its tiers named alone fitting, at the least stride that fits; no earlier plan fits,
+    // nor the pick at half its stride; and every plan picked, and none past the last.
+    struct Tiers { Plan plan; Residency text_res, sa_res; };
+    const Tiers plans[] = {{Plan::A, dev, dev}, {Plan::B, dev, pin}, {Plan::C, pg, pg}, {Plan::D, pg, map}};
+    const Index_Meta m = sized_meta(4000000000ull, 2, path);    // A text of 8 GB, a suffix array of 20 GB.
+    std::set<Plan> seen;
+    int none = 0;
+    for(idx_t d = idx_t(1) << 30; d <= idx_t(48) << 30; d += idx_t(1) << 29)
+        for(const idx_t h : {idx_t(8) << 30, idx_t(16) << 30, idx_t(24) << 30, idx_t(30) << 30, idx_t(40) << 30})
+        {
+            const bool ok = P::plan(m, auto_options(d, h), p, err);
+            const std::string what = "device " + std::to_string(d) + ", host " + std::to_string(h);
+            for(const auto& t : plans)
+            {
+                Placement q;
+                const bool fits = P::plan(m, with_tiers(auto_options(d, h), t.text_res, t.sa_res), q, err) && q.fits;
+                if(ok && t.plan == p.plan)
+                {
+                    CHECK(fits && q.stride == p.stride && q.key_words == p.key_words && q.device_bytes == p.device_bytes && !q.auto_text_res
+                          && !q.auto_sa_res, "%s: plan %s picked, but not alone", what.c_str(), plan_name(p.plan));
+                    break;
+                }
+
+                CHECK(!fits, "%s: plan %s fits, before the pick %s", what.c_str(), plan_name(t.plan), ok ? plan_name(p.plan) : "of none");
+            }
+
+            if(!ok)
+            {
+                ++none;
+                continue;
+            }
+
+            seen.insert(p.plan);
+            CHECK(p.fits && p.device_bytes + p.device_margin <= d && p.host_bytes + p.host_margin <= h && p.stride >= 32 && p.stride <= 4096
+                  && (p.stride & (p.stride - 1)) == 0, "%s: plan %s does not fit at stride %" PRIu64, what.c_str(), plan_name(p.plan), p.stride);
+            if(p.stride > 32)
+            {
+                Query_Options o = with_tiers(auto_options(d, h), p.text_res, p.sa_res);
+                o.stride = p.stride / 2;
+                o.key_words = p.key_words;
+                Placement q;
+                CHECK(P::plan(m, o, q, err) && !q.fits && !q.auto_stride, "%s: plan %s fits at half its stride %" PRIu64, what.c_str(),
+                      plan_name(p.plan), p.stride);
+            }
+        }
+
+    CHECK(seen.size() == 4 && none > 0, "budgets over every plan picked %zu of them, and fit none %d times", seen.size(), none);
+
+    // The edge of a fit: the least device budget for A at stride 32 holds its bytes and its margin; a byte less does not, and picks the
+    // next stride. Likewise with the tiers and the table named.
+    const auto least = [&](const Index_Meta& x, const std::function<bool(const Placement&)>& want, idx_t lo, idx_t hi,
+                           const Query_Options& o = auto_options())
+    {
+        while(lo < hi)
+        {
+            const idx_t mid = lo + (hi - lo) / 2;
+            Query_Options om = o;
+            om.device_budget = mid;
+            om.host_budget = node_host;
+            Placement q;
+            if(P::plan(x, om, q, err) && want(q))
+                hi = mid;
+            else
+                lo = mid + 1;
+        }
+
+        return lo;
+    };
+
+    const idx_t edge = least(m, [](const Placement& q) { return q.plan == Plan::A && q.stride == 32; }, idx_t(1) << 30, idx_t(1) << 40);
+    CHECK(P::plan(m, auto_options(edge, node_host), p, err) && p.plan == Plan::A && p.stride == 32 && p.device_bytes + p.device_margin <= edge,
+          "the edge of A at stride 32: %s", err.c_str());
+    const idx_t a32 = p.device_bytes;
+    CHECK(P::plan(m, auto_options(edge - 1, node_host), p, err) && p.plan == Plan::A && p.stride == 64 && a32 + std::max<idx_t>(idx_t(1) << 30, (edge - 1) / 16) > edge - 1,
+          "a byte below the edge of A at stride 32, plan %s at stride %" PRIu64, plan_name(p.plan), p.stride);
+    {
+        Query_Options o = with_tiers(auto_options(), dev, dev);
+        o.stride = 32;
+        o.key_words = 2;
+        const idx_t named_edge = least(m, [](const Placement& q) { return q.fits; }, idx_t(1) << 30, idx_t(1) << 40, o);
+        CHECK(named_edge == edge, "the edge of A at stride 32 named, %" PRIu64 ", differs from the planner's, %" PRIu64, named_edge, edge);
+        o.device_budget = edge - 1;
+        o.host_budget = node_host;
+        CHECK(P::plan(m, o, p, err) && !p.fits && p.device_bytes == a32, "a byte below the edge of A at stride 32 named fits");
+    }
+
+    // Gathered brackets fit their windows at strides up to 128: past the least budget for B, the pick is C, though B at stride 256 would fit.
+    const Index_Meta arxiv = sized_meta(30214423492ull, 2, path);
+    const idx_t b_edge = least(arxiv, [](const Placement& q) { return q.plan == Plan::A || q.plan == Plan::B; }, idx_t(1) << 30, idx_t(1) << 40);
+    CHECK(P::plan(arxiv, auto_options(b_edge, node_host), p, err) && p.plan == Plan::B && p.stride == 128, "the edge of B: plan %s at stride %" PRIu64,
+          plan_name(p.plan), p.stride);
+    CHECK(P::plan(arxiv, auto_options(b_edge - 1, node_host), p, err) && p.plan == Plan::C, "below the edge of B: plan %s", plan_name(p.plan));
+    Placement q;
+    CHECK(P::plan(arxiv, with_tiers(auto_options(b_edge - 1, node_host), dev, pin), q, err) == false
+          && P::plan(arxiv, [&] { auto o = with_tiers(auto_options(b_edge - 1, node_host), dev, pin); o.stride = 128; o.key_words = 2; return o; }(), q, err)
+          && q.table_room >= Sample_Table::bytes_of(arxiv.n, 256, 2) + 4 * (2 * 1024 * (idx_t(1) << 18) + 16) + 2 * DEVICE_PAGE_BYTES,
+          "below the edge of B, its tiers named fit no table, though one of stride 256 would fit their room");
+
+    // Named tiers, with the planner's other picks, and named tables, gathers, and chunks.
+    const Index_Meta dolma = sized_meta(8039098124ull, 2, path), github = sized_meta(63944091504ull, 2, path), c4 = sized_meta(198079545568ull, 2, path);
+    const Query_Options node = auto_options(node_dev, node_host);
+    CHECK(!P::plan(github, with_tiers(node, dev, Residency::automatic), p, err), "github fits no plan with its text on the device");
+    CHECK(P::plan(github, with_tiers(node, pg, Residency::automatic), p, err) && p.plan == Plan::C && !p.auto_text_res && p.auto_sa_res,
+          "github, its text pageable: %s", err.c_str());
+    CHECK(P::plan(c4, with_tiers(node, pg, Residency::automatic), p, err) && p.plan == Plan::D, "c4, its text pageable: %s", err.c_str());
+    CHECK(P::plan(c4, with_tiers(node, Residency::automatic, map), p, err) && p.plan == Plan::D && p.stride == 128 && p.key_words == 4,
+          "c4, its suffix array mapped: %s", err.c_str());
+    CHECK(P::plan(dolma, with_tiers(node, Residency::automatic, dev), p, err) && p.plan == Plan::A, "dolmasample, its suffix array on the device");
+    CHECK(!P::plan(dolma, with_tiers(node, pin, Residency::automatic), p, err), "no plan has the text pinned");
+    CHECK(P::plan(c4, with_tiers(node, pg, map), p, err) && p.fits && p.plan == Plan::D && p.stride == 128 && p.key_words == 4 && p.auto_stride
+          && !p.auto_text_res, "c4 with its tiers named and its table automatic: %s", err.c_str());
+    {
+        Query_Options o = node;
+        o.stride = 64;
+        CHECK(!P::plan(c4, o, p, err), "c4 fits no plan with a table of stride 64 and 4-word keys");
+        o.key_words = 2;
+        CHECK(P::plan(c4, o, p, err) && p.plan == Plan::D && p.stride == 64 && p.key_words == 2 && !p.auto_stride && !p.auto_key_words,
+              "c4 with a table of stride 64 and 2-word keys: %s", err.c_str());
+        o.stride = AUTO_STRIDE;
+        CHECK(P::plan(c4, o, p, err) && p.plan == Plan::D && p.stride == 64 && p.key_words == 2, "c4 with 2-word keys: %s", err.c_str());
+        o.stride = 0;
+        CHECK(P::plan(c4, o, p, err) && p.plan == Plan::D && p.stride == 0 && p.key_words == 0 && p.table_bytes == 0, "c4 in the direct mode: %s",
+              err.c_str());
+    }
+    {
+        Query_Options o = with_tiers(node, dev, dev);  // Named tiers and table, as before the planner: placed as named, fitting or not.
+        o.stride = 32;
+        o.key_words = 0;
+        CHECK(P::plan(c4, o, p, err) && p.plan == Plan::A && !p.fits && p.stride == 32 && p.key_words == 2, "c4, named on the device: %s", err.c_str());
+        CHECK(P::plan(c4, with_tiers(o, pin, pin), p, err) && p.plan == Plan::custom && p.stride == 32, "c4, named pinned: %s", err.c_str());
+    }
+    {
+        Query_Options o = node;
+        o.gather = Gather::always;
+        CHECK(!P::plan(github, o, p, err), "github fits no plan that gathers its brackets");
+        o.gather = Gather::never;
+        CHECK(P::plan(arxiv, o, p, err) && p.plan == Plan::B && !p.gather && p.chunk_queries == (idx_t(1) << 18), "arxiv, not gathering: %s", err.c_str());
+        const idx_t ungathered = p.device_bytes;
+        CHECK(P::plan(arxiv, node, p, err) && p.gather && p.device_bytes > ungathered, "gathers take device memory");
+        o = node;
+        o.chunk_queries = idx_t(1) << 20;
+        CHECK(P::plan(dolma, o, p, err) && p.plan == Plan::A && p.chunk_queries == (idx_t(1) << 20), "dolmasample, larger chunks: %s", err.c_str());
+        const idx_t larger = p.device_bytes;
+        CHECK(P::plan(dolma, node, p, err) && larger > p.device_bytes, "larger chunks take more device memory");
+    }
+
+    // Symbols of 4 bytes take keys of 4 words on the device too; of 1 byte, of 2. And of the engine's width only.
+    {
+        Placement r;
+        CHECK(Query_Engine<uint32_t>::plan(sized_meta(1000000000ull, 4, path), node, r, err) && r.plan == Plan::A && r.key_words == 4,
+              "4-byte symbols on the device: %s", err.c_str());
+        CHECK(Query_Engine<uint8_t>::plan(sized_meta(1000000000ull, 1, path), node, r, err) && r.plan == Plan::A && r.key_words == 2,
+              "1-byte symbols on the device: %s", err.c_str());
+        CHECK(Query_Engine<uint32_t>::plan(sized_meta(1000000000ull, 4, path), with_tiers(node, pg, pg), r, err) && r.plan == Plan::C && r.key_words == 4,
+              "4-byte symbols on the host: %s", err.c_str());
+        CHECK(!Query_Engine<uint8_t>::plan(dolma, node, r, err), "a symbol-width mismatch must be rejected");
+    }
+
+    // Budgets unset are measured: the device's free memory, if there is a device, and the host's available memory.
+    const bool device = gpu_available();
+    CHECK(P::plan(dolma, auto_options(0, node_host), p, err) == device && (!device || p.device_budget > 0), "the device budget, measured: %s",
+          device ? err.c_str() : "measured without a device");
+    CHECK(P::plan(dolma, auto_options(node_dev, 0), p, err) && p.host_budget > 0 && p.device_budget == node_dev, "the host budget, measured: %s",
+          err.c_str());
+
+    return true;
+}
+
+
 // Returns the count of the intervals `I` of the batch `off`, `sym` that fail the
 // certificate on the device.
 template <typename T_sym_>
@@ -1151,6 +1400,109 @@ bool test_sample_table()
 }
 
 
+// Checks the engine's automatic placement of a fixture index, against the
+// oracle every way the engine finds: every pick made, within the measured
+// budgets, and with the device's budget too small for all but the host's
+// search; tiers named with the other picked, and with the table picked; the
+// table picked again when switching modes; the device memory of a load and
+// its finds, within the planned; and a budget that fits no plan.
+bool test_gpu_auto()
+{
+    std::mt19937_64 rng(31);
+    const std::vector<uint16_t> alpha = {1, 2, 3, 4, 0xFFFE};
+    const auto T = random_text<uint16_t>(20000, alpha, 0xFFFF, 100, rng);
+    const auto SA = test::build_sa40(T);
+    const auto dir = scratch_dir("auto");
+    std::string err;
+    Index_Meta m;
+    CHECK(write_index(dir, T, SA, parts_for(T.size(), 2), err) && index_meta::read(dir.string(), m, err), "%s", err.c_str());
+
+    std::vector<uint64_t> off;
+    std::vector<uint16_t> sym;
+    fixture_queries(T, alpha, rng, 400, off, sym);
+    const idx_t q = off.size() - 1;
+    std::vector<SA_Interval> want(q);
+    for(idx_t i = 0; i < q; ++i)
+        want[i] = ref::find_one(T.data(), T.size(), SA.data(), sym.data() + off[i], off[i + 1] - off[i]);
+
+    // Loads with `opt`, and checks the placement's plan, tiers, and table, and the device memory that the load and its finds take; and
+    // the intervals.
+    const auto check = [&](const Query_Options& opt, const Plan plan, const Residency text_res, const Residency sa_res, const idx_t stride,
+                           const uint32_t key_words, const std::string& what)
+    {
+        Query_Engine<uint16_t> eng;
+        std::size_t free0 = 0, free1 = 0, total = 0;
+        CUDA_CHECK(cudaMemGetInfo(&free0, &total));
+        CHECK(eng.load(dir.string(), opt, err), "%s: %s", what.c_str(), err.c_str());
+        CUDA_CHECK(cudaMemGetInfo(&free1, &total));
+        const auto& p = eng.placement();
+        CHECK(p.plan == plan && p.text_res == text_res && p.sa_res == sa_res && p.stride == stride && p.key_words == key_words,
+              "%s: plan %s, text %s, suffix array %s, stride %" PRIu64 ", %u key words", what.c_str(), plan_name(p.plan), residency_name(p.text_res),
+              residency_name(p.sa_res), p.stride, p.key_words);
+        CHECK(eng.index().text_residency() == text_res && eng.index().sa_residency() == sa_res && eng.options().text_res == text_res
+              && eng.options().sa_res == sa_res && eng.table().stride() == stride && eng.table().key_words() == key_words
+              && eng.host_searches() == p.host_search && (eng.options().gather == Gather::always) == p.gather
+              && eng.options().chunk_queries == p.chunk_queries && eng.options().chunk_symbols == p.chunk_symbols,
+              "%s: the engine is not loaded as placed", what.c_str());
+
+        const idx_t slack = idx_t(64) << 20;   // The device's own: the code of kernels loaded on first use.
+        CHECK(free0 - free1 <= p.device_bytes + slack, "%s: the load takes %zu bytes of device memory; %" PRIu64 " planned", what.c_str(),
+              free0 - free1, p.device_bytes);
+        if(!check_every_way(eng, off, sym, want, what))
+            return false;
+
+        CUDA_CHECK(cudaMemGetInfo(&free1, &total));
+        CHECK(free0 - free1 <= p.device_bytes + slack, "%s: the load and its finds take %zu bytes of device memory; %" PRIu64 " planned",
+              what.c_str(), free0 - free1, p.device_bytes);
+        return true;
+    };
+
+    const auto dev = Residency::device, pin = Residency::pinned, pg = Residency::pageable, map = Residency::mapped, aut = Residency::automatic;
+
+    // Every pick made, within the measured budgets: the fixture fits any device. The suffix array named pinned: gathered, in large chunks.
+    if(!check(auto_options(), Plan::A, dev, dev, 32, 2, "every pick made")
+        || !check(with_tiers(auto_options(), aut, pin), Plan::B, dev, pin, 32, 2, "the suffix array named pinned")
+        || !check(with_tiers(auto_options(), aut, map), Plan::D, pg, map, 32, 4, "the suffix array named mapped")
+        || !check(with_tiers(auto_options(), pg, pg), Plan::C, pg, pg, 32, 4, "the tiers named pageable"))
+        return false;
+
+    // The device's budget too small for the text and the lanes: the host searches, with a table of 4-word keys.
+    Placement c;
+    CHECK(Query_Engine<uint16_t>::plan(m, with_tiers(auto_options(), pg, pg), c, err), "%s", err.c_str());
+    if(!check(auto_options(c.device_bytes + (idx_t(1) << 30)), Plan::C, pg, pg, 32, 4, "a device budget for plan C only"))
+        return false;
+
+    // Named tiers and table, with the table picked anew when switching modes: the planner's, whatever the load's.
+    {
+        Query_Engine<uint16_t> eng;
+        Query_Options opt{dev, dev, 1000, 16, 1};
+        CHECK(eng.load(dir.string(), opt, err) && eng.placement().plan == Plan::A && !eng.placement().auto_stride && eng.table().stride() == 16
+              && eng.table().key_words() == 1, "named tiers and table: %s", err.c_str());
+        struct Mode { idx_t stride; uint32_t key_words; idx_t want_stride; uint32_t want_key_words; };
+        for(const Mode md : {Mode{AUTO_STRIDE, AUTO_KEY_WORDS, 32, 2}, Mode{AUTO_STRIDE, 4, 32, 4}, Mode{64, AUTO_KEY_WORDS, 64, 2}})
+        {
+            CHECK(eng.configure(md.stride, md.key_words, false, Gather::automatic, err) && eng.table().stride() == md.want_stride
+                  && eng.table().key_words() == md.want_key_words && eng.options().stride == md.want_stride, "an automatic table: %s", err.c_str());
+            if(!check_every_way(eng, off, sym, want, "an automatic table of stride " + std::to_string(md.want_stride)))
+                return false;
+        }
+    }
+
+    // No plan fits a device budget of no more than its margin; nor do the named tiers an automatic table.
+    {
+        Query_Engine<uint16_t> eng;
+        CHECK(!eng.load(dir.string(), auto_options(idx_t(1) << 30), err) && !eng.index().loaded() && eng.placement().plan == Plan::custom,
+              "a device budget of its margin fits no plan");
+        CHECK(!eng.load(dir.string(), with_tiers(auto_options(idx_t(1) << 30), dev, dev), err) && !eng.index().loaded(),
+              "named tiers in a device budget of its margin fit no automatic table");
+        Suffix_Index idx;
+        CHECK(!idx.load(dir.string(), aut, dev, 0, err) && !idx.load(dir.string(), dev, aut, 0, err), "an index loads into named tiers only");
+    }
+
+    return true;
+}
+
+
 bool test_gpu_rejects()
 {
     // A little-endian `uint16_t` text on which byte order and numeric order disagree.
@@ -1499,10 +1851,12 @@ int main(const int argc, char** const argv)
         {"suffix-array streaming",  test_scan_sa,               false},
         {"pages read ahead",        test_prefetch_pages,        false},
         {"host search's teams",     test_host_team,             false},
+        {"planner",                 test_planner,               false},
         {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
         {"pipeline",                test_pipeline,              true},
         {"device load rejects",     test_gpu_rejects,           true},
+        {"automatic placement",     test_gpu_auto,              true},
     };
 
     const auto selected = [&](const Test& t)

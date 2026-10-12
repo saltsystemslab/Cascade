@@ -8,11 +8,13 @@
 
 #include <cub/cub.cuh>
 
+#include <sys/vfs.h>
 #include <unistd.h>
 
 #include <atomic>
 #include <climits>
 #include <type_traits>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <string>
@@ -33,6 +35,13 @@ constexpr idx_t WINDOW_MAX_BYTES = 1024;    // Bytes of a bracket's slot of gath
 constexpr idx_t WINDOW_PAD_BYTES = 16;  // Bytes past the last slot: the decoding of an entry reads the word past its last byte.
 constexpr idx_t NO_SLOT = ~idx_t(0);
 constexpr idx_t MARKS_PER_ITEM = idx_t(1) << 20;  // Page marks that a thread clears at a time.
+constexpr idx_t AUTO_STRIDE_MIN = 32;   // The first stride the planner tries for a table,
+constexpr idx_t AUTO_STRIDE_MAX = 4096; // and the last: brackets of wider gaps are not much narrower than the whole suffix array.
+constexpr idx_t MARGIN_PARTS = 16;  // Of a memory budget, the planner leaves a part this small free,
+constexpr idx_t MARGIN_MIN_BYTES = idx_t(1) << 30;  // and no less than this.
+constexpr idx_t SORT_SCRATCH_PER_KEY = 8;   // Bytes of a radix sort's scratch per key, at most: a tile's 256 4-byte digit counts, per tile of 128 keys or more.
+constexpr idx_t SCAN_SCRATCH_PER_KEY = 1;   // Bytes of a scan's scratch per item, at most: its tiles' states.
+constexpr idx_t SCRATCH_BASE_BYTES = idx_t(1) << 20;    // Bytes of either's scratch beyond, at most.
 
 
 // Gathered suffix-array bytes of a bracket: the bytes `[b0, b1)` of the suffix
@@ -61,6 +70,67 @@ __device__ inline Window window_of(const Rank_Range r, const Rank_Range o, const
 
     const idx_t b0 = (SA_WIDTH * r.first) & ~idx_t(15), b1 = (SA_WIDTH * r.last + 15) & ~idx_t(15);
     return (b1 - b0 <= wb ? Window{b0, b1, 2 * wb * g + (upper ? wb : 0)} : Window{0, 0, NO_SLOT});
+}
+
+
+// Returns the bytes of a slot of gathered suffix-array entries that holds any
+// bracket of a table of stride `stride` with keys of `K` symbols. A bracket
+// probes at most `stride + K - 2` ranks: those of a sample gap, and the `K - 1`
+// shorter suffixes that match the key of a pattern ending in `0`. Their bytes,
+// rounded out to 16-byte words, gain at most 15 at each end.
+inline idx_t bracket_window_bytes(const idx_t stride, const idx_t K)
+{
+    return (SA_WIDTH * (stride + K - 2) + 2 * 15 + 15) & ~idx_t(15);
+}
+
+
+// Returns the bytes `b` of a device allocation in whole device pages.
+inline idx_t device_pages(const idx_t b)
+{
+    return (std::max<idx_t>(b, 1) + DEVICE_PAGE_BYTES - 1) / DEVICE_PAGE_BYTES * DEVICE_PAGE_BYTES;
+}
+
+
+// Returns the bytes `b` as decimal gigabytes, for messages.
+std::string gigabytes(const idx_t b)
+{
+    char s[32];
+    std::snprintf(s, sizeof(s), "%.1f GB", b / 1e9);
+    return s;
+}
+
+
+// Returns the name of the type of the file system that holds the file at
+// `path`, and in `remote` whether it is over a network; `?` if unknown.
+std::string file_system(const std::string& path, bool& remote)
+{
+    struct Kind { uint32_t magic; const char* name; bool remote; };
+    static const Kind kinds[] =
+    {
+        {0xEF53, "ext4", false}, {0x58465342, "xfs", false}, {0x9123683E, "btrfs", false}, {0x01021994, "tmpfs", false},
+        {0x794C7630, "overlay", false}, {0x2FC12FC1, "zfs", false}, {0xF2F52010, "f2fs", false}, {0xCA451A4E, "bcachefs", false},
+        {0x858458F6, "ramfs", false}, {0x6A656A63, "virtiofs", false},
+        {0x6969, "nfs", true}, {0x517B, "smb", true}, {0xFF534D42, "cifs", true}, {0xFE534D42, "smb2", true}, {0x00C36400, "ceph", true},
+        {0x0BD00BD0, "lustre", true}, {0x47504653, "gpfs", true}, {0x19830326, "beegfs", true}, {0xAAD7AAEA, "panfs", true},
+        {0x01021997, "9p", true}, {0x65735546, "fuse", true}, {0x5346414F, "afs", true}, {0x01161970, "gfs2", true}, {0x7461636F, "ocfs2", true},
+    };
+
+    remote = false;
+    struct statfs st;
+    if(::statfs(path.c_str(), &st) != 0)
+        return "?";
+
+    const auto magic = static_cast<uint32_t>(st.f_type);
+    for(const auto& k : kinds)
+        if(k.magic == magic)
+        {
+            remote = k.remote;
+            return k.name;
+        }
+
+    char s[16];
+    std::snprintf(s, sizeof(s), "0x%x", magic);
+    return s;
 }
 
 
@@ -348,6 +418,21 @@ std::size_t scan_bytes(const idx_t q)
 }
 
 
+// Returns the bytes of device memory of the buffers of a two-phase search of
+// `cap` queries with keys of `w` words, sorted if `sort`, as `allocate`
+// allocates them, at most: in whole device pages, and the scratch of the sort
+// and the scan at most as CUB sizes it for any device.
+idx_t search_buffer_bytes(const idx_t cap, const uint32_t w, const bool sort)
+{
+    idx_t b = device_pages(cap * w * sizeof(uint64_t)) + device_pages(2 * cap * sizeof(Rank_Range));
+    if(sort)
+        b += device_pages(cap * w * sizeof(uint64_t)) + 3 * device_pages(cap * sizeof(uint32_t))
+           + device_pages(SORT_SCRATCH_PER_KEY * cap + SCRATCH_BASE_BYTES) + device_pages(SCAN_SCRATCH_PER_KEY * cap + SCRATCH_BASE_BYTES);
+
+    return b;
+}
+
+
 // Allocates into `sb` the buffers of a two-phase search of `cap` queries with
 // keys of `w` words, and of sorting them and finding their runs if `sort`: from
 // the pool `pool` on the stream `s` if the pool is not null, and directly
@@ -579,6 +664,234 @@ void fetch_batch(const uint64_t* const off, const T_sym_* const sym, const idx_t
 }
 
 
+const char* plan_name(const Plan p)
+{
+    switch(p)
+    {
+    case Plan::A:   return "A";
+    case Plan::B:   return "B";
+    case Plan::C:   return "C";
+    case Plan::D:   return "D";
+    case Plan::custom:  return "custom";
+    }
+
+    return "?";
+}
+
+
+template <typename T_sym_>
+idx_t Query_Engine<T_sym_>::lane_device_bytes(const idx_t cq, const idx_t cs)
+{
+    // As `allocate_lanes` allocates a lane: its chunk's offsets, symbols, and intervals, and the buffers of any mode's search.
+    return STREAM_C * (device_pages((cq + 1) * sizeof(uint64_t)) + device_pages(cs * sizeof(T_sym_)) + device_pages(cq * sizeof(SA_Interval))
+                       + search_buffer_bytes(cq, 4, true));
+}
+
+
+template <typename T_sym_>
+idx_t Query_Engine<T_sym_>::lane_host_bytes(const idx_t cq, const idx_t cs, const bool host)
+{
+    // As `allocate_lanes` allocates a lane's pinned buffers: a chunk's staging, and its brackets and order if the host searches.
+    return STREAM_C * ((cq + 1) * sizeof(uint64_t) + cs * sizeof(T_sym_) + cq * sizeof(SA_Interval)
+                       + (host ? 2 * cq * sizeof(Rank_Range) + cq * sizeof(uint32_t) : 0));
+}
+
+
+template <typename T_sym_>
+idx_t Query_Engine<T_sym_>::gather_bytes(const idx_t stride, const idx_t K, const idx_t gather_queries)
+{
+    // As `search` takes them from the pool: the windows of a search on every stream of `find`, and of one by `find_async`.
+    const idx_t wb = std::min(WINDOW_MAX_BYTES, bracket_window_bytes(stride, K));
+    return device_pages((STREAM_C + 1) * (2 * wb * gather_queries + WINDOW_PAD_BYTES));
+}
+
+
+template <typename T_sym_>
+idx_t Query_Engine<T_sym_>::fit_stride(const idx_t n, const uint32_t w, const bool gather, const idx_t gather_queries, const idx_t room)
+{
+    const idx_t K = w * sizeof(uint64_t) / sizeof(T_sym_);
+    for(idx_t s = AUTO_STRIDE_MIN; s <= AUTO_STRIDE_MAX; s *= 2)
+    {
+        if(gather && bracket_window_bytes(s, K) > WINDOW_MAX_BYTES) // Wider brackets would be searched in place, across the bus.
+            break;
+
+        if(device_pages(Sample_Table::bytes_of(n, s, w)) + (gather ? gather_bytes(s, K, gather_queries) : 0) <= room)
+            return s;
+    }
+
+    return 0;
+}
+
+
+template <typename T_sym_>
+bool Query_Engine<T_sym_>::fit(const Index_Meta& m, const Query_Options& opt, Placement& p, std::string& why)
+{
+    // The searcher, the brackets' source, the chunks, and the keys, as `load` and `configure` pick them.
+    const auto device_side = [](const Residency r) { return r == Residency::device || r == Residency::pinned; };
+    p.host_search = !(device_side(p.text_res) && device_side(p.sa_res));
+    p.gather = (opt.gather != Gather::automatic ? opt.gather == Gather::always : p.sa_res == Residency::pinned && !p.host_search);
+    p.chunk_queries = (opt.chunk_queries != 0 ? opt.chunk_queries : idx_t(1) << (p.gather ? 24 : 18));
+    p.chunk_symbols = (opt.chunk_symbols != 0 ? opt.chunk_symbols : idx_t(1) << (p.gather ? 28 : 24));
+    const uint32_t w_dflt = (sizeof(T_sym_) == 4 ? 4 : 2);
+    const uint32_t w = (opt.key_words == AUTO_KEY_WORDS ? (p.host_search ? 4 : w_dflt) : (opt.key_words != 0 ? opt.key_words : w_dflt));
+    if(p.gather && p.host_search)
+    {
+        why = "gathers no brackets: the host searches it";
+        return false;
+    }
+
+    // The arrays in their tiers, the lanes and their pinned buffers, and a mapped suffix array's marks of the pages asked for.
+    idx_t dev = 0, host = 0;
+    Suffix_Index::footprint(m, p.text_res, p.sa_res, dev, host);
+    dev += lane_device_bytes(p.chunk_queries, p.chunk_symbols);
+    host += lane_host_bytes(p.chunk_queries, p.chunk_symbols, p.host_search);
+    if(p.sa_res == Residency::mapped && opt.host_prefetch)
+        host += (m.sa_bytes() + SA_PAGE_BYTES - 1) / SA_PAGE_BYTES;
+
+    // The table, in the device memory that is left, with its gathers.
+    const idx_t cap = (p.device_budget > p.device_margin ? p.device_budget - p.device_margin : 0);
+    p.table_room = (cap > dev ? cap - dev : 0);
+    p.device_bytes = dev;
+    p.host_bytes = host;
+    const idx_t s = (opt.stride == AUTO_STRIDE ? fit_stride(m.n, w, p.gather, opt.gather_queries, p.table_room) : opt.stride);
+    if(s == 0 && opt.stride == AUTO_STRIDE)
+    {
+        why = "takes " + gigabytes(dev) + " of device memory without a table, which leaves " + gigabytes(p.table_room)
+            + " of the budget less its margin: too little for a table of stride " + std::to_string(AUTO_STRIDE_MIN) + " to "
+            + std::to_string(AUTO_STRIDE_MAX);
+        return false;
+    }
+
+    p.stride = s;
+    p.key_words = (s != 0 ? w : 0);
+    p.table_bytes = Sample_Table::bytes_of(m.n, s, w);
+    if(s != 0)
+        p.device_bytes += device_pages(p.table_bytes) + (p.gather ? gather_bytes(s, w * sizeof(uint64_t) / sizeof(T_sym_), opt.gather_queries) : 0);
+    p.host_bytes += Sample_Table::build_host_bytes(m, p.text_res, p.sa_res, s, w);
+
+    if(p.device_bytes > cap)
+    {
+        why = "takes " + gigabytes(p.device_bytes) + " of device memory, past the budget of " + gigabytes(p.device_budget) + " less its margin";
+        return false;
+    }
+
+    if(p.host_bytes + p.host_margin > p.host_budget)
+    {
+        why = "takes " + gigabytes(p.host_bytes) + " of host memory, past the budget of " + gigabytes(p.host_budget) + " less its margin";
+        return false;
+    }
+
+    return true;
+}
+
+
+template <typename T_sym_>
+bool Query_Engine<T_sym_>::plan(const Index_Meta& m, const Query_Options& opt, Placement& p, std::string& err)
+{
+    p = Placement();
+    if(m.sym_bytes != sizeof(T_sym_))
+    {
+        err = "index has " + std::to_string(m.sym_bytes) + "-byte symbols; the engine expects " + std::to_string(sizeof(T_sym_));
+        return false;
+    }
+
+    p.auto_text_res = (opt.text_res == Residency::automatic);
+    p.auto_sa_res = (opt.sa_res == Residency::automatic);
+    p.auto_stride = (opt.stride == AUTO_STRIDE);
+    p.auto_key_words = (opt.key_words == AUTO_KEY_WORDS);
+    const bool named = (!p.auto_text_res && !p.auto_sa_res);   // Named tiers are placed as named, fitting or not.
+
+    // The budgets as set, or else measured; a failed measure fails only a pick of a tier or a stride.
+    p.device_budget = opt.device_budget;
+    if(p.device_budget == 0)
+    {
+        std::size_t free_b = 0, total_b = 0;
+        const cudaError_t e = cudaMemGetInfo(&free_b, &total_b);
+        if(e == cudaSuccess)
+            p.device_budget = free_b;
+        else
+        {
+            cudaGetLastError(); // Not an error to keep.
+            if(!named || p.auto_stride)
+            {
+                err = std::string("cannot measure the device's free memory: ") + cudaGetErrorString(e) + "; set a device budget";
+                return false;
+            }
+        }
+    }
+
+    p.host_budget = (opt.host_budget != 0 ? opt.host_budget : available_bytes());
+    if(p.host_budget == 0 && (!named || p.auto_stride))
+    {
+        err = "cannot measure the host's available memory; set a host budget";
+        return false;
+    }
+
+    p.device_margin = std::max(MARGIN_MIN_BYTES, p.device_budget / MARGIN_PARTS);
+    p.host_margin = std::max(MARGIN_MIN_BYTES, p.host_budget / MARGIN_PARTS);
+
+    // The plans whose tiers agree with those named, in order; or the tiers named, a plan's or not.
+    struct Tiers { Plan plan; Residency text_res, sa_res; };
+    static constexpr Tiers plans[] = {{Plan::A, Residency::device, Residency::device}, {Plan::B, Residency::device, Residency::pinned},
+                                      {Plan::C, Residency::pageable, Residency::pageable}, {Plan::D, Residency::pageable, Residency::mapped}};
+    std::vector<Tiers> cand;
+    for(const auto& t : plans)
+        if((p.auto_text_res || opt.text_res == t.text_res) && (p.auto_sa_res || opt.sa_res == t.sa_res))
+            cand.push_back(t);
+
+    if(named && cand.empty())
+        cand.push_back(Tiers{Plan::custom, opt.text_res, opt.sa_res});
+
+    if(cand.empty())
+    {
+        err = std::string("no plan places the ") + (p.auto_text_res ? "suffix array" : "text") + " in " + residency_name(p.auto_text_res ? opt.sa_res : opt.text_res)
+            + " memory; name both tiers to place it so";
+        return false;
+    }
+
+    std::string why;
+    for(const auto& t : cand)
+    {
+        Placement c = p;
+        c.plan = t.plan;
+        c.text_res = t.text_res;
+        c.sa_res = t.sa_res;
+        std::string no;
+        c.fits = fit(m, opt, c, no);
+        if(c.fits || (named && (!c.auto_stride || c.stride != 0)))
+        {
+            p = c;
+            why.clear();
+            break;
+        }
+
+        why += (why.empty() ? "" : "; ") + std::string(named ? "" : std::string(plan_name(t.plan)) + " ") + no;
+    }
+
+    if(!why.empty())
+    {
+        err = (named ? std::string("the index in the tiers named ") : "no plan fits: ") + why;
+        return false;
+    }
+
+    // The file systems of the suffix array's files: mapped, it is read from them on demand.
+    std::vector<std::string> fs;
+    for(const auto& path : m.sa_part)
+    {
+        bool remote = false;
+        const std::string f = file_system(path, remote);
+        if(std::find(fs.begin(), fs.end(), f) == fs.end())
+            fs.push_back(f);
+        p.sa_local = p.sa_local && !remote;
+    }
+
+    for(const auto& f : fs)
+        p.sa_fs += (p.sa_fs.empty() ? "" : "+") + f;
+
+    return true;
+}
+
+
 template <typename T_sym_>
 bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt, std::string& err)
 {
@@ -614,12 +927,18 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
     tab_.release();
     sa_files_.close();
     asked_.reset();
-    if(!idx_.load(dir, opt.text_res, opt.sa_res, opt.spot, err))
+    idx_.release(); // The planner measures the memory free of the previous load.
+    placement_ = Placement();
+    Placement pl;
+    if(!plan(m, opt, pl, err) || !idx_.load(dir, pl.text_res, pl.sa_res, opt.spot, err))
         return false;
 
+    placement_ = pl;
     opt_ = opt;
+    opt_.text_res = pl.text_res;
+    opt_.sa_res = pl.sa_res;
     opt_.host_threads = host_search::thread_count(opt.host_threads);
-    const bool configured = configure(opt.stride, opt.key_words, opt.sort, opt.gather, err);
+    const bool configured = configure(pl.stride, pl.key_words, opt.sort, opt.gather, err);
     if(opt_.chunk_queries == 0) // Gathers gain from sorting large chunks.
         opt_.chunk_queries = idx_t(1) << (opt_.gather == Gather::always ? 24 : 18);
     if(opt_.chunk_symbols == 0)
@@ -632,6 +951,7 @@ bool Query_Engine<T_sym_>::load(const std::string& dir, const Query_Options& opt
         sa_files_.close();
         asked_.reset();
         idx_.release();
+        placement_ = Placement();
         return false;
     }
 
@@ -668,17 +988,25 @@ bool Query_Engine<T_sym_>::configure(const idx_t stride, const uint32_t key_word
     if(stride == 0)
         return true;
 
-    const uint32_t w = (key_words != 0 ? key_words : (sizeof(T_sym_) == 4 ? 4 : 2));
-    if(!tab_.build(idx_, stride, w, err))
+    // Automatic keys as the planner picks them, and an automatic stride the least whose table fits the room the load left for one.
+    const uint32_t w_dflt = (sizeof(T_sym_) == 4 ? 4 : 2);
+    const uint32_t w = (key_words == AUTO_KEY_WORDS ? (host_searches() ? 4 : w_dflt) : (key_words != 0 ? key_words : w_dflt));
+    const idx_t s = (stride == AUTO_STRIDE ? fit_stride(idx_.n(), w, opt_.gather == Gather::always, opt_.gather_queries, placement_.table_room)
+                                           : stride);
+    if(s == 0)
+    {
+        err = "no sample table of stride " + std::to_string(AUTO_STRIDE_MIN) + " to " + std::to_string(AUTO_STRIDE_MAX) + " with keys of " + std::to_string(w)
+            + " words fits the load's " + gigabytes(placement_.table_room) + " of device memory for one";
+        return false;
+    }
+
+    if(!tab_.build(idx_, s, w, err))
         return false;
 
-    opt_.stride = stride;
+    opt_.stride = s;
     opt_.key_words = w;
-
-    // A bracket probes at most `stride + K - 2` ranks: those of a sample gap, and the `K - 1` shorter suffixes that match the key of a
-    // pattern ending in `0`. Their bytes, rounded out to 16-byte words, gain at most 15 at each end.
     if(opt_.gather == Gather::always)
-        window_bytes_ = std::min(WINDOW_MAX_BYTES, (SA_WIDTH * (stride + tab_.key_symbols() - 2) + 2 * 15 + 15) & ~idx_t(15));
+        window_bytes_ = std::min(WINDOW_MAX_BYTES, bracket_window_bytes(s, tab_.key_symbols()));
 
     return true;
 }

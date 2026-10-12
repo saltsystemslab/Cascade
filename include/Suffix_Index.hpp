@@ -27,7 +27,13 @@ enum class Residency
     pinned,     // Pinned host memory mapped into the device's address space: zero-copy from the device.
     pageable,   // Pageable host memory, with transparent huge pages: host-side access only.
     mapped,     // Its files mapped into host memory, read on demand through the page cache: host-side access only; the suffix array only.
+    automatic,  // Any of the above, as the query engine's planner picks it at load; never the tier of a loaded array.
 };
+
+
+// Granularity of the device's allocations: a large one takes its bytes rounded
+// up to it.
+constexpr idx_t DEVICE_PAGE_BYTES = idx_t(2) << 20;
 
 
 // Returns the name of the memory tier `r`.
@@ -57,6 +63,11 @@ bool read_range(const std::string& path, std::size_t off, std::size_t len, uint8
 // must be a positive multiple of 4 KB. Returns `false` with a reason in `err`
 // on failure.
 bool scan_sa(const Index_Meta& m, std::size_t align, const std::function<void(idx_t, const uint8_t*, std::size_t)>& fn, std::string& err);
+
+// Returns the bytes of host memory that `scan_sa` takes for its readers'
+// buffers, streaming the suffix array of the index `m` in pieces of `align`
+// bytes, at most.
+idx_t scan_sa_bytes(const Index_Meta& m, std::size_t align);
 
 }
 
@@ -144,6 +155,13 @@ public:
     // (`pinned`, `pageable`, and `mapped` for the suffix array). Returns `false`
     // with a reason in `err` on failure, leaving the index empty.
     bool load(const std::string& dir, Residency text_res, Residency sa_res, idx_t spot, std::string& err);
+
+    // Returns in `device` and `host` the bytes of device and of host memory that
+    // `load` takes for the index of metadata `m` with the text in the tier
+    // `text_res` and the suffix array in `sa_res`, at most: each array as
+    // allocated in its tier, a mapped one in the page cache only, and the host's
+    // staging of device-bound reads, while it reads them.
+    static void footprint(const Index_Meta& m, Residency text_res, Residency sa_res, idx_t& device, idx_t& host);
 
     // Frees the arrays, leaving the index empty.
     void release();

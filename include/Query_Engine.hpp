@@ -38,7 +38,9 @@
 // host's cores search the brackets over the arrays, while the device ranks the
 // next chunks. A mapped suffix array is read from its drives on demand: the
 // host asks for the pages of a chunk's brackets ahead, while it searches the
-// chunk before, so that their reads overlap it and one another.
+// chunk before, so that their reads overlap it and one another. The planner
+// picks the tiers and the table that a load leaves automatic, from the index's
+// sizes and the memory budgets: the first of the plans A to D that fits.
 
 namespace gpu_saca
 {
@@ -52,14 +54,34 @@ enum class Gather
 };
 
 
+// The memory plans of a query index, in the order the planner tries them.
+enum class Plan
+{
+    A,  // Both arrays in device memory; the device searches.
+    B,  // The text in device memory, and the suffix array in pinned host memory; the device searches, its brackets gathered.
+    C,  // Both arrays in pageable host memory; the host searches.
+    D,  // The text in pageable host memory, and the suffix array mapped from its files; the host searches.
+    custom, // Other tiers, named.
+};
+
+
+// Returns the name of the plan `p`.
+const char* plan_name(Plan p);
+
+
+// The `Query_Options::stride` and `key_words` that leave them to the planner.
+constexpr idx_t AUTO_STRIDE = ~idx_t(0);
+constexpr uint32_t AUTO_KEY_WORDS = ~uint32_t(0);
+
+
 // Placement, load-time checks, search mode, and chunking of an engine.
 struct Query_Options
 {
-    Residency text_res = Residency::device; // Tier of the text.
-    Residency sa_res = Residency::device;   // Tier of the suffix array.
+    Residency text_res = Residency::device; // Tier of the text; `automatic` lets the planner pick it.
+    Residency sa_res = Residency::device;   // Tier of the suffix array; `automatic` likewise.
     idx_t spot = 100000;    // Random adjacent pairs of the suffix array spot-checked for order at load; `0` skips.
-    idx_t stride = 32;  // Sample-table stride; `0` selects the direct mode.
-    uint32_t key_words = 0; // 64-bit words per table key: 1, 2, or 4; `0` picks 2, or 4 for 4-byte symbols.
+    idx_t stride = 32;  // Sample-table stride; `0` selects the direct mode, and `AUTO_STRIDE` lets the planner pick it.
+    uint32_t key_words = 0; // 64-bit words per table key: 1, 2, or 4; `0` picks 2, or 4 for 4-byte symbols; `AUTO_KEY_WORDS`, the planner.
     bool sort = false;  // Whether to sort every batch by its packed prefixes before searching; gathering, identical queries then gather once.
     Gather gather = Gather::automatic;  // Where the two-phase search reads its brackets' suffix-array entries.
     idx_t gather_queries = idx_t(1) << 18;  // Queries whose brackets are gathered at a time, bounding the copies' device memory.
@@ -70,6 +92,45 @@ struct Query_Options
     unsigned host_threads = 0;  // Threads of the host's search, if it searches; `0` takes OpenMP's default, every core.
     unsigned host_lanes = 32;   // Boundary searches each such thread interleaves.
     bool host_prefetch = true;  // Whether the host asks the kernel ahead for the pages of a mapped suffix array that a chunk's brackets probe first.
+    idx_t device_budget = 0;    // Bytes of device memory the planner places in; `0` takes the device's free memory at load.
+    idx_t host_budget = 0;  // Bytes of host memory it places in; `0` takes the host's available memory at load.
+};
+
+
+// The placement of an index that an engine loads: its plan, its tiers, and its
+// sample table, as named in the options or as the planner picks them, and the
+// memory they take, as planned. The planner picks the first plan of A to D
+// whose tiers agree with those named, and that fits both budgets, less their
+// margins of a sixteenth, and at least 1 GiB; with an automatic table, of
+// stride 32, doubled until it fits the device memory that is left, up to 4096,
+// or while gathered brackets fit their windows, and of 2-word keys (4 for
+// 4-byte symbols) if the device searches, else 4-word.
+struct Placement
+{
+    Plan plan = Plan::custom;   // The plan of the tiers.
+    Residency text_res = Residency::device; // The tier of the text.
+    Residency sa_res = Residency::device;   // Of the suffix array.
+    idx_t stride = 0;   // The sample table's stride at load; `0` in the direct mode.
+    uint32_t key_words = 0; // Its keys' words; `0` in the direct mode.
+    bool auto_text_res = false; // Whether the planner picked the text's tier,
+    bool auto_sa_res = false;   // the suffix array's,
+    bool auto_stride = false;   // the table's stride,
+    bool auto_key_words = false;    // and its keys' words.
+    bool host_search = false;   // Whether the host searches.
+    bool gather = false;    // Whether the device gathers its brackets' suffix-array entries.
+    idx_t chunk_queries = 0;    // The most queries of a chunk of a host-side batch, in effect.
+    idx_t chunk_symbols = 0;    // The most symbols.
+    bool fits = false;  // Whether the placement fits the budgets; always if the planner picked any tier.
+    idx_t device_budget = 0;    // Bytes of device memory planned in: the device's free memory at load, unless set; `0` if unknown.
+    idx_t host_budget = 0;  // Of host memory: its available memory at load, unless set; `0` if unknown.
+    idx_t device_margin = 0;    // Bytes of the device budget left free: for the callers' batches, and the scratch of `find_async`.
+    idx_t host_margin = 0;  // Of the host budget.
+    idx_t device_bytes = 0; // Bytes the placement takes in device memory, at most: its arrays, its table, the lanes, and the gathers.
+    idx_t host_bytes = 0;   // In host memory, at most: its arrays, the lanes' pinned buffers, and the scratch of loading them.
+    idx_t table_bytes = 0;  // Bytes of the table's keys.
+    idx_t table_room = 0;   // Bytes of device memory left to a table and its gathers: what an automatic table's stride fits.
+    std::string sa_fs;  // The file systems of the suffix array's files.
+    bool sa_local = true;   // Whether they are all local, rather than over a network; mapped, the others read slowly.
 };
 
 
@@ -122,7 +183,8 @@ private:
 
     Suffix_Index idx_;  // The loaded index.
     Sample_Table tab_;  // Its sample table.
-    Query_Options opt_; // The options of the load.
+    Query_Options opt_; // The options of the load, with its tiers.
+    Placement placement_;   // The placement of the load.
     idx_t window_bytes_ = 0;    // Bytes of a bracket's slot of gathered suffix-array entries; `0` unless gathering.
     int device_ = 0;    // The device of the load.
     std::array<Lane, STREAM_C> lane_;   // The streams of `find`.
@@ -138,6 +200,31 @@ private:
     // Allocates the lanes for chunks of the options' sizes, and the pool.
     // Returns `false` with a reason in `err` on failure.
     bool allocate_lanes(std::string& err);
+
+    // Returns the bytes of device memory of the lanes for chunks of `cq` queries
+    // and `cs` symbols, as `allocate_lanes` allocates them, at most.
+    static idx_t lane_device_bytes(idx_t cq, idx_t cs);
+
+    // Returns the bytes of their pinned host memory, with the buffers of the
+    // host's search if `host`.
+    static idx_t lane_host_bytes(idx_t cq, idx_t cs, bool host);
+
+    // Returns the bytes of device memory of the gathered brackets of the searches
+    // that run at once, at most, over a table of stride `stride` and keys of `K`
+    // symbols, gathering for `gather_queries` queries at a time.
+    static idx_t gather_bytes(idx_t stride, idx_t K, idx_t gather_queries);
+
+    // Returns the least of the strides 32, 64, ... whose table, with keys of `w`
+    // words over a text of `n` symbols, and its gathered brackets if `gather`,
+    // fits `room` bytes of device memory; `0` if none does. Gathered, a stride's
+    // brackets must fit their windows.
+    static idx_t fit_stride(idx_t n, uint32_t w, bool gather, idx_t gather_queries, idx_t room);
+
+    // Completes the placement `p` of the index of metadata `m` with the options
+    // `opt`, its tiers and its budgets set: the searcher, the chunks, the table,
+    // and the memory they take. Returns `true` iff it fits the budgets; else
+    // gives the reason in `why`.
+    static bool fit(const Index_Meta& m, const Query_Options& opt, Placement& p, std::string& why);
 
     // Frees the lanes and the pool.
     void release_lanes();
@@ -201,15 +288,26 @@ public:
     Query_Engine(const Query_Engine&) = delete;
     Query_Engine& operator=(const Query_Engine&) = delete;
 
-    // Loads the index-directory `dir` as `opt` places it. The index must be of
-    // symbols of `T_sym_`, with both arrays accessible from the device, or both
-    // from the host. Returns `false` with a reason in `err` on failure.
+    // Loads the index-directory `dir` as `opt` places it, as `plan` completes
+    // the placement. The index must be of symbols of `T_sym_`, with both arrays
+    // accessible from the device, or both from the host. Returns `false` with a
+    // reason in `err` on failure.
     bool load(const std::string& dir, const Query_Options& opt, std::string& err);
+
+    // Plans the placement `p` of the index of metadata `m` with the options
+    // `opt`, as `load` does, without loading it: the tiers and the table that
+    // `opt` names, and the planner's picks of those it leaves automatic, within
+    // the budgets of `opt`, or the device's free memory and the host's available
+    // memory now; named tiers are not held to them. Returns `false` with a
+    // reason in `err` if no plan fits, or on failure.
+    static bool plan(const Index_Meta& m, const Query_Options& opt, Placement& p, std::string& err);
 
     // Switches the loaded engine's search mode to the `stride`, `key_words`,
     // `sort`, and `gather` settings of `Query_Options`, rebuilding the sample
-    // table; the index stays loaded. Returns `false` with a reason in `err` on
-    // failure, leaving the engine in the direct mode.
+    // table; the index stays loaded. An automatic stride is the least that fits
+    // the load's room for a table, and automatic key words as the planner picks
+    // them. Returns `false` with a reason in `err` on failure, leaving the engine
+    // in the direct mode.
     bool configure(idx_t stride, uint32_t key_words, bool sort, Gather gather, std::string& err);
 
     // Finds the SA-intervals of the queries `sym[off[i], off[i + 1])`, `i < q`,
@@ -256,8 +354,11 @@ public:
     // Returns the sample table; empty in the direct mode.
     const Sample_Table& table() const { return tab_; }
 
-    // Returns the options the engine was loaded with.
+    // Returns the options the engine was loaded with, with the tiers of its load.
     const Query_Options& options() const { return opt_; }
+
+    // Returns the placement of the load.
+    const Placement& placement() const { return placement_; }
 
     // Returns the count of streams of `find`.
     static constexpr std::size_t streams() { return STREAM_C; }

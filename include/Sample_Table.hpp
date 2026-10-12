@@ -56,6 +56,15 @@ public:
     // Frees the table.
     void release();
 
+    // Returns the bytes of the keys of the table of stride `stride`, with keys of
+    // `key_words` words, over a text of `n` symbols; `0` if `stride` is `0`.
+    static idx_t bytes_of(idx_t n, idx_t stride, uint32_t key_words);
+
+    // Returns the bytes of host memory that `build` takes for that table over the
+    // index of metadata `m` with the text in the tier `text_res` and the suffix
+    // array in `sa_res`, at most, while it builds it.
+    static idx_t build_host_bytes(const Index_Meta& m, Residency text_res, Residency sa_res, idx_t stride, uint32_t key_words);
+
     // Returns `true` iff a table is built.
     bool built() const { return keys_ != nullptr; }
 

@@ -197,6 +197,7 @@ const char* residency_name(const Residency r)
     case Residency::pinned:     return "pinned";
     case Residency::pageable:   return "pageable";
     case Residency::mapped:     return "mapped";
+    case Residency::automatic:  return "auto";
     }
 
     return "?";
@@ -209,6 +210,7 @@ bool parse_residency(const std::string& name, Residency& r)
     else if(name == "pinned")   r = Residency::pinned;
     else if(name == "pageable") r = Residency::pageable;
     else if(name == "mapped")   r = Residency::mapped;
+    else if(name == "auto")     r = Residency::automatic;
     else    return false;
 
     return true;
@@ -387,6 +389,13 @@ bool scan_sa(const Index_Meta& m, const std::size_t align, const std::function<v
     return !failed;
 }
 
+
+idx_t scan_sa_bytes(const Index_Meta& m, const std::size_t align)
+{
+    // A buffer per reader, as `scan_sa` starts them: up to `GPU_SACA_QUERY_IO_THREADS` per part.
+    return static_cast<idx_t>(io_threads()) * m.sa_part.size() * (align + round_up(SA_PAD_BYTES, IO_ALIGN));
+}
+
 }
 
 
@@ -420,6 +429,12 @@ bool Suffix_Index::load(const std::string& dir, const Residency text_res, const 
     if(!sa40::host_is_little_endian())
     {
         err = "the query index requires a little-endian host";
+        return false;
+    }
+
+    if(text_res == Residency::automatic || sa_res == Residency::automatic)
+    {
+        err = "an index loads into named tiers; the query engine's planner picks automatic ones";
         return false;
     }
 
@@ -495,6 +510,27 @@ bool Suffix_Index::load(const std::string& dir, const Residency text_res, const 
         release();
 
     return ok;
+}
+
+
+void Suffix_Index::footprint(const Index_Meta& m, const Residency text_res, const Residency sa_res, idx_t& device, idx_t& host)
+{
+    // As `place` allocates an array: in device memory, its bytes and padding in the device's pages; in host memory, its whole blocks
+    // and its padding in huge pages; mapped, nothing but the page cache. Device-bound reads stage through two pinned buffers.
+    device = host = 0;
+    const auto add = [&](const Residency r, const std::size_t bytes, const std::size_t pad)
+    {
+        if(r == Residency::device)
+            device += round_up(bytes + pad, DEVICE_PAGE_BYTES);
+        else if(r == Residency::pinned || r == Residency::pageable)
+            host += round_up(std::max(round_up(bytes, IO_ALIGN), bytes + pad), HUGE_PAGE);
+    };
+
+    const std::size_t text_bytes = m.n * m.sym_bytes;
+    add(text_res, text_bytes, TEXT_PAD_BYTES);
+    add(sa_res, m.sa_bytes(), SA_PAD_BYTES);
+    if(text_res == Residency::device || sa_res == Residency::device)
+        host += 2 * std::min(STAGE_BYTES, round_up(std::max<std::size_t>(text_bytes, m.sa_bytes()), IO_ALIGN));
 }
 
 

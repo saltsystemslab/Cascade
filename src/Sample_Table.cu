@@ -288,6 +288,28 @@ bool Sample_Table::build(const Suffix_Index& idx, const idx_t stride, const uint
 }
 
 
+idx_t Sample_Table::bytes_of(const idx_t n, const idx_t stride, const uint32_t key_words)
+{
+    return stride == 0 ? 0 : (n + stride - 1) / stride * key_words * sizeof(uint64_t);
+}
+
+
+idx_t Sample_Table::build_host_bytes(const Index_Meta& m, const Residency text_res, const Residency sa_res, const idx_t stride,
+                                     const uint32_t key_words)
+{
+    // As `build` builds it: from a mapped suffix array, all the keys on the host, and the buffers of streaming it; from a host-side
+    // index, the keys of two pieces in pinned buffers; on the device, none.
+    const idx_t J = (stride == 0 ? 0 : (m.n + stride - 1) / stride), key_bytes = key_words * sizeof(uint64_t);
+    if(J == 0)
+        return 0;
+
+    if(sa_res == Residency::mapped)
+        return J * key_bytes + index_io::scan_sa_bytes(m, SCAN_PIECE_BYTES);
+
+    return (text_res != Residency::device && sa_res != Residency::device ? 2 * std::min(J, HOST_PIECE_KEYS) * key_bytes : 0);
+}
+
+
 void Sample_Table::release()
 {
     if(keys_ != nullptr)
