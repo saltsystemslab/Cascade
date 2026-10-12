@@ -1375,6 +1375,126 @@ bool test_pipeline()
 }
 
 
+// Checks the timing of the phases of `find`, and the engine's account of its
+// memory, in placements of every path through the pipeline: the device
+// searching, gathering its brackets or not, and the host, over a suffix array
+// in memory and mapped; in the direct mode and in two phases, from pageable
+// memory and from pinned. Timed or not, the intervals must be the oracle's;
+// untimed, the phases nil. Timed, every path's own phases must take time and
+// the others none, a stream's device phases no more than the call's wall time,
+// and the calling thread's no more either.
+bool test_phase_times()
+{
+    std::mt19937_64 rng(29);
+    const std::vector<uint16_t> alpha = {1, 2, 3, 4, 0xFFFE};
+    const auto T = random_text<uint16_t>(20000, alpha, 0xFFFF, 200, rng);
+    const idx_t n = T.size();
+    const auto SA = test::build_sa40(T);
+    const auto dir = scratch_dir("phases");
+    std::string err;
+    CHECK(write_index(dir, T, SA, parts_for(n, 2), err), "%s", err.c_str());
+
+    std::vector<uint64_t> off;
+    std::vector<uint16_t> sym;
+    fixture_queries(T, alpha, rng, 20000, off, sym);
+    const idx_t q = off.size() - 1;
+    std::vector<SA_Interval> want(q);
+    for(idx_t i = 0; i < q; ++i)
+        want[i] = ref::find_one(T.data(), n, SA.data(), sym.data() + off[i], off[i + 1] - off[i]);
+
+    Pinned_Batch<uint16_t> pb(off, sym);
+    constexpr double SLACK = 1e-4; // Seconds: the resolution of the device's timer, and the clocks' drift.
+    struct Placement { Residency text_res, sa_res; };
+    for(const Placement pl : {Placement{Residency::device, Residency::device}, Placement{Residency::device, Residency::pinned},
+                              Placement{Residency::pageable, Residency::pageable}, Placement{Residency::pageable, Residency::mapped}})
+        for(const bool timed : {false, true})
+        {
+            const std::string where = std::string("text ") + residency_name(pl.text_res) + ", suffix array " + residency_name(pl.sa_res)
+                                      + (timed ? ", timed" : ", untimed");
+            Query_Options opt;
+            opt.text_res = pl.text_res;
+            opt.sa_res = pl.sa_res;
+            opt.chunk_queries = 3000;
+            opt.chunk_symbols = 50000;
+            opt.min_chunk_queries = 1000;
+            opt.min_chunk_symbols = 5000;
+            opt.host_threads = 4;
+            opt.phase_times = timed;
+            Query_Engine<uint16_t> eng;
+            CHECK(eng.load(dir.string(), opt, err), "%s: %s", where.c_str(), err.c_str());
+            const bool host = eng.host_searches(), mapped = (pl.sa_res == Residency::mapped);
+
+            // The arrays in their tiers, the table, and the lanes.
+            const auto& idx = eng.index();
+            const Engine_Memory mem = eng.memory();
+            const auto in = [](const Residency r, const Residency tier, const std::size_t b) { return r == tier ? b : std::size_t(0); };
+            CHECK(idx.text_alloc_bytes() >= n * sizeof(uint16_t) && idx.sa_alloc_bytes() >= SA_WIDTH * n
+                  && mem.text_device == in(pl.text_res, Residency::device, idx.text_alloc_bytes())
+                  && mem.sa_device == in(pl.sa_res, Residency::device, idx.sa_alloc_bytes())
+                  && mem.text_pinned == in(pl.text_res, Residency::pinned, idx.text_alloc_bytes())
+                  && mem.sa_pinned == in(pl.sa_res, Residency::pinned, idx.sa_alloc_bytes()), "%s: the arrays' memory is misreported", where.c_str());
+            CHECK(mem.table_device == eng.table().bytes() && mem.table_device > 0 && mem.lanes_device > 0 && mem.lanes_pinned > 0
+                  && mem.pool_used_high == 0 && mem.device() == mem.text_device + mem.sa_device + mem.table_device + mem.lanes_device
+                  && mem.pinned() == mem.text_pinned + mem.sa_pinned + mem.lanes_pinned, "%s: the engine's memory is misreported", where.c_str());
+
+            for(const idx_t stride : {idx_t(0), idx_t(16)})
+            {
+                CHECK(eng.configure(stride, 2, false, Gather::automatic, err), "%s: %s", where.c_str(), err.c_str());
+                const bool direct_host = (host && stride == 0);
+                for(const bool pinned : {false, true})
+                {
+                    const std::string what = where + ", stride " + std::to_string(stride) + (pinned ? ", pinned" : ", pageable");
+                    std::vector<SA_Interval> got(q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
+                    std::fill(pb.out, pb.out + q, SA_Interval{~uint64_t(0), ~uint64_t(0)});
+                    SA_Interval* const out = (pinned ? pb.out : got.data());
+                    eng.find(pinned ? pb.off : off.data(), pinned ? pb.sym : sym.data(), q, out);
+                    for(idx_t i = 0; i < q; ++i)
+                        CHECK(same(out[i], want[i]), "%s: query %" PRIu64 " differs from the oracle", what.c_str(), i);
+
+                    const Phase_Times ph = eng.phases();
+                    const auto t = [&](const Phase p) { return ph[p]; };
+                    if(!timed)
+                    {
+                        CHECK(ph.wall == 0 && ph.chunks == 0 && std::all_of(ph.t.begin(), ph.t.end(), [](const double x) { return x == 0; }),
+                              "%s: untimed phases must be nil", what.c_str());
+                        continue;
+                    }
+
+                    CHECK(ph.wall > 0 && std::all_of(ph.t.begin(), ph.t.end(), [](const double x) { return x >= 0; }),
+                          "%s: a phase's time is negative, or the wall time nil", what.c_str());
+                    CHECK(direct_host ? ph.chunks == 0 : ph.chunks >= 2, "%s: %" PRIu64 " chunks", what.c_str(), ph.chunks);
+                    CHECK(direct_host || (t(Phase::h2d) > 0 && t(Phase::d2h) > 0), "%s: the copies took no time", what.c_str());
+                    CHECK((t(Phase::rank) > 0) == (stride > 0), "%s: ranking took %.9f s", what.c_str(), t(Phase::rank));
+                    CHECK((t(Phase::search) > 0) == !host && (t(Phase::host_search) > 0) == host, "%s: the device's search took %.9f s, the host's"
+                          " %.9f s", what.c_str(), t(Phase::search), t(Phase::host_search));
+                    CHECK((t(Phase::prefetch) > 0) == (mapped && stride > 0), "%s: asking for pages took %.9f s", what.c_str(), t(Phase::prefetch));
+                    CHECK((t(Phase::stage) > 0) == (!pinned && !direct_host), "%s: staging took %.9f s", what.c_str(), t(Phase::stage));
+
+                    // A stream's device phases run one after another within the call, as do the calling thread's host phases. Staged, the
+                    // device's search runs a dispatching thread per stream, each its chunks' staging and waits.
+                    const double dev = t(Phase::h2d) + t(Phase::rank) + t(Phase::search) + t(Phase::d2h);
+                    const double own = t(Phase::prefetch) + t(Phase::host_search) + t(Phase::wait) + t(Phase::stage);
+                    const double threads = (!host && !pinned ? double(Query_Engine<uint16_t>::streams()) : 1.0);
+                    CHECK(dev <= Query_Engine<uint16_t>::streams() * ph.wall + SLACK && own <= threads * ph.wall + SLACK, "%s: the device's phases"
+                          " took %.6f s, the host's %.6f s, in %.6f s", what.c_str(), dev, own, ph.wall);
+                }
+
+                // From device memory: the device's search takes the pool's scratch, and the host's search is timed as a call.
+                const auto dev = device_find(eng, off, sym);
+                for(idx_t i = 0; i < q; ++i)
+                    CHECK(same(dev[i], want[i]), "%s, stride %" PRIu64 ", from device memory: query %" PRIu64 " differs from the oracle",
+                          where.c_str(), stride, i);
+                CHECK(host || stride == 0 || eng.memory().pool_used_high > 0, "%s: the pool's scratch is unaccounted for", where.c_str());
+                if(timed && host)
+                    CHECK(eng.phases().wall > 0 && eng.phases()[Phase::host_search] > 0, "%s: the host's search from device memory is untimed",
+                          where.c_str());
+            }
+        }
+
+    return true;
+}
+
+
 bool test_sample_table()
 {
     std::mt19937_64 rng(11);
@@ -1855,6 +1975,7 @@ int main(const int argc, char** const argv)
         {"sample table",            test_sample_table,          true},
         {"device find vs oracle",   test_gpu_find,              true},
         {"pipeline",                test_pipeline,              true},
+        {"phase times and memory",  test_phase_times,           true},
         {"device load rejects",     test_gpu_rejects,           true},
         {"automatic placement",     test_gpu_auto,              true},
     };

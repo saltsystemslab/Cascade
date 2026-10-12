@@ -182,6 +182,13 @@ public:
     Residency sa_residency() const { return sa_.res; }
     const Index_Load_Stats& stats() const { return stats_; }
 
+    // Returns the bytes allocated for the padded text, in its tier.
+    std::size_t text_alloc_bytes() const { return text_.alloc_bytes; }
+
+    // Returns the bytes allocated for the padded suffix array, in its tier; of
+    // host addresses, if mapped.
+    std::size_t sa_alloc_bytes() const { return sa_.alloc_bytes; }
+
     // Returns `true` iff both arrays are accessible from the device.
     bool device_accessible() const { return text_.dev != nullptr && sa_.dev != nullptr; }
 

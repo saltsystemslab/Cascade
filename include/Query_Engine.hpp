@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -94,6 +95,7 @@ struct Query_Options
     bool host_prefetch = true;  // Whether the host asks the kernel ahead for the pages of a mapped suffix array that a chunk's brackets probe first.
     idx_t device_budget = 0;    // Bytes of device memory the planner places in; `0` takes the device's free memory at load.
     idx_t host_budget = 0;  // Bytes of host memory it places in; `0` takes the host's available memory at load.
+    bool phase_times = false;   // Whether `find` times its phases, as `Query_Engine::phases` reports them.
 };
 
 
@@ -134,6 +136,105 @@ struct Placement
 };
 
 
+// Phases of a `find` call, as `Query_Engine::phases` times them.
+enum class Phase
+{
+    stage,  // Host: copying the batch's pageable arrays into the lanes' pinned staging, and the intervals out of it.
+    h2d,    // Device: copying the chunks' queries to the device.
+    rank,   // Device: packing the chunks' queries, sorting them if sorting, and ranking them in the sample table.
+    search, // Device: the exact search of the chunks' queries, with their brackets' gathers and their runs' heads if any.
+    d2h,    // Device: copying the chunks' intervals to the host, or their brackets if the host searches.
+    prefetch,   // Host: asking the kernel ahead for the pages of a mapped suffix array that the chunks' brackets probe.
+    host_search,    // Host: the exact search of the chunks' queries, if the host searches.
+    wait,   // Host: waiting on the device.
+};
+
+constexpr std::size_t PHASE_C = 8;  // Count of `Phase`s.
+
+// Returns the name of the phase `p`.
+const char* phase_name(Phase p);
+
+
+// Times of the phases of a `find` call, in seconds: each phase's busy time,
+// summed over the call's chunks, and over the threads that run them. The
+// phases of chunks on different streams overlap, so the sum of the phases may
+// exceed the call's wall time. A device phase runs from the stream's reaching
+// its first operation to the end of its last, waiting on other streams' work
+// meanwhile, if any.
+struct Phase_Times
+{
+    std::array<double, PHASE_C> t{};    // Per `Phase`.
+    double wall = 0;    // The call's wall time.
+    idx_t chunks = 0;   // The chunks the call took, `0` in the direct mode on the host.
+
+    double operator[](const Phase p) const { return t[static_cast<std::size_t>(p)]; }
+};
+
+
+// The timing of the phases of the chunks that a stream of `find` takes in a
+// call: events recorded on the stream, between which the device's phases ran,
+// read once the call's work is done; and the host's seconds in the chunks'
+// phases. The events are kept across calls.
+class Phase_Clock
+{
+private:
+
+    static constexpr int8_t NO_PHASE = -1;
+
+    std::vector<cudaEvent_t> ev_;   // The events; the first `ev_c_` recorded in the call, on the stream.
+    std::vector<int8_t> end_;   // Per event, the phase that ran up to it from the event before; `NO_PHASE` if none.
+    std::size_t ev_c_ = 0;
+    std::array<double, PHASE_C> host_{};    // The host's seconds per phase.
+
+    // Records the next event on the stream `s`, as the end of the phase `p`.
+    void record(int8_t p, cudaStream_t s);
+
+
+public:
+
+    // Records on the stream `s` the start of a device phase.
+    void start(const cudaStream_t s) { record(NO_PHASE, s); }
+
+    // Records on the stream `s` the end of the device phase `p`, which ran
+    // from the event recorded last; and so the start of the next.
+    void lap(const Phase p, const cudaStream_t s) { record(static_cast<int8_t>(p), s); }
+
+    // Adds `sec` seconds of the host to the phase `p`.
+    void add(const Phase p, const double sec) { host_[static_cast<std::size_t>(p)] += sec; }
+
+    // Adds the seconds of the call's phases to `t`; the work of the call's
+    // events must be done.
+    void read(std::array<double, PHASE_C>& t) const;
+
+    // Clears the call's events and seconds, for a new call.
+    void clear();
+
+    // Destroys the events.
+    void release();
+};
+
+
+// Memory of a loaded engine, in bytes.
+struct Engine_Memory
+{
+    std::size_t text_device = 0;    // Of the text, in device memory.
+    std::size_t sa_device = 0;  // Of the suffix array, in device memory.
+    std::size_t table_device = 0;   // Of the sample table.
+    std::size_t lanes_device = 0;   // Of the lanes' buffers.
+    std::size_t pool_used_high = 0; // The highest of the memory pool's scratch in use at once, since the load.
+    std::size_t pool_reserved_high = 0; // The most device memory that the pool held at once, since the load.
+    std::size_t text_pinned = 0;    // Of the text, in pinned host memory.
+    std::size_t sa_pinned = 0;  // Of the suffix array, in pinned host memory.
+    std::size_t lanes_pinned = 0;   // Of the lanes' pinned staging.
+
+    // Returns the engine's device memory, its pool's at the high-water mark of its use.
+    std::size_t device() const { return text_device + sa_device + table_device + lanes_device + pool_used_high; }
+
+    // Returns the engine's pinned host memory.
+    std::size_t pinned() const { return text_pinned + sa_pinned + lanes_pinned; }
+};
+
+
 // Device buffers of a two-phase search of up to `cap` queries.
 struct Search_Buffers
 {
@@ -146,6 +247,7 @@ struct Search_Buffers
     uint32_t* heads = nullptr;  // Per position of the sorted queries, the first of its run of identical queries.
     void* scan_space = nullptr; // Scratch of finding the runs' first positions.
     std::size_t scan_bytes = 0;
+    std::size_t bytes = 0;  // Bytes of the buffers.
 };
 
 
@@ -168,6 +270,26 @@ private:
         Rank_Range* br_h = nullptr; // Pinned: the chunk's brackets, if the host searches.
         uint32_t* ids_h = nullptr;  // Pinned: the batch position of each of its sorted places.
         Search_Buffers space;   // Of the chunk's two-phase search, in any mode.
+        mutable Phase_Clock clock;  // Of its chunks' phases in a `find` call, if the options time them.
+    };
+
+    // Times the phases of a `find` call, if the engine's options say so, over
+    // its life: clears the lanes' clocks when made, and sets the call's wall
+    // time when destroyed.
+    class Call_Timer
+    {
+    private:
+
+        const Query_Engine& eng_;
+        const std::chrono::steady_clock::time_point t0_;
+
+
+    public:
+
+        explicit Call_Timer(const Query_Engine& eng);
+        ~Call_Timer();
+        Call_Timer(const Call_Timer&) = delete;
+        Call_Timer& operator=(const Call_Timer&) = delete;
     };
 
     // Which arrays of a host-side batch are in pinned memory, and so need no staging.
@@ -195,7 +317,14 @@ private:
     idx_t asked_pages_ = 0; // Pages of the marks.
     idx_t asked_cap_ = 0;   // Most pages marked before the marks are cleared: about the room of the page cache, which may evict them.
     mutable idx_t asked_c_ = 0; // Pages marked since the marks were last cleared.
+    std::size_t lanes_device_bytes_ = 0;    // Device memory of the lanes' buffers.
+    std::size_t lanes_pinned_bytes_ = 0;    // Pinned host memory of the lanes' staging.
+    mutable Phase_Times timed_; // The wall time and the chunks of the last `find` call, if timing its phases; its phases are on the lanes' clocks.
 
+
+    // Returns the clock of the lane `l`'s phases if the options time them; else
+    // null.
+    Phase_Clock* clock_of(const Lane& l) const { return opt_.phase_times ? &l.clock : nullptr; }
 
     // Allocates the lanes for chunks of the options' sizes, and the pool.
     // Returns `false` with a reason in `err` on failure.
@@ -240,9 +369,10 @@ private:
     // Searches the device-side queries `sym[off[i] - off0, off[i + 1] - off0)`,
     // `i < q`, into `out[0, q)`, with the two-phase search's buffers `space` of
     // room for `q` queries, and the gathered brackets in scratch from the pool;
-    // asynchronously on the stream `s`.
+    // asynchronously on the stream `s`. Times the ranking and the exact search
+    // on the clock `clock` of the stream, unless null.
     void search(const uint64_t* off, const T_sym_* sym, uint64_t off0, idx_t q, SA_Interval* out, const Search_Buffers& space,
-                cudaStream_t s) const;
+                cudaStream_t s, Phase_Clock* clock = nullptr) const;
 
     // Returns the chunks `[a, b)` that the host-side batch of the `q` queries of
     // the offsets `off` streams through the device in, as `find` splits it.
@@ -327,8 +457,20 @@ public:
     // thread; one with an array in pageable memory goes through pinned staging,
     // from a thread per stream. If the host searches, it searches every chunk's
     // brackets from the calling thread, with its own threads; the direct mode
-    // takes no chunks. Concurrent calls run one after another.
+    // takes no chunks. Concurrent calls run one after another. If the options
+    // time phases, the call times its own, for `phases`.
     void find(const uint64_t* off, const T_sym_* sym, idx_t q, SA_Interval* out) const;
+
+    // Returns the times of the phases of the last `find` call with queries, or
+    // of `find_async` if the host searches, if the options time phases; zeros
+    // if not. Reads the device's from the events of the call, done by then.
+    // Waits for a running `find`.
+    Phase_Times phases() const;
+
+    // Returns the memory of the loaded engine: its arrays', its table's, its
+    // lanes', and its memory pool's, since the load. Not concurrently with
+    // `load` or `configure`.
+    Engine_Memory memory() const;
 
     // Checks the intervals `I[0, q)` of the queries `sym[off[i], off[i + 1])`
     // with the certificate of `ref::certify`: adds the count of failing queries

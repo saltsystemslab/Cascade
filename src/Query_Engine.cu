@@ -44,6 +44,41 @@ constexpr idx_t SCAN_SCRATCH_PER_KEY = 1;   // Bytes of a scan's scratch per ite
 constexpr idx_t SCRATCH_BASE_BYTES = idx_t(1) << 20;    // Bytes of either's scratch beyond, at most.
 
 
+// Records on the stream `s` the start of a device phase on the clock `c`,
+// unless null.
+inline void phase_start(Phase_Clock* const c, const cudaStream_t s)
+{
+    if(c != nullptr)
+        c->start(s);
+}
+
+
+// Records on the stream `s` the end of the device phase `p` on the clock `c`,
+// unless null.
+inline void phase_lap(Phase_Clock* const c, const Phase p, const cudaStream_t s)
+{
+    if(c != nullptr)
+        c->lap(p, s);
+}
+
+
+// Returns the time now if the clock `c` is not null: the start of a host's
+// phase on it.
+inline std::chrono::steady_clock::time_point host_start(const Phase_Clock* const c)
+{
+    return c != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+}
+
+
+// Adds the host's seconds since `t0` to the phase `p` of the clock `c`, unless
+// null.
+inline void host_end(Phase_Clock* const c, const Phase p, const std::chrono::steady_clock::time_point t0)
+{
+    if(c != nullptr)
+        c->add(p, std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+}
+
+
 // Gathered suffix-array bytes of a bracket: the bytes `[b0, b1)` of the suffix
 // array, at byte `dst` of its tile's windows; `dst` is `NO_SLOT` for a bracket
 // searched in place.
@@ -449,6 +484,7 @@ cudaError_t allocate(Search_Buffers& sb, const idx_t cap, const uint32_t w, cons
             e = (pool != nullptr ? cudaMallocFromPoolAsync(&v, std::max<std::size_t>(bytes, 1), pool, s)
                                  : cudaMalloc(&v, std::max<std::size_t>(bytes, 1)));
         p = static_cast<std::remove_reference_t<decltype(p)>>(v);
+        sb.bytes += std::max<std::size_t>(bytes, 1);
     };
 
     alloc(sb.keys[0], cap * w * sizeof(uint64_t));
@@ -546,13 +582,15 @@ Ranked<W_> rank(const Sample_Table& tab, const idx_t n, const bool sort, const u
 // packed prefixes first if `sort`. If `win` is not null, the brackets of every
 // `tile` positions of the batch are gathered into it, in slots of `wb` bytes,
 // and searched there; sorted, a run of identical queries gathers once in a
-// tile. Asynchronous on the stream `s`.
+// tile. Asynchronous on the stream `s`; the ranking and the exact search timed
+// on the stream's clock `clock`, unless null.
 template <typename T_sym_, idx_t W_>
 void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool sort, const uint64_t* const off, const T_sym_* const sym,
                     const uint64_t off0, const idx_t q, SA_Interval* const out, const Search_Buffers& sb, uint8_t* const win,
-                    const idx_t tile, const idx_t wb, const cudaStream_t s)
+                    const idx_t tile, const idx_t wb, const cudaStream_t s, Phase_Clock* const clock)
 {
     const auto r = rank<T_sym_, W_>(tab, idx.n(), sort, off, sym, off0, q, sb, s);
+    phase_lap(clock, Phase::rank, s);
     const uint32_t* const id = r.ids;
     const auto* const br = static_cast<const Rank_Range*>(sb.brackets);
 
@@ -588,6 +626,8 @@ void find_two_phase(const Suffix_Index& idx, const Sample_Table& tab, const bool
                                                                                           off0, id, br, heads, g0, tq, win, wb, out);
         CUDA_CHECK(cudaGetLastError());
     }
+
+    phase_lap(clock, Phase::search, s);
 }
 
 
@@ -723,6 +763,62 @@ idx_t Query_Engine<T_sym_>::fit_stride(const idx_t n, const uint32_t w, const bo
 }
 
 
+const char* phase_name(const Phase p)
+{
+    static const char* const name[PHASE_C] = {"stage", "h2d", "rank", "search", "d2h", "prefetch", "host_search", "wait"};
+    return name[static_cast<std::size_t>(p)];
+}
+
+
+void Phase_Clock::record(const int8_t p, const cudaStream_t s)
+{
+    if(ev_c_ == ev_.size())
+    {
+        cudaEvent_t e;
+        CUDA_CHECK(cudaEventCreate(&e));
+        ev_.push_back(e);
+        end_.push_back(NO_PHASE);
+    }
+
+    CUDA_CHECK(cudaEventRecord(ev_[ev_c_], s));
+    end_[ev_c_++] = p;
+}
+
+
+void Phase_Clock::read(std::array<double, PHASE_C>& t) const
+{
+    for(std::size_t p = 0; p < PHASE_C; ++p)
+        t[p] += host_[p];
+
+    for(std::size_t k = 1; k < ev_c_; ++k)  // The first event starts a phase.
+        if(end_[k] != NO_PHASE)
+        {
+            float ms = 0;
+            CUDA_CHECK(cudaEventElapsedTime(&ms, ev_[k - 1], ev_[k]));
+            t[static_cast<std::size_t>(end_[k])] += ms / 1e3;
+        }
+}
+
+
+void Phase_Clock::clear()
+{
+    ev_c_ = 0;
+    host_.fill(0);
+}
+
+
+void Phase_Clock::release()
+{
+    // Errors are not checked: a failed release leaves nothing to recover.
+    for(const cudaEvent_t e : ev_)
+        cudaEventDestroy(e);
+
+    ev_.clear();
+    end_.clear();
+    clear();
+}
+
+
 template <typename T_sym_>
 bool Query_Engine<T_sym_>::fit(const Index_Meta& m, const Query_Options& opt, Placement& p, std::string& why)
 {
@@ -782,6 +878,21 @@ bool Query_Engine<T_sym_>::fit(const Index_Meta& m, const Query_Options& opt, Pl
     }
 
     return true;
+}
+
+
+template <typename T_sym_>
+Query_Engine<T_sym_>::Call_Timer::Call_Timer(const Query_Engine& eng):
+      eng_(eng)
+    , t0_(eng.opt_.phase_times ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point())
+{
+    if(!eng_.opt_.phase_times)
+        return;
+
+    for(const auto& l : eng_.lane_)
+        l.clock.clear();
+
+    eng_.timed_ = Phase_Times();
 }
 
 
@@ -889,6 +1000,14 @@ bool Query_Engine<T_sym_>::plan(const Index_Meta& m, const Query_Options& opt, P
         p.sa_fs += (p.sa_fs.empty() ? "" : "+") + f;
 
     return true;
+}
+
+
+template <typename T_sym_>
+Query_Engine<T_sym_>::Call_Timer::~Call_Timer()
+{
+    if(eng_.opt_.phase_times)
+        eng_.timed_.wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0_).count();
 }
 
 
@@ -1026,20 +1145,35 @@ bool Query_Engine<T_sym_>::allocate_lanes(std::string& err)
     if(e == cudaSuccess)    e = cudaMemPoolCreate(&pool_, &props);
     if(e == cudaSuccess)    e = cudaMemPoolSetAttribute(pool_, cudaMemPoolAttrReleaseThreshold, &keep);
 
+    // The lanes' buffers, their bytes counted.
+    lanes_device_bytes_ = lanes_pinned_bytes_ = 0;
+    const auto on_device = [&](auto*& p, const std::size_t bytes)
+    {
+        if(e == cudaSuccess)    e = cudaMalloc(&p, bytes);
+        lanes_device_bytes_ += bytes;
+    };
+    const auto pinned = [&](auto*& p, const std::size_t bytes)
+    {
+        if(e == cudaSuccess)    e = cudaHostAlloc(&p, bytes, cudaHostAllocDefault);
+        lanes_pinned_bytes_ += bytes;
+    };
+
     for(auto& l : lane_)
     {
         if(e == cudaSuccess)    e = cudaStreamCreateWithFlags(&l.stream, cudaStreamNonBlocking);
-        if(e == cudaSuccess)    e = cudaMalloc(&l.off_d, (cq + 1) * sizeof(uint64_t));
-        if(e == cudaSuccess)    e = cudaMalloc(&l.sym_d, cs * sizeof(T_sym_));
-        if(e == cudaSuccess)    e = cudaMalloc(&l.out_d, cq * sizeof(SA_Interval));
-        if(e == cudaSuccess)    e = cudaHostAlloc(&l.off_h, (cq + 1) * sizeof(uint64_t), cudaHostAllocDefault);
-        if(e == cudaSuccess)    e = cudaHostAlloc(&l.sym_h, cs * sizeof(T_sym_), cudaHostAllocDefault);
-        if(e == cudaSuccess)    e = cudaHostAlloc(&l.out_h, cq * sizeof(SA_Interval), cudaHostAllocDefault);
+        on_device(l.off_d, (cq + 1) * sizeof(uint64_t));
+        on_device(l.sym_d, cs * sizeof(T_sym_));
+        on_device(l.out_d, cq * sizeof(SA_Interval));
+        pinned(l.off_h, (cq + 1) * sizeof(uint64_t));
+        pinned(l.sym_h, cs * sizeof(T_sym_));
+        pinned(l.out_h, cq * sizeof(SA_Interval));
         if(e == cudaSuccess)    e = allocate(l.space, cq, 4, true, nullptr, nullptr);  // For any mode: keys of up to 4 words, sorted.
-        if(e == cudaSuccess && host_searches())
-            e = cudaHostAlloc(&l.br_h, 2 * cq * sizeof(Rank_Range), cudaHostAllocDefault);
-        if(e == cudaSuccess && host_searches())
-            e = cudaHostAlloc(&l.ids_h, cq * sizeof(uint32_t), cudaHostAllocDefault);
+        lanes_device_bytes_ += l.space.bytes;
+        if(host_searches())
+        {
+            pinned(l.br_h, 2 * cq * sizeof(Rank_Range));
+            pinned(l.ids_h, cq * sizeof(uint32_t));
+        }
     }
 
     if(e != cudaSuccess)
@@ -1071,11 +1205,14 @@ void Query_Engine<T_sym_>::release_lanes()
         cudaFreeHost(l.out_h);
         cudaFreeHost(l.br_h);
         cudaFreeHost(l.ids_h);
+        l.clock.release();
         if(l.stream != nullptr)
             cudaStreamDestroy(l.stream);
 
         l = Lane();
     }
+
+    lanes_device_bytes_ = lanes_pinned_bytes_ = 0;
 
     if(pool_ != nullptr)
     {
@@ -1139,7 +1276,7 @@ bool Query_Engine<T_sym_>::drop_cached_sa(std::string& err) const
 
 template <typename T_sym_>
 void Query_Engine<T_sym_>::search(const uint64_t* const off, const T_sym_* const sym, const uint64_t off0, const idx_t q,
-                                  SA_Interval* const out, const Search_Buffers& space, const cudaStream_t s) const
+                                  SA_Interval* const out, const Search_Buffers& space, const cudaStream_t s, Phase_Clock* const clock) const
 {
     if(q == 0)
         return;
@@ -1149,6 +1286,7 @@ void Query_Engine<T_sym_>::search(const uint64_t* const off, const T_sym_* const
         const auto grid = static_cast<unsigned>((2 * q + BLOCK - 1) / BLOCK);
         search_kernel<<<grid, BLOCK, 0, s>>>(idx_.text<T_sym_>(), idx_.n(), idx_.sa(), off, sym, off0, nullptr, nullptr, nullptr, 0, q, nullptr, 0, out);
         CUDA_CHECK(cudaGetLastError());
+        phase_lap(clock, Phase::search, s);
         return;
     }
 
@@ -1159,9 +1297,9 @@ void Query_Engine<T_sym_>::search(const uint64_t* const off, const T_sym_* const
 
     switch(tab_.key_words())
     {
-    case 1: find_two_phase<T_sym_, 1>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s); break;
-    case 2: find_two_phase<T_sym_, 2>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s); break;
-    default:    find_two_phase<T_sym_, 4>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s);
+    case 1: find_two_phase<T_sym_, 1>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s, clock); break;
+    case 2: find_two_phase<T_sym_, 2>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s, clock); break;
+    default:    find_two_phase<T_sym_, 4>(idx_, tab_, opt_.sort, off, sym, off0, q, out, space, win, tile, window_bytes_, s, clock);
     }
 
     if(win != nullptr)
@@ -1184,6 +1322,7 @@ void Query_Engine<T_sym_>::find_async(const uint64_t* const off, const T_sym_* c
         std::vector<SA_Interval> out_h(q);
         {
             std::lock_guard<std::mutex> guard(find_lock_);
+            const Call_Timer timer(*this);
             find_host(off_h.data(), sym_h.data(), q, out_h.data());
         }
 
@@ -1216,6 +1355,7 @@ void Query_Engine<T_sym_>::find(const uint64_t* const off, const T_sym_* const s
         return;
 
     std::lock_guard<std::mutex> guard(find_lock_);
+    const Call_Timer timer(*this);
     if(host_searches())
     {
         find_host(off, sym, q, out);
@@ -1223,6 +1363,9 @@ void Query_Engine<T_sym_>::find(const uint64_t* const off, const T_sym_* const s
     }
 
     const auto chunk = split(off, q);
+    if(opt_.phase_times)
+        timed_.chunks = chunk.size();
+
     const Pinned_Arrays pinned{is_pinned(off), is_pinned(sym), is_pinned(out)};
     if(pinned.off && pinned.sym && pinned.out)
     {
@@ -1232,7 +1375,11 @@ void Query_Engine<T_sym_>::find(const uint64_t* const off, const T_sym_* const s
             find_chunk(lane_[c % STREAM_C], off, sym, chunk[c].first, chunk[c].second, out, pinned);
 
         for(std::size_t l = 0; l < std::min(STREAM_C, chunk.size()); ++l)
+        {
+            const auto t0 = host_start(clock_of(lane_[l]));
             CUDA_CHECK(cudaStreamSynchronize(lane_[l].stream));
+            host_end(clock_of(lane_[l]), Phase::wait, t0);
+        }
 
         return;
     }
@@ -1290,12 +1437,15 @@ T_sym_* Query_Engine<T_sym_>::upload(const Lane& l, const uint64_t* const off, c
     const idx_t q = b - a;
     const uint64_t off0 = off[a], sym_c = off[b] - off[a];
     const cudaStream_t s = l.stream;
+    Phase_Clock* const clock = clock_of(l);
     const auto stage = [&](void* const dst, const void* const src, const std::size_t bytes)
     {
+        const auto t0 = host_start(clock);
         if(parallel)
             host_search::copy(dst, src, bytes, opt_.host_threads);
         else
             std::memcpy(dst, src, bytes);
+        host_end(clock, Phase::stage, t0);
     };
 
     const uint64_t* off_src = off + a;
@@ -1305,6 +1455,7 @@ T_sym_* Query_Engine<T_sym_>::upload(const Lane& l, const uint64_t* const off, c
         off_src = l.off_h;
     }
 
+    phase_start(clock, s);
     CUDA_CHECK(cudaMemcpyAsync(l.off_d, off_src, (q + 1) * sizeof(uint64_t), cudaMemcpyHostToDevice, s));
 
     // A query longer than a chunk has buffers of its own, filled straight from the batch.
@@ -1318,13 +1469,16 @@ T_sym_* Query_Engine<T_sym_>::upload(const Lane& l, const uint64_t* const off, c
         const T_sym_* sym_src = sym + off0;
         if(!pinned.sym && !alone)
         {
+            phase_lap(clock, Phase::h2d, s);   // The device's copying pauses for the host's staging.
             stage(l.sym_h, sym + off0, sym_c * sizeof(T_sym_));
+            phase_start(clock, s);
             sym_src = l.sym_h;
         }
 
         CUDA_CHECK(cudaMemcpyAsync(sym_d, sym_src, sym_c * sizeof(T_sym_), cudaMemcpyHostToDevice, s));
     }
 
+    phase_lap(clock, Phase::h2d, s);
     return sym_d;
 }
 
@@ -1335,18 +1489,26 @@ void Query_Engine<T_sym_>::find_chunk(const Lane& l, const uint64_t* const off, 
 {
     const idx_t q = b - a;
     const cudaStream_t s = l.stream;
+    Phase_Clock* const clock = clock_of(l);
     T_sym_* const sym_d = upload(l, off, sym, a, b, pinned, false);
-    search(l.off_d, sym_d, off[a], q, l.out_d, l.space, s);
+    search(l.off_d, sym_d, off[a], q, l.out_d, l.space, s, clock);
     CUDA_CHECK(cudaMemcpyAsync(pinned.out ? out + a : l.out_h, l.out_d, q * sizeof(SA_Interval), cudaMemcpyDeviceToHost, s));
+    phase_lap(clock, Phase::d2h, s);
     if(sym_d != l.sym_d)
         CUDA_CHECK(cudaFreeAsync(sym_d, s));
 
     // Staging reuses the lane's buffers, and staged intervals must reach `out`: the chunk must be done. Else, the stream orders it.
     if(!pinned.off || !pinned.sym || !pinned.out)
     {
+        auto t0 = host_start(clock);
         CUDA_CHECK(cudaStreamSynchronize(s));
+        host_end(clock, Phase::wait, t0);
         if(!pinned.out)
+        {
+            t0 = host_start(clock);
             std::memcpy(out + a, l.out_h, q * sizeof(SA_Interval));
+            host_end(clock, Phase::stage, t0);
+        }
     }
 }
 
@@ -1366,9 +1528,12 @@ void Query_Engine<T_sym_>::rank_chunk(const Lane& l, const uint64_t* const off, 
     default:    ids = rank<T_sym_, 4>(tab_, idx_.n(), opt_.sort, l.off_d, sym_d, off[a], q, l.space, s).ids;
     }
 
+    Phase_Clock* const clock = clock_of(l);
+    phase_lap(clock, Phase::rank, s);
     CUDA_CHECK(cudaMemcpyAsync(l.br_h, l.space.brackets, 2 * q * sizeof(Rank_Range), cudaMemcpyDeviceToHost, s));
     if(ids != nullptr)
         CUDA_CHECK(cudaMemcpyAsync(l.ids_h, ids, q * sizeof(uint32_t), cudaMemcpyDeviceToHost, s));
+    phase_lap(clock, Phase::d2h, s);
     if(sym_d != l.sym_d)
         CUDA_CHECK(cudaFreeAsync(sym_d, s));
 }
@@ -1381,13 +1546,18 @@ void Query_Engine<T_sym_>::find_host(const uint64_t* const off, const T_sym_* co
     const uint8_t* const SA = idx_.host_sa();
     if(!tab_.built())   // The direct mode: nothing for the device to rank.
     {
+        const auto t0 = host_start(clock_of(lane_[0]));
         host_search::find(T, idx_.n(), SA, off, sym, q, nullptr, nullptr, out, opt_.host_threads, opt_.host_lanes);
+        host_end(clock_of(lane_[0]), Phase::host_search, t0);
         return;
     }
 
     // The device ranks the chunks ahead over the lanes, while the host searches them in turn; a lane takes its next chunk once the host
     // is done with the brackets of its last. The host writes the intervals itself.
     const auto chunk = split(off, q);
+    if(opt_.phase_times)
+        timed_.chunks = chunk.size();
+
     const Pinned_Arrays pinned{is_pinned(off), is_pinned(sym), true};
     for(std::size_t c = 0; c < std::min(STREAM_C, chunk.size()); ++c)
         rank_chunk(lane_[c], off, sym, chunk[c].first, chunk[c].second, pinned);
@@ -1398,11 +1568,16 @@ void Query_Engine<T_sym_>::find_host(const uint64_t* const off, const T_sym_* co
     const auto prefetch = [&](const std::size_t c)
     {
         const Lane& l = lane_[c % STREAM_C];
+        Phase_Clock* const clock = clock_of(l);
+        auto t0 = host_start(clock);
         CUDA_CHECK(cudaStreamSynchronize(l.stream));
+        host_end(clock, Phase::wait, t0);
+        t0 = host_start(clock);
         idx_t refused = 0;
         asked_c_ += host_search::prefetch(sa_files_, idx_.n(), l.br_h, chunk[c].second - chunk[c].first, asked_.get(), refused);
         if(asked_c_ > asked_cap_)   // The page cache may have evicted the pages marked first: they are asked for anew.
             forget_asked();
+        host_end(clock, Phase::prefetch, t0);
     };
 
     if(ahead)
@@ -1415,12 +1590,55 @@ void Query_Engine<T_sym_>::find_host(const uint64_t* const off, const T_sym_* co
         if(ahead && c + 1 < chunk.size())
             prefetch(c + 1);
 
+        Phase_Clock* const clock = clock_of(l);
+        auto t0 = host_start(clock);
         CUDA_CHECK(cudaStreamSynchronize(l.stream));
+        host_end(clock, Phase::wait, t0);
+        t0 = host_start(clock);
         host_search::find(T, idx_.n(), SA, off + a, sym, b - a, l.br_h, opt_.sort ? l.ids_h : nullptr, out + a, opt_.host_threads,
                           opt_.host_lanes);
+        host_end(clock, Phase::host_search, t0);
         if(c + STREAM_C < chunk.size())
             rank_chunk(l, off, sym, chunk[c + STREAM_C].first, chunk[c + STREAM_C].second, pinned);
     }
+}
+
+
+template <typename T_sym_>
+Phase_Times Query_Engine<T_sym_>::phases() const
+{
+    std::lock_guard<std::mutex> lock(find_lock_);
+    Phase_Times p = timed_;
+    if(opt_.phase_times)
+        for(const auto& l : lane_)
+            l.clock.read(p.t);
+
+    return p;
+}
+
+
+template <typename T_sym_>
+Engine_Memory Query_Engine<T_sym_>::memory() const
+{
+    const auto in = [](const Residency r, const Residency tier, const std::size_t bytes) { return r == tier ? bytes : std::size_t(0); };
+    Engine_Memory m;
+    m.text_device = in(idx_.text_residency(), Residency::device, idx_.text_alloc_bytes());
+    m.sa_device = in(idx_.sa_residency(), Residency::device, idx_.sa_alloc_bytes());
+    m.text_pinned = in(idx_.text_residency(), Residency::pinned, idx_.text_alloc_bytes());
+    m.sa_pinned = in(idx_.sa_residency(), Residency::pinned, idx_.sa_alloc_bytes());
+    m.table_device = tab_.bytes();
+    m.lanes_device = lanes_device_bytes_;
+    m.lanes_pinned = lanes_pinned_bytes_;
+    if(pool_ != nullptr)
+    {
+        uint64_t b = 0;
+        CUDA_CHECK(cudaMemPoolGetAttribute(pool_, cudaMemPoolAttrUsedMemHigh, &b));
+        m.pool_used_high = b;
+        CUDA_CHECK(cudaMemPoolGetAttribute(pool_, cudaMemPoolAttrReservedMemHigh, &b));
+        m.pool_reserved_high = b;
+    }
+
+    return m;
 }
 
 

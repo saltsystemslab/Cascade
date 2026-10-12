@@ -20,6 +20,10 @@ its drive, the main runs are reported per cache state, cold (every repetition
 first dropping the suffix array's pages, and infini-gram's table's) and hot,
 with the pages that each engine read from storage per query; and the other runs
 are cold.
+
+Runs that time the phases of our calls (`query find --phase-times 1`) are
+reported where the time goes: per batch, the busy time of every phase, summed
+over its chunks. The memory that our processes report goes in the setup.
 """
 import math
 import pathlib
@@ -36,6 +40,10 @@ PLACED = {"mmap": "mapped", "ram": "in the heap"}
 TIERS = {"device": "device memory", "pinned": "pinned host memory", "pageable": "pageable host memory",
          "mapped": "a mapped file on a node-local drive"}
 PAGE = 4096
+# The phases of our calls that `query find --phase-times 1` times, as it names them, and as the report does.
+PHASES = (("stage", "staging"), ("h2d", "H2D"), ("rank", "rank"), ("search", "search"), ("d2h", "D2H"), ("prefetch", "prefetch"),
+          ("host_search", "host search"), ("wait", "host waits"))
+GB = 1e9
 
 
 def pairs(path):
@@ -136,6 +144,14 @@ def mq(x):
         return "-"
     x /= 1e6
     return f"{x:.0f}" if x >= 100 else f"{x:.1f}" if x >= 10 else f"{x:.2f}"
+
+
+def ms(x):
+    """Seconds as milliseconds, to about three significant digits; `-` if none."""
+    if math.isnan(x) or x <= 0:
+        return "-"
+    x *= 1e3
+    return f"{x:.{max(0, 2 - math.floor(math.log10(x)))}f}"
 
 
 def spread(xs):
@@ -335,6 +351,85 @@ def ssd_ablation_rows(bs, two):
     return present, rows
 
 
+def phased(b):
+    return b["engine"] == "ours" and b.get("phase_times") == "1" and "t_phase_wall_median" in b
+
+
+def phase_rows(bs, cache, pageable):
+    """Ours in the batches that time their phases, in the cache state `cache` (any if None), end to end from pinned memory, or from
+    pageable if `pageable`: per workload and mode, the median over such batches of each phase's median time, and of the wall time, over
+    the main runs' end to end."""
+    at = [b for b in bs if phased(b) and (cache is None or b["cache"] == cache)]
+    sfx, e2e = ("_pageable", "t_e2e_pageable_median") if pageable else ("", "t_e2e_median")
+    rows = []
+    for w in sorted({b["workload"] for b in at}, key=order):
+        for c in sorted({b["config"] for b in at if b["workload"] == w}, key=lambda c: (c == "s0w0o0", c)):
+            got = [b for b in at if b["workload"] == w and b["config"] == c]
+            main = median([num(b, e2e) for b in bs if b["engine"] == "ours" and is_main(b["run"]) and b["config"] == c and b["workload"] == w
+                           and (cache is None or b["cache"] == cache)])
+            vs = median([num(b, e2e) for b in got]) / main if main > 0 else NAN
+            rows.append([w, c, f"{int(got[0]['q']):,}", got[0].get("phase_chunks", "-"), ms(median([num(b, f"t_phase_wall{sfx}_median") for b in got]))]
+                        + [ms(median([num(b, f"t_phase_{p}{sfx}_median") for b in got])) for p, _ in PHASES]
+                        + ["-" if math.isnan(vs) else f"{vs:.2f}"])
+    return rows
+
+
+def phase_lines(bs, cache=None, explain=True):
+    """Where our time goes, in the batches that time their phases: from pinned memory, and from pageable; explained if `explain`."""
+    md = []
+    for pageable in (False, True):
+        rows = phase_rows(bs, cache, pageable)
+        if not rows:
+            continue
+        where = "pageable" if pageable else "pinned"
+        md += ["", f"## Where the time goes{', ' + cache if cache else ''}: ours end to end, from {where} memory", ""]
+        if explain and not pageable:
+            md += ["A process of ours that times the phases of every call (`--phase-times 1`), over the main workloads in the main runs' "
+                   "modes. Per batch, the median over repetitions of each phase's busy time in ms, summed over the batch's chunks, and "
+                   "over the host's threads that run them: the device's between events on its streams, the host's on its clock. Staging: "
+                   "the host's copies between the batch's pageable memory and pinned buffers; rank: packing, sorting, and ranking in the "
+                   "sample table; search: the device's exact search, with its gathers; prefetch: the host's asking the kernel for a mapped "
+                   "suffix array's pages ahead; host waits: on the device. Phases overlap across the streams and the host, so that they "
+                   "may add up to more than the wall time. Last column: the process's end-to-end time over the main runs' median, the "
+                   "cost of the timing, within the noise of processes.", ""]
+        md += table(*filled(["workload", "mode", "q", "chunks", "wall"] + [name for _, name in PHASES] + ["/ main runs"], rows,
+                            ["---", "---"] + ["--:"] * (4 + len(PHASES))))
+    return md
+
+
+def memory_lines(bs):
+    """Our processes' memory, per cache state: the median over the main runs' processes, or else those of any run. Of the engine's own
+    device and pinned memory, the parts that hold any."""
+    procs = {}
+    for b in bs:
+        if b["engine"] == "ours" and "mem_device_used_load" in b:
+            p = procs.setdefault(b["log"], {"cache": b["cache"], "main": is_main(b["run"])})
+            p.update((k, num(b, k)) for k in b if k.startswith("mem_"))
+    out = []
+    for cache in sorted({p["cache"] for p in procs.values()}):
+        at = [p for p in procs.values() if p["cache"] == cache]
+        at = [p for p in at if p["main"]] or at
+
+        def gb(k):
+            x = median([p.get(f"mem_{k}", NAN) for p in at]) / GB
+            return "-" if math.isnan(x) else f"{x:.0f}" if x >= 100 else f"{x:.1f}" if x >= 10 else f"{x:.2f}"
+
+        def parts(names):
+            return ", ".join(f"{name} {gb(k)}" for k, name in names if median([p.get(f"mem_{k}", NAN) for p in at]) > 0)
+
+        device = parts((("text_device_end", "text"), ("sa_device_end", "suffix array"), ("table_device_end", "sample table"),
+                        ("lanes_device_end", "lanes"), ("pool_used_high_end", "the memory pool's high-water mark")))
+        pinned = parts((("text_pinned_end", "text"), ("sa_pinned_end", "suffix array"), ("lanes_pinned_end", "lanes")))
+        state = f", {cache}" if any(b.get("sa_res") == "mapped" for b in bs) else ""
+        out.append(f"- Ours, memory per process{state} (median of {len(at)}{' main' if at[0]['main'] else ''} processes), GB: the device's in use "
+                   f"{gb('device_used_load')} after the load and {gb('device_used_end')} after the last batch, of which the engine's own "
+                   f"{gb('engine_device_end')}" + (f" ({device})" if device else "") + f", its memory pool having reserved at most "
+                   f"{gb('pool_reserved_high_end')}; the engine's pinned host memory {gb('engine_pinned_end')}" + (f" ({pinned})" if pinned else "")
+                   + f". Peak resident set {gb('peak_rss_end')}; at the end anonymous {gb('rss_anon_end')}, file-backed {gb('rss_file_end')}, "
+                   f"shared {gb('rss_shmem_end')}.")
+    return out
+
+
 def setup_lines(bs, two):
     """Load times: ours per process of the main runs; infini-gram's page-cache warm-up and heap loads."""
     procs = {}
@@ -357,7 +452,7 @@ def setup_lines(bs, two):
                    f"{median(heap):.1f} s per process." if heap else f"- infini-gram: page-cache warm-up {max(warm):.1f} s, once.")
     if lock:
         out.append(f"- infini-gram: text read in and locked in memory in {median(lock):.1f} s per process (median of {len(lock)}).")
-    return out
+    return out + memory_lines(bs)
 
 
 def ssd_lines(bs, t_all, two):
@@ -378,6 +473,12 @@ def ssd_lines(bs, t_all, two):
         if sp:
             md += ["", f"Ours over infini-gram, {cache}: {times(min(sp), 1)} to {times(max(sp), 1)} across workloads, median "
                        f"{times(statistics.median(sp), 1)}."]
+
+    explained = False
+    for cache in ("cold", "hot"):
+        lines = phase_lines(bs, cache, not explained)
+        explained = explained or bool(lines)
+        md += lines
 
     cold = [b for b in bs if b["cache"] == "cold"]
     rows = batch_rows(cold, t_all, "mmap", True, two)
@@ -446,6 +547,8 @@ def main(argv):
     cols = ("engine", "run", "config", "workload", "q", "sym_c", "reps", "t_h2d", "t_find_min", "t_find_median", "t_d2h",
             "qps_best", "qps_median", "t_e2e_median", "qps_e2e", "t_e2e_pageable_median", "qps_e2e_pageable", "e2e_check",
             "counts_hash", "validate", "hits", "occurrences")
+    if any(phased(b) for b in bs):  # Only then: the columns of results without them stay as they were.
+        cols += ("phase_chunks",) + tuple(f"t_phase_{p}{x}_median" for x in ("", "_pageable") for p in [p for p, _ in PHASES] + ["wall"])
     with open(d / "runs.tsv", "w", encoding="utf-8") as f:
         f.write("\t".join(cols) + "\n")
         for b in bs:
@@ -506,6 +609,8 @@ def main(argv):
                    (f"Two-phase over infini-gram: {times(min(sp), 1)} to {times(max(sp), 1)} across workloads, median "
                     f"{times(statistics.median(sp), 1)}; {e2e} {times(min(sp_e2e), 1)} to {times(max(sp_e2e), 1)}, "
                     f"median {times(statistics.median(sp_e2e), 1)}.")]
+
+    md += phase_lines(bs)
 
     rows = batch_rows(bs, t_all, ig_load, host)
     if rows and host:

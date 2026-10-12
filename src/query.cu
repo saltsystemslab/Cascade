@@ -12,6 +12,7 @@
 
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -53,8 +54,8 @@ R"(Usage:
              [--spot N] [--stride S,...] [--key-words W,...] [--sort 0|1,...] [--gather 0|1,...]
              [--gather-queries G] [--reps K] [--chunk-queries C] [--chunk-symbols Y]
              [--min-chunk-queries C'] [--min-chunk-symbols Y'] [--host-threads H] [--host-lanes L]
-             [--host-prefetch 0|1] [--sa-cold 0|1] [--itv-out F] [--cnt-out F] [--cnt-dir D]
-             [--device-budget B] [--host-budget B'] [--validate]
+             [--host-prefetch 0|1] [--sa-cold 0|1] [--phase-times 0|1] [--itv-out F] [--cnt-out F]
+             [--cnt-dir D] [--device-budget B] [--host-budget B'] [--validate]
       Loads the index once, and finds the SA-intervals of the first N (default:
       all) queries of every query file, K times (default 3) each way: from
       device memory, and end to end, from host memory through the pipeline, both
@@ -93,6 +94,11 @@ R"(Usage:
       symbols) if the device searches, else 4; S = auto picks the keys too,
       unless W is set. The budgets are the device's free memory, and the
       host's available memory, at load, or B and B' bytes.
+      --phase-times 1 times the phases of every end-to-end call, and reports
+      their medians over the repetitions: each phase's busy time summed over
+      the call's chunks (see `Phase_Times`). The memory in use is reported
+      after the load and after the last batch: the device's, the engine's
+      own, and the process's resident set.
       The counts of a single query file and mode go to --cnt-out, or those of
       each to D/<stem>.cnt, or D/<stem>@s<S>w<W>o<sort>g<gather>.cnt for several
       modes.
@@ -230,6 +236,71 @@ uint64_t storage_read_bytes()
     }
 
     return 0;
+}
+
+
+// Returns the bytes of the process's resident set of the kind `key` (e.g.
+// `RssAnon:`) per `/proc/self/status`; `0` if unknown.
+uint64_t resident_bytes(const std::string& key)
+{
+    std::ifstream is("/proc/self/status");
+    for(std::string k; is >> k; )
+    {
+        if(k == key)
+        {
+            uint64_t v = 0;
+            is >> v;
+            return v * 1024;    // In kB.
+        }
+
+        is.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    }
+
+    return 0;
+}
+
+
+// Prints the device's memory in use, the engine `eng`'s own memory, and the
+// process's resident set, its peak and its kinds now, as `mem_<what>_<when>`
+// lines.
+template <typename T_sym_>
+void print_memory(const Query_Engine<T_sym_>& eng, const char* const when)
+{
+    std::size_t free_b = 0, total_b = 0;
+    CUDA_CHECK(cudaMemGetInfo(&free_b, &total_b));
+    const Engine_Memory m = eng.memory();
+    struct rusage ru;
+    const uint64_t peak = (::getrusage(RUSAGE_SELF, &ru) == 0 ? uint64_t(ru.ru_maxrss) * 1024 : 0);    // In kB.
+    const std::pair<const char*, uint64_t> mem[] =
+    {
+        {"device_used", total_b - free_b}, {"engine_device", m.device()}, {"text_device", m.text_device}, {"sa_device", m.sa_device},
+        {"table_device", m.table_device}, {"lanes_device", m.lanes_device}, {"pool_used_high", m.pool_used_high},
+        {"pool_reserved_high", m.pool_reserved_high}, {"engine_pinned", m.pinned()}, {"text_pinned", m.text_pinned},
+        {"sa_pinned", m.sa_pinned}, {"lanes_pinned", m.lanes_pinned}, {"peak_rss", peak}, {"rss_anon", resident_bytes("RssAnon:")},
+        {"rss_file", resident_bytes("RssFile:")}, {"rss_shmem", resident_bytes("RssShmem:")},
+    };
+
+    for(const auto& [k, v] : mem)
+        std::printf("mem_%s_%s=%" PRIu64 "\n", k, when, v);
+}
+
+
+// Prints the median over the calls `ph` of the time of every phase, and of
+// their wall time, as `t_phase_<phase><suffix>_median` lines.
+void print_phases(const std::vector<Phase_Times>& ph, const char* const suffix)
+{
+    const auto median = [&](const auto& of)
+    {
+        std::vector<double> v;
+        for(const auto& p : ph)
+            v.push_back(of(p));
+        std::sort(v.begin(), v.end());
+        return v.empty() ? 0.0 : v[v.size() / 2];
+    };
+
+    for(std::size_t i = 0; i < PHASE_C; ++i)
+        std::printf("t_phase_%s%s_median=%.9f\n", phase_name(static_cast<Phase>(i)), suffix, median([i](const Phase_Times& p) { return p.t[i]; }));
+    std::printf("t_phase_wall%s_median=%.9f\n", suffix, median([](const Phase_Times& p) { return p.wall; }));
 }
 
 
@@ -426,7 +497,10 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
     if(off[q] > 0)
         std::memcpy(sym_p, sym.data(), off[q] * sizeof(T_sym_));
 
-    const auto time_find = [&](const uint64_t* const o, const T_sym_* const y, SA_Interval* const r, std::vector<uint64_t>& io)
+    // And the phases of every repetition, if timed.
+    const bool phased = eng.options().phase_times;
+    const auto time_find = [&](const uint64_t* const o, const T_sym_* const y, SA_Interval* const r, std::vector<uint64_t>& io,
+                               std::vector<Phase_Times>& ph)
     {
         std::vector<double> t;
         for(uint64_t k = 0; k < reps; ++k)
@@ -437,6 +511,8 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
             eng.find(o, y, q, r);
             t.push_back(std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
             io.push_back(storage_read_bytes() - b0);
+            if(phased)
+                ph.push_back(eng.phases());
         }
 
         std::sort(t.begin(), t.end());
@@ -444,8 +520,9 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
     };
 
     std::vector<SA_Interval> out_pg(q);
-    const auto t_e2e = time_find(off_p, sym_p, out_p, io_e2e);
-    const auto t_e2e_pg = time_find(off.data(), sym.data(), out_pg.data(), io_e2e_pg);
+    std::vector<Phase_Times> ph_e2e, ph_e2e_pg;
+    const auto t_e2e = time_find(off_p, sym_p, out_p, io_e2e, ph_e2e);
+    const auto t_e2e_pg = time_find(off.data(), sym.data(), out_pg.data(), io_e2e_pg, ph_e2e_pg);
     const bool e2e_same = (q == 0 || (std::memcmp(out_p, out.data(), q * sizeof(SA_Interval)) == 0
                                       && std::memcmp(out_pg.data(), out.data(), q * sizeof(SA_Interval)) == 0));
     CUDA_CHECK(deallocate_host(off_p));
@@ -463,6 +540,12 @@ int find_batch(const Query_Engine<T_sym_>& eng, const std::string& path, const u
                 q / t_e2e.front(), t_e2e_pg.front(), t_e2e_pg[t_e2e_pg.size() / 2], q / t_e2e_pg.front(), e2e_same ? "pass" : "FAIL", hits, occ,
                 query_file::counts_hash(out.data(), q));
     std::printf("io_bytes_find=%s\nio_bytes_e2e=%s\nio_bytes_e2e_pageable=%s\n", join(io_find).c_str(), join(io_e2e).c_str(), join(io_e2e_pg).c_str());
+    if(phased)  // End to end from pinned memory, and from pageable.
+    {
+        std::printf("phase_chunks=%" PRIu64 "\n", ph_e2e.empty() ? 0 : ph_e2e.front().chunks);
+        print_phases(ph_e2e, "");
+        print_phases(ph_e2e_pg, "_pageable");
+    }
 
     int rc = 0;
     if(!e2e_same)
@@ -517,7 +600,7 @@ int run_find(const Args& a)
     std::string err;
     Query_Options opt;
     uint64_t q_max = std::numeric_limits<uint64_t>::max(), spot = 100000, reps = 3, host_threads = opt.host_threads, host_lanes = opt.host_lanes;
-    uint64_t host_prefetch = opt.host_prefetch, sa_cold = 0;
+    uint64_t host_prefetch = opt.host_prefetch, sa_cold = 0, phase_times = opt.phase_times;
     std::vector<uint64_t> strides = {opt.stride}, key_words = {0}, sorts = {0}, gathers;
     if(!get_u64(a, "q", q_max, err) || !get_u64(a, "spot", spot, err) || !get_u64(a, "reps", reps, err)
         || !get_u64(a, "chunk-queries", opt.chunk_queries, err) || !get_u64(a, "chunk-symbols", opt.chunk_symbols, err)
@@ -525,6 +608,7 @@ int run_find(const Args& a)
         || !get_u64(a, "gather-queries", opt.gather_queries, err)
         || !get_u64(a, "host-threads", host_threads, err) || !get_u64(a, "host-lanes", host_lanes, err)
         || !get_u64(a, "host-prefetch", host_prefetch, err) || !get_u64(a, "sa-cold", sa_cold, err)
+        || !get_u64(a, "phase-times", phase_times, err)
         || !get_u64_list(a, "stride", strides, err, AUTO_STRIDE) || !get_u64_list(a, "key-words", key_words, err, AUTO_KEY_WORDS)
         || !get_u64_list(a, "sort", sorts, err) || !get_u64_list(a, "gather", gathers, err)
         || !get_u64(a, "device-budget", opt.device_budget, err) || !get_u64(a, "host-budget", opt.host_budget, err)
@@ -584,6 +668,7 @@ int run_find(const Args& a)
     opt.host_threads = static_cast<unsigned>(std::min<uint64_t>(host_threads, std::numeric_limits<unsigned>::max()));
     opt.host_lanes = static_cast<unsigned>(std::min<uint64_t>(host_lanes, std::numeric_limits<unsigned>::max()));   // Too many is rejected at load.
     opt.host_prefetch = (host_prefetch != 0);
+    opt.phase_times = (phase_times != 0);
     reps = std::max<uint64_t>(reps, 1);
 
     Query_Engine<T_sym_> eng;
@@ -610,6 +695,8 @@ int run_find(const Args& a)
                 eng.options().min_chunk_queries, eng.options().min_chunk_symbols, eng.options().gather_queries);
     std::printf("host_search=%d\nhost_threads=%u\nhost_lanes=%u\nhost_prefetch=%d\nsa_cold=%d\n", eng.host_searches(), eng.options().host_threads,
                 eng.options().host_lanes, eng.options().host_prefetch, sa_cold != 0);
+    std::printf("phase_times=%d\n", eng.options().phase_times);
+    print_memory(eng, "load");
 
     // Counts go to `--cnt-out`, or to `<stem>.cnt` of every query file under `--cnt-dir`; to `<stem>@<mode>.cnt` if several modes.
     int rc = 0;
@@ -636,6 +723,7 @@ int run_find(const Args& a)
         }
     }
 
+    print_memory(eng, "end");
     return rc;
 }
 

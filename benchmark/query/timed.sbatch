@@ -20,6 +20,9 @@
 #             (stride 32, 2-word keys), and infini-gram's `_find_thread` from a
 #             pool of every core, its index placed as TM_IG_LOAD says; in
 #             TM_REPLICATES alternating processes of each
+#   phases    ours in TM_MAIN_MODES over the main workloads, timing the phases
+#             of every call (`query find --phase-times 1`): a process, per cache
+#             state of TM_PHASE_CACHES with our suffix array mapped
 #   batch     both, over present-pattern batches (m = 10) of TM_BATCHES queries,
 #             ours in TM_BATCH_MODES; infini-gram also with a pool no larger
 #             than the batch's chunks
@@ -47,7 +50,8 @@
 #
 # Results in OUT_DIR: env.txt (provenance), ours/ and ig/ (logs, and the counts
 # of the first main replicate), compare.txt (count files: same or DIFFERENT),
-# and from summarize.py, runs.tsv (a line per timed batch) and summary.md.
+# and from summarize.py, runs.tsv (a line per timed batch) and summary.md. Our
+# logs report our processes' memory too.
 #
 # Environment (all optional):
 #   TM_STAGE        node-local directory to stage the indexes and the batches
@@ -63,11 +67,13 @@
 #                   it if the same file; default with our index
 #   TM_STRIPE       colon-separated node-local directories to split a copy of our
 #                   suffix array over, for the stripe run; default none
-#   TM_RUNS         default main,batch,ablation,threads,variants,host, and with
-#                   our suffix array mapped prefetch,stripe,direct too; host runs
-#                   only if the host searches our index
+#   TM_RUNS         default main,phases,batch,ablation,threads,variants,host, and
+#                   with our suffix array mapped prefetch,stripe,direct too; host
+#                   runs only if the host searches our index
 #   TM_CACHES       cache states of the main runs with our suffix array mapped:
 #                   cold, hot, or both (default)
+#   TM_PHASE_CACHES cache states of the phases run with our suffix array mapped;
+#                   default the first of TM_CACHES
 #   TM_IG_LOCK_TEXT 1 locks infini-gram's text in memory; default 1 iff our
 #                   suffix array is mapped
 #   TM_DIRECT_Q     queries per workload of the direct run; default 100000
@@ -163,12 +169,13 @@ SA_RES="${TM_SA_RES:-device}"
 MAPPED=0    # Whether our suffix array is mapped from its drive: the runs time cold caches.
 [ "${SA_RES}" = mapped ] && MAPPED=1
 p() { [ "${MAPPED}" -eq 1 ] && echo "$2" || echo "$1"; }    # The default $1, or $2 with our suffix array mapped.
-RUNS=",${TM_RUNS:-main,batch,ablation,threads,variants,host$(p "" ,prefetch,stripe,direct)},"
+RUNS=",${TM_RUNS:-main,phases,batch,ablation,threads,variants,host$(p "" ,prefetch,stripe,direct)},"
 REPS="${TM_REPS:-$(p 6 3)}"
 REPL="${TM_REPLICATES:-3}"
 BATCHES="${TM_BATCHES:-$(p 1000,10000,100000,1000000,10000000,100000000 1000,10000,100000,1000000)}"
 SWEEP="${TM_SWEEP:-present-m5,present-m10,present-m100,random-m5}"
 CACHES="${TM_CACHES:-$(p hot cold,hot)}"
+PHASE_CACHES="${TM_PHASE_CACHES:-${CACHES%%,*}}"
 IG_LOAD="${TM_IG_LOAD:-mmap}"
 IG_LOCK_TEXT="${TM_IG_LOCK_TEXT:-${MAPPED}}"
 DIRECT_Q="${TM_DIRECT_Q:-100000}"
@@ -188,8 +195,8 @@ if [ "${MAPPED}" -eq 1 ] && [ "${IG_LOAD}" != mmap ]; then
     echo "FATAL: with our suffix array mapped, infini-gram's table is mapped too: TM_IG_LOAD=mmap"
     exit 1
 fi
-if [[ ! ",${CACHES}," =~ ^(,(cold|hot))+,$ ]]; then
-    echo "FATAL: TM_CACHES must list cold and hot, not '${CACHES}'"
+if [[ ! ",${CACHES}," =~ ^(,(cold|hot))+,$ ]] || [[ ! ",${PHASE_CACHES}," =~ ^(,(cold|hot))+,$ ]]; then
+    echo "FATAL: TM_CACHES and TM_PHASE_CACHES must list cold and hot, not '${CACHES}' and '${PHASE_CACHES}'"
     exit 1
 fi
 # The options of a cold repetition: ours drops its suffix array's pages, infini-gram its table's.
@@ -249,6 +256,7 @@ fi
     echo "stripe=${STRIPE:-none}"
     echo "keep_stage=${KEEP_STAGE}"
     echo "caches=${CACHES}"
+    echo "phase_caches=${PHASE_CACHES}"
     echo "ig_lock_text=${IG_LOCK_TEXT}"
     echo "ours_main_modes=${MAIN_MODES[*]}"
     echo "ours_batch_modes=${BATCH_MODES[*]}"
@@ -385,6 +393,16 @@ if want main; then
                 "${cold_ig[@]}" "${cnt[@]}"
             stamp "infini-gram $(main_dir "${cache}" "${r}"): done"
         done
+    done
+fi
+
+# Where our time goes: a process timing every call's phases, in the main modes; per cache state with our suffix array mapped, as
+# phases-cold and phases-hot.
+if want phases; then
+    for cache in $(p hot "${PHASE_CACHES//,/ }"); do
+        cold_ours=()
+        [ "${cache}" = cold ] && cold_ours=("${COLD_OURS[@]}")
+        ours "${OUT}/ours/phases$(p "" "-${cache}").log" "${files}" "${MAIN_MODES[@]}" --phase-times 1 "${cold_ours[@]}"
     done
 fi
 
