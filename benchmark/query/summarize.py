@@ -612,7 +612,7 @@ def main(argv):
 
     md += phase_lines(bs)
 
-    rows = batch_rows(bs, t_all, ig_load, host)
+    rows = batch_rows(bs, t_all, ig_load, host, two)
     if rows and host:
         md += ["", "## Batch size: present patterns, m = 10", "",
                "infini-gram with every core, and with a pool no larger than the batch's 256-query chunks. Ours end to end. The "
@@ -626,10 +626,11 @@ def main(argv):
         md += table(["q", "infini-gram", "infini-gram, small pool", "ours, direct", "two-phase", "two-phase, sorted", f"direct, {e2e}",
                      f"two-phase, {e2e}", f"sorted, {e2e}", "speedup", e2e], rows, ["--:"] * 11)
 
-    rows = ablation_rows(bs, "qps_e2e" if host else "qps_median")
+    rows = ablation_rows(bs, "qps_e2e" if host else "qps_median", two)
     if rows:
         md += ["", "## Ablation: stride (s), key words (w), sorted batches (o)", "",
-               "Relative: the median over workloads of the throughput relative to the default mode's, s32w2o0"
+               "Relative: the median over workloads of the throughput relative to "
+               + ("the default mode's, s32w2o0" if two == "s32w2o0" else f"the main runs' mode's, {two}")
                + (", end to end." if host else "."), ""]
         md += table(["mode", "table GB", "build s", "relative"] + list(SHOWN), rows, ["---"] + ["--:"] * (3 + len(SHOWN)))
 
