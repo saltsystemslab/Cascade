@@ -1405,7 +1405,8 @@ bool test_host_team()
 // brackets picked for their edges: one whose searches read past its page, one
 // within a page, one as wide as the array, one at its end, empty ones, two that
 // share pages, and one across the parts' border; with each page asked for once,
-// and each of a part from its own file.
+// and each of a part from its own file. As a batch of their few queries, which
+// the calling thread asks for alone, and of many copies, which the threads share.
 bool test_prefetch_pages()
 {
     std::string err;
@@ -1444,19 +1445,29 @@ bool test_prefetch_pages()
             want[g] = 1;
     CHECK(want[border - 1] && want[border], "the brackets must cross the parts' border");
 
-    const idx_t q = br.size() / 2, want_c = std::count(want.begin(), want.end(), 1);
-    for(const unsigned threads : {1u, 3u})
+    const idx_t want_c = std::count(want.begin(), want.end(), 1);
+    for(const idx_t copies : {idx_t(1), idx_t(100)})
     {
-        host_search::SA_Files f;
-        CHECK(f.open(m.sa_part, m.sa_part_off, threads, err), "%s", err.c_str());
-        const std::unique_ptr<std::atomic<uint8_t>[]> asked(new std::atomic<uint8_t>[last + 1]());
-        idx_t refused = 0;
-        const idx_t c = host_search::prefetch(f, n, br.data(), q, asked.get(), refused);
-        CHECK(refused == 0 && (threads == 1 ? c == want_c : c >= want_c), "%u threads: %" PRIu64 " pages asked for, not %" PRIu64 "; %" PRIu64
-              " requests refused", threads, c, want_c, refused);
-        for(idx_t g = 0; g <= last; ++g)
-            CHECK(asked[g].load() == want[g], "%u threads: page %" PRIu64 " %s asked for", threads, g, want[g] ? "not" : "wrongly");
-        CHECK(host_search::prefetch(f, n, br.data(), q, asked.get(), refused) == 0 && refused == 0, "%u threads: pages asked for again", threads);
+        std::vector<Rank_Range> batch;
+        for(idx_t k = 0; k < copies; ++k)
+            batch.insert(batch.end(), br.begin(), br.end());
+
+        const idx_t q = batch.size() / 2;
+        for(const unsigned threads : {1u, 3u})
+        {
+            host_search::SA_Files f;
+            CHECK(f.open(m.sa_part, m.sa_part_off, threads, err), "%s", err.c_str());
+            const std::unique_ptr<std::atomic<uint8_t>[]> asked(new std::atomic<uint8_t>[last + 1]());
+            idx_t refused = 0;
+            const idx_t c = host_search::prefetch(f, n, batch.data(), q, asked.get(), refused);
+            CHECK(refused == 0 && (threads == 1 ? c == want_c : c >= want_c), "%" PRIu64 " queries, %u threads: %" PRIu64 " pages asked for, not %"
+                  PRIu64 "; %" PRIu64 " requests refused", q, threads, c, want_c, refused);
+            for(idx_t g = 0; g <= last; ++g)
+                CHECK(asked[g].load() == want[g], "%" PRIu64 " queries, %u threads: page %" PRIu64 " %s asked for", q, threads, g,
+                      want[g] ? "not" : "wrongly");
+            CHECK(host_search::prefetch(f, n, batch.data(), q, asked.get(), refused) == 0 && refused == 0,
+                  "%" PRIu64 " queries, %u threads: pages asked for again", q, threads);
+        }
     }
 
     return true;
@@ -1464,7 +1475,9 @@ bool test_prefetch_pages()
 }
 
 
-int main()
+// Runs the tests whose names contain any of the arguments, or every test
+// without arguments; e.g. `test_query pipeline`.
+int main(const int argc, char** const argv)
 {
     if(!gpu_saca::sa40::host_is_little_endian())
     {
@@ -1492,10 +1505,19 @@ int main()
         {"device load rejects",     test_gpu_rejects,           true},
     };
 
+    const auto selected = [&](const Test& t)
+    {
+        return argc < 2 || std::any_of(argv + 1, argv + argc, [&](const char* const a) { return std::strstr(t.name, a) != nullptr; });
+    };
+
     const bool gpu = gpu_available();
-    int failed = 0, skipped = 0;
+    int failed = 0, skipped = 0, run = 0;
     for(const auto& t : tests)
     {
+        if(!selected(t))
+            continue;
+
+        ++run;
         if(t.gpu && !gpu)
         {
             ++skipped;
@@ -1513,6 +1535,6 @@ int main()
     std::error_code ec;
     std::filesystem::remove_all(std::filesystem::temp_directory_path() / ("gsa-test-query-" + std::to_string(::getpid())), ec);
 
-    std::fprintf(stderr, "[test_query] %d / %zu tests failed, %d skipped\n", failed, tests.size(), skipped);
-    return failed == 0 ? 0 : 1;
+    std::fprintf(stderr, "[test_query] %d / %d tests failed, %d skipped\n", failed, run, skipped);
+    return failed == 0 && run > 0 ? 0 : 1;
 }
