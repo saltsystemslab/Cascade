@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Host-budget sweep of our method, end to end as in e2e.sbatch: one run per plan
-# line, into a results directory per corpus and budget, as neither the run-ids
-# nor summarize.py's groups tell budgets apart. Submit from the repo root:
+# Budget sweep of our method, end to end as in e2e.sbatch: one run per plan line,
+# into a results directory per corpus and point, as neither the run-ids nor
+# summarize.py's groups tell the points apart. Submit from the repo root:
 #   sbatch --export=ALL,OURS_BIN=<bench_gpu_saca>,OURS_TAG=<tag> \
 #          benchmark/infinigram/sweep.sbatch <results-root> <plan>
 # A plan line is `label:tokenizer point rep [VAR=value ...]`, `#` starting a
-# comment. The point is `default`, `forced` (no RAM-tier, and Π on disk), or a
-# budget in GiB, passed on in bytes: GPU_SACA_RAM_BUDGET parses "400G" as 400.
+# comment. The point is `default`, `forced` (no RAM-tier, and Π on disk), a host
+# budget in GiB, passed on in bytes as GPU_SACA_RAM_BUDGET parses "400G" as 400,
+# or `p<N>`: the default budget with a minimum partition-count of N, which
+# emulates a device-budget that needs N partitions.
 # The plan is re-read before every run, so lines can be added, reordered or
 # commented out while the job runs. A line whose record exists is skipped, and so
 # is one this job has attempted already, so a resubmit retries only what has no
@@ -84,12 +86,13 @@ echo "host $(hostname)  job ${JOB}  ours ${OURS_TAG} ${OURS_BIN}"
 echo "plan ${PLAN}  results ${ROOT}  reset ${RESET_BIN:+on}${RESET_BIN:-off}"
 echo "stage ${IG_STAGE_ROOT}  temp ${IG_TEMP_ROOT}  spill ${GPU_SACA_SCRATCH}"
 
-# Prints the results directory of corpus label `$1` at point `$2`, the budgets
-# zero-padded so that the directories sort by budget.
+# Prints the results directory of corpus label `$1` at point `$2`, the numbers
+# zero-padded so that the directories sort by them.
 point_dir()
 {
     case "$2" in
         default|forced) echo "${ROOT}/$1-$2" ;;
+        p*)             printf '%s/%s-p%04d\n' "${ROOT}" "$1" "$((10#${2#p}))" ;;
         *)              printf '%s/%s-%04d\n' "${ROOT}" "$1" "$((10#$2))" ;;
     esac
 }
@@ -104,7 +107,8 @@ plan_runs()
         bad=""
         case "${q}" in
             default|forced) ;;
-            *[!0-9]*|'')    bad="the point must be default, forced, or GiB" ;;
+            p*)             [[ "${q#p}" =~ ^[1-9][0-9]*$ ]] || bad="the point must be default, forced, GiB, or p<partitions>" ;;
+            *[!0-9]*|'')    bad="the point must be default, forced, GiB, or p<partitions>" ;;
         esac
         case "${r}" in
             *[!0-9]*|''|0)  bad="the replicate must be a positive integer" ;;
@@ -157,6 +161,7 @@ while :; do
     case "${point}" in
         default) ;;
         forced)  penv=(GPU_SACA_FORCE_SPILL=1 GPU_SACA_PID_SPILL=1) ;;
+        p*)      penv=(GPU_SACA_P_TARGET=$(( 10#${point#p} ))) ;;
         *)       penv=(GPU_SACA_RAM_BUDGET=$(( 10#${point} << 30 ))) ;;
     esac
 
