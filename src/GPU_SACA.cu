@@ -2,6 +2,7 @@
 #include "GPU_SACA.hpp"
 #include "GPU_SACA.cuh"
 #include "Suffix_Buffer.hpp"
+#include "Output_File.hpp"
 #include "Packed_Prefix.hpp"
 #include "Packed_Prefix_Decomposer.cuh"
 #include "bit-layout.hpp"
@@ -2143,10 +2144,22 @@ void GPU_SACA<T_sym_>::scatter_to_rank_order(const p_id_t p_id, Partition_Assemb
     }
 
 
-    // Asynchronously download the rank-ordered partition in a chunked manner to host slabs.
+    // Asynchronously download the rank-ordered partition to host slabs, as cut for the output: each slab gets its
+    // piece, and the edges go to the first and the last slabs' message-target buffers, idle in concatenation.
     {
-        for(auto* s : p_assembly.slab)
-            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_lanes + lane::bytes(s->off()), lane::bytes(s->size()), cudaMemcpyDeviceToHost, stream[buf_id]));
+        const auto lo = lane::bytes(P_off[p_id]);   // Start of the partition's output-range.
+        const auto chunk_c = p_assembly.slab.size();
+        for(std::size_t c = 0; c < chunk_c; ++c)
+        {
+            auto* const s = p_assembly.slab[c];
+            const auto cut = Output_File::cut(lo, lo + lane::bytes(part_sz), lane::bytes(chunk_cap_), c, chunk_c);
+            CUDA_CHECK(cudaMemcpyAsync(s->suf(), SA_lanes + (cut.lo - lo), cut.hi - cut.lo, cudaMemcpyDeviceToHost, stream[buf_id]));
+            if(cut.head_lo < cut.head_hi)
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target(), SA_lanes + (cut.head_lo - lo), cut.head_hi - cut.head_lo, cudaMemcpyDeviceToHost, stream[buf_id]));
+
+            if(cut.tail_lo < cut.tail_hi)
+                CUDA_CHECK(cudaMemcpyAsync(s->msg_target() + Direct_File::DISK_BLOCK, SA_lanes + (cut.tail_lo - lo), cut.tail_hi - cut.tail_lo, cudaMemcpyDeviceToHost, stream[buf_id]));
+        }
     }
 }
 
@@ -2174,15 +2187,9 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
     // Open the output file and preallocate it. An empty `op` instructs
     // construction without output dump.
     const auto dump = !op.empty();
-    const auto fd = dump ? ::open(op.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644) : -1; // Only owner can read-write, others read-only.
+    std::unique_ptr<Output_File> op_file;
     if(dump)
-    {
-        if(fd < 0)
-            util::file::exit_on_io_failure("open", op);
-
-        if(::fallocate(fd, 0, 0, lane::bytes(n_)) != 0)
-            util::file::exit_on_io_failure("fallocate", op);
-    }
+        op_file = std::make_unique<Output_File>(op, lane::bytes(n_));
 
 
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
@@ -2303,9 +2310,15 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
                             INSTRUMENT(probe::P().me().bytes += lane::bytes(s->size()));
                             INSTRUMENT(probe::P().me().disk_bytes += (dump ? lane::bytes(s->size()) : 0));
 
-                            // Drain the slab's suffixes.
+                            // Drain the slab's share of the output, as its download cut it.
                             if(dump)
-                                util::file::write_and_flush(fd, op, s->suf(), lane::bytes(s->size()), lane::bytes(P_off[s->p_id()] + s->off()));
+                            {
+                                const auto lo = lane::bytes(P_off[s->p_id()]);  // Start of the partition's output-range.
+                                const auto cut = Output_File::cut(lo, lo + lane::bytes(P_cap[s->p_id()]), lane::bytes(chunk_cap_), s->off() / chunk_cap_, part_assembly[s->p_id()].slab.size());
+                                op_file->write_piece(s->suf(), cut.hi - cut.lo, cut.lo);
+                                op_file->write_edge(s->msg_target(), cut.head_hi - cut.head_lo, cut.head_lo);
+                                op_file->write_edge(s->msg_target() + Direct_File::DISK_BLOCK, cut.tail_hi - cut.tail_lo, cut.tail_lo);
+                            }
                         }
 
                         F.enqueue(s);   // This slab is free now.
@@ -2374,15 +2387,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
 
     // Close the output file.
     if(dump)
-    {
-        // The earlier per-chunk `sync_file_range`s only queued writebacks, with no guarantees on
-        // actual completions. Therefore block until the writes physically complete.
-        if(::fsync(fd) != 0)
-            util::file::exit_on_io_failure("fsync", op);
-
-        if(::close(fd) != 0)
-            util::file::exit_on_io_failure("close", op);
-    }
+        op_file->close();
 }
 
     INSTRUMENT(probe::P().accumulate_pipeline_ns(pipeline_ns));
