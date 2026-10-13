@@ -10,6 +10,7 @@ set(PROJECT_SRC
         Suffix_Buffer.cpp
         Staging_Slab.cpp
         Direct_File.cpp
+        Output_File.cpp
         Spill_Store.cpp
         Disk_Backend.cpp
         RAM_Backend.cpp

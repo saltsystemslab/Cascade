@@ -128,6 +128,15 @@ namespace math
         static_assert(BLK > 0 && (BLK & (BLK - 1)) == 0, "BLK must be a power of 2!");
         return (sz + BLK - 1) & ~(BLK - 1);
     }
+
+    // Returns `sz` rounded down to the closest multiple of `BLK`, which needs
+    // to be a power of 2.
+    template <uint64_t BLK>
+    inline uint64_t block_down(const uint64_t sz)
+    {
+        static_assert(BLK > 0 && (BLK & (BLK - 1)) == 0, "BLK must be a power of 2!");
+        return sz & ~(BLK - 1);
+    }
 }
 
 
