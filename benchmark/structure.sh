@@ -14,7 +14,11 @@ Usage: benchmark/structure.sh full <corpus> <caps_sa_gpu> <sa_structure>
 
   full       a pinned run with its SA kept on $SA_DIR, then `sa_structure` on
              that SA; writes $RESULTS/runs/<corpus>.log and .structure.json,
-             and deletes the SA unless KEEP_SA=1
+             and deletes the SA unless KEEP_SA=1. With IO_TRACE=1, the run's
+             /proc/<pid>/io counters and its log's length go to
+             <corpus>.log.io.tsv every 0.25 s: its phase lines go to
+             unbuffered stderr, so the log's length dates each phase, and the
+             bytes can be attributed to the phases
   partition  a partition-only run (GPU_SACA_PARTITION_ONLY=1); writes
              $RESULTS/sweeps/<corpus>_<label>.log. Label `p<P>` for the
              partition-count sweep and `k<K>` for the pivot-width sweep.
@@ -31,7 +35,7 @@ validation's pins, and must be set for any other corpus.
 Environment (defaults): RESULTS (~/structure-results), CORPUS_ROOT
 (/scratch/$USER/corpora), TOKENIZER (olmo for dolmasample, else llama2),
 SCRATCH_ROOTS (/tmp:/tmp2), SA_DIR (/tmp2/$USER-structure/sa: /tmp2 outlives
-the job, unlike /tmp), THREADS, P_TARGET, KEEP_SA (0).
+the job, unlike /tmp), THREADS, P_TARGET, KEEP_SA (0), IO_TRACE (0).
 
 The campaign; BIN_k is a STATS build with -DPIVOT_WORDS=k, i.e. K = 4k tokens:
   E1  for c in dolmasample stackexchange wikipedia arxiv github; do
@@ -57,6 +61,7 @@ CORPUS_ROOT=${CORPUS_ROOT:-/scratch/$USER/corpora}
 SA_DIR=${SA_DIR:-/tmp2/$USER-structure/sa}
 THREADS=${THREADS:-128}
 KEEP_SA=${KEEP_SA:-0}
+IO_TRACE=${IO_TRACE:-0}
 if [ "$CORPUS" = dolmasample ]; then TOK=${TOKENIZER:-olmo}; else TOK=${TOKENIZER:-llama2}; fi
 INPUT=$CORPUS_ROOT/$CORPUS/$CORPUS-$TOK.tokenized.bin
 [ -r "$INPUT" ] || die "no corpus at $INPUT"
@@ -100,6 +105,23 @@ clear_spill()
     for d in "${SPILL[@]}"; do rm -rf "${d:?}"/*; done
 }
 
+# Samples the run that records its PID in `$1.pid`, until it exits: every 0.25 s, the time, the run's /proc/<pid>/io
+# counters, and the length of its log `$1`, as a row of `$1.io.tsv`.
+io_trace()
+{
+    local log=$1 pid k v r w rb wb cw
+    for _ in $(seq 200); do [ -s "$log.pid" ] && break; sleep 0.05; done
+    pid=$(cat "$log.pid" 2>/dev/null) || return 0
+    printf 't\trchar\twchar\tread_bytes\twrite_bytes\tcancelled_write_bytes\tlog_bytes\n' > "$log.io.tsv"
+    while [ -r "/proc/$pid/io" ]; do
+        while read -r k v; do
+            case $k in rchar:) r=$v;; wchar:) w=$v;; read_bytes:) rb=$v;; write_bytes:) wb=$v;; cancelled_write_bytes:) cw=$v;; esac
+        done 2>/dev/null < "/proc/$pid/io" || break
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$EPOCHREALTIME" "$r" "$w" "$rb" "$wb" "$cw" "$(stat -c %s "$log")" >> "$log.io.tsv"
+        sleep 0.25
+    done
+}
+
 
 if [ "$MODE" = full ]; then
     TOOL=$ARG
@@ -114,7 +136,16 @@ if [ "$MODE" = full ]; then
         sidecar "$LOG" "${PINS[*]} $BIN $INPUT $SA"
         echo "[$(date '+%F %T')] $CORPUS: caps_sa_gpu, P_TARGET=$P, $THREADS threads"
         cat "$INPUT" > /dev/null    # Warm the page cache, as the timed runs do.
-        { env "${PINS[@]}" /usr/bin/time "$BIN" "$INPUT" "$SA"; echo "exit: $?"; } > "$LOG" 2>&1
+        RUN=("$BIN" "$INPUT" "$SA")
+        rm -f "$LOG.pid" "$LOG.io.tsv"
+        if [ "$IO_TRACE" = 1 ]; then
+            # The run records its PID for the trace, then becomes `$BIN`.
+            RUN=(bash -c 'echo $$ > "$0.pid"; exec "$@"' "$LOG" "${RUN[@]}")
+            io_trace "$LOG" &
+        fi
+        { env "${PINS[@]}" /usr/bin/time "${RUN[@]}"; echo "exit: $?"; } > "$LOG" 2>&1
+        wait
+        rm -f "$LOG.pid"
         clear_spill
         grep -qx 'exit: 0' "$LOG" || { rm -f "$SA"; die "the run failed; see $LOG"; }
         grep -q '^Partition sizes:' "$LOG" || { rm -f "$SA"; die "$LOG lacks the partitioning lines; is $BIN a STATS build?"; }
