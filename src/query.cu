@@ -87,9 +87,9 @@ R"(Usage:
       every interval with the O(m) certificate on the device, or on the host
       if it searches.
       R, S, and W may be `auto`: the planner picks the first plan that fits
-      the budgets, less a margin: A, both arrays on the device; B, the text on
-      the device and the suffix array pinned; C, both pageable; D, the text
-      pageable and the suffix array mapped. Its table is of stride 32, doubled
+      the budgets, less a margin: A, both arrays on the device; C, both
+      pageable; B, the text on the device and the suffix array pinned; D, the
+      text pageable and the suffix array mapped. Its table is of stride 32, doubled
       until it fits the device memory left, with keys of 2 words (4 for 4-byte
       symbols) if the device searches, else 4; S = auto picks the keys too,
       unless W is set. The budgets are the device's free memory, and the

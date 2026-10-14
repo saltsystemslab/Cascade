@@ -941,10 +941,13 @@ bool Query_Engine<T_sym_>::plan(const Index_Meta& m, const Query_Options& opt, P
     p.device_margin = std::max(MARGIN_MIN_BYTES, p.device_budget / MARGIN_PARTS);
     p.host_margin = std::max(MARGIN_MIN_BYTES, p.host_budget / MARGIN_PARTS);
 
-    // The plans whose tiers agree with those named, in order; or the tiers named, a plan's or not.
+    // The plans whose tiers agree with those named, in order; or the tiers named, a plan's or not. C comes before B: wherever B pins the
+    // suffix array, the host's memory holds it, and the host's cores read it there at random far faster than the device can across the
+    // bus, where each read waits on the translation of a host address; B serves a host whose memory holds the suffix array but not the text
+    // beside it.
     struct Tiers { Plan plan; Residency text_res, sa_res; };
-    static constexpr Tiers plans[] = {{Plan::A, Residency::device, Residency::device}, {Plan::B, Residency::device, Residency::pinned},
-                                      {Plan::C, Residency::pageable, Residency::pageable}, {Plan::D, Residency::pageable, Residency::mapped}};
+    static constexpr Tiers plans[] = {{Plan::A, Residency::device, Residency::device}, {Plan::C, Residency::pageable, Residency::pageable},
+                                      {Plan::B, Residency::device, Residency::pinned}, {Plan::D, Residency::pageable, Residency::mapped}};
     std::vector<Tiers> cand;
     for(const auto& t : plans)
         if((p.auto_text_res || opt.text_res == t.text_res) && (p.auto_sa_res || opt.sa_res == t.sa_res))

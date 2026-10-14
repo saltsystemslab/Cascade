@@ -41,7 +41,8 @@
 // host asks for the pages of a chunk's brackets ahead, while it searches the
 // chunk before, so that their reads overlap it and one another. The planner
 // picks the tiers and the table that a load leaves automatic, from the index's
-// sizes and the memory budgets: the first of the plans A to D that fits.
+// sizes and the memory budgets: the first of the plans A, C, B, and D that
+// fits.
 
 namespace gpu_saca
 {
@@ -101,8 +102,8 @@ struct Query_Options
 
 // The placement of an index that an engine loads: its plan, its tiers, and its
 // sample table, as named in the options or as the planner picks them, and the
-// memory they take, as planned. The planner picks the first plan of A to D
-// whose tiers agree with those named, and that fits both budgets, less their
+// memory they take, as planned. The planner picks the first plan of A, C, B,
+// and D whose tiers agree with those named, and that fits both budgets, less their
 // margins of a sixteenth, and at least 1 GiB; with an automatic table, of
 // stride 32, doubled until it fits the device memory that is left, up to 4096,
 // or while gathered brackets fit their windows, and of 2-word keys (4 for

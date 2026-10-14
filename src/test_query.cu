@@ -726,7 +726,7 @@ bool test_planner()
     const Case cases[] =
     {
         {"dolmasample", 8039098124ull, Plan::A, dev, dev, 32, 2, 4019549072ull},
-        {"arxiv", 30214423492ull, Plan::B, dev, pin, 32, 2, 15107211760ull},
+        {"arxiv", 30214423492ull, Plan::C, pg, pg, 32, 4, 30214423520ull},
         {"github", 63944091504ull, Plan::C, pg, pg, 32, 4, 63944091520ull},
         {"c4", 198079545568ull, Plan::D, pg, map, 128, 4, 49519886400ull},
         {"pile", 238429547834ull, Plan::D, pg, map, 128, 4, 59607386976ull},
@@ -750,12 +750,12 @@ bool test_planner()
     // Over shrinking budgets: the first plan that fits, its tiers named alone fitting, at the least stride that fits; no earlier plan fits,
     // nor the pick at half its stride; and every plan picked, and none past the last.
     struct Tiers { Plan plan; Residency text_res, sa_res; };
-    const Tiers plans[] = {{Plan::A, dev, dev}, {Plan::B, dev, pin}, {Plan::C, pg, pg}, {Plan::D, pg, map}};
+    const Tiers plans[] = {{Plan::A, dev, dev}, {Plan::C, pg, pg}, {Plan::B, dev, pin}, {Plan::D, pg, map}};
     const Index_Meta m = sized_meta(4000000000ull, 2, path);    // A text of 8 GB, a suffix array of 20 GB.
     std::set<Plan> seen;
     int none = 0;
     for(idx_t d = idx_t(1) << 30; d <= idx_t(48) << 30; d += idx_t(1) << 29)
-        for(const idx_t h : {idx_t(8) << 30, idx_t(16) << 30, idx_t(24) << 30, idx_t(30) << 30, idx_t(40) << 30})
+        for(const idx_t h : {idx_t(8) << 30, idx_t(16) << 30, idx_t(24) << 30, idx_t(27) << 30, idx_t(30) << 30, idx_t(40) << 30})    // 27 GiB: B's.
         {
             const bool ok = P::plan(m, auto_options(d, h), p, err);
             const std::string what = "device " + std::to_string(d) + ", host " + std::to_string(h);
@@ -798,14 +798,14 @@ bool test_planner()
     // The edge of a fit: the least device budget for A at stride 32 holds its bytes and its margin; a byte less does not, and picks the
     // next stride. Likewise with the tiers and the table named.
     const auto least = [&](const Index_Meta& x, const std::function<bool(const Placement&)>& want, idx_t lo, idx_t hi,
-                           const Query_Options& o = auto_options())
+                           const Query_Options& o = auto_options(), const idx_t host = 0)  // `0`: the node's host memory.
     {
         while(lo < hi)
         {
             const idx_t mid = lo + (hi - lo) / 2;
             Query_Options om = o;
             om.device_budget = mid;
-            om.host_budget = node_host;
+            om.host_budget = (host != 0 ? host : node_host);
             Placement q;
             if(P::plan(x, om, q, err) && want(q))
                 hi = mid;
@@ -833,12 +833,17 @@ bool test_planner()
         CHECK(P::plan(m, o, p, err) && !p.fits && p.device_bytes == a32, "a byte below the edge of A at stride 32 named fits");
     }
 
-    // Gathered brackets fit their windows at strides up to 128: past the least budget for B, the pick is C, though B at stride 256 would fit.
+    // B, on a host whose memory holds the suffix array but not the text beside it, so that C does not fit. Gathered brackets fit their
+    // windows at strides up to 128: past the least device budget for B, the pick is D, though B at stride 256 would fit.
     const Index_Meta arxiv = sized_meta(30214423492ull, 2, path);
-    const idx_t b_edge = least(arxiv, [](const Placement& q) { return q.plan == Plan::A || q.plan == Plan::B; }, idx_t(1) << 30, idx_t(1) << 40);
-    CHECK(P::plan(arxiv, auto_options(b_edge, node_host), p, err) && p.plan == Plan::B && p.stride == 128, "the edge of B: plan %s at stride %" PRIu64,
+    const idx_t b_host = idx_t(200) << 30;
+    CHECK(P::plan(arxiv, auto_options(node_dev, b_host), p, err) && p.plan == Plan::B && p.stride == 32 && p.key_words == 2,
+          "arxiv on a host of 200 GiB: plan %s at stride %" PRIu64, plan_name(p.plan), p.stride);
+    const idx_t b_edge = least(arxiv, [](const Placement& q) { return q.plan == Plan::A || q.plan == Plan::B; }, idx_t(1) << 30, idx_t(1) << 40,
+                               auto_options(), b_host);
+    CHECK(P::plan(arxiv, auto_options(b_edge, b_host), p, err) && p.plan == Plan::B && p.stride == 128, "the edge of B: plan %s at stride %" PRIu64,
           plan_name(p.plan), p.stride);
-    CHECK(P::plan(arxiv, auto_options(b_edge - 1, node_host), p, err) && p.plan == Plan::C, "below the edge of B: plan %s", plan_name(p.plan));
+    CHECK(P::plan(arxiv, auto_options(b_edge - 1, b_host), p, err) && p.plan == Plan::D, "below the edge of B: plan %s", plan_name(p.plan));
     Placement q;
     CHECK(P::plan(arxiv, with_tiers(auto_options(b_edge - 1, node_host), dev, pin), q, err) == false
           && P::plan(arxiv, [&] { auto o = with_tiers(auto_options(b_edge - 1, node_host), dev, pin); o.stride = 128; o.key_words = 2; return o; }(), q, err)
@@ -883,9 +888,11 @@ bool test_planner()
         o.gather = Gather::always;
         CHECK(!P::plan(github, o, p, err), "github fits no plan that gathers its brackets");
         o.gather = Gather::never;
-        CHECK(P::plan(arxiv, o, p, err) && p.plan == Plan::B && !p.gather && p.chunk_queries == (idx_t(1) << 18), "arxiv, not gathering: %s", err.c_str());
+        CHECK(P::plan(arxiv, o, p, err) && p.plan == Plan::C && !p.gather, "arxiv, not gathering: %s", err.c_str());
+        CHECK(P::plan(arxiv, with_tiers(o, dev, pin), p, err) && p.plan == Plan::B && !p.gather && p.chunk_queries == (idx_t(1) << 18),
+              "arxiv in B, not gathering: %s", err.c_str());
         const idx_t ungathered = p.device_bytes;
-        CHECK(P::plan(arxiv, node, p, err) && p.gather && p.device_bytes > ungathered, "gathers take device memory");
+        CHECK(P::plan(arxiv, with_tiers(node, dev, pin), p, err) && p.gather && p.device_bytes > ungathered, "gathers take device memory");
         o = node;
         o.chunk_queries = idx_t(1) << 20;
         CHECK(P::plan(dolma, o, p, err) && p.plan == Plan::A && p.chunk_queries == (idx_t(1) << 20), "dolmasample, larger chunks: %s", err.c_str());
