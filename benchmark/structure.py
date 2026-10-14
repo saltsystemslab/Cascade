@@ -11,8 +11,9 @@ log exactly. The logs after `--sweep` are partition-only runs (with
 `GPU_SACA_PARTITION_ONLY=1`), named `<corpus>_<label>.log`: the labels `p...`
 form the partition-count sweep, and `k<K>` the pivot-width sweep. The logs after
 `--filtered` are runs with the liveness filter, named `<corpus>_<rep>.log`, one
-per replicate; the `<corpus>.structure.json` next to them is `sa_structure`'s
-output for their partitioning, whose unfiltered messages they are held against.
+per replicate, each partitioned as its corpus' run; the `<corpus>.structure.json`
+next to them is `sa_structure`'s output for that partitioning, whose unfiltered
+messages they are held against.
 
 Writes pgfplots-ready TSVs into <out-dir>, with `nan` for what is unavailable:
     decay.tsv           the active set after each generation: the repeat-depth
@@ -30,7 +31,7 @@ Writes pgfplots-ready TSVs into <out-dir>, with `nan` for what is unavailable:
     partition_sizes.tsv each partition's size over B, for CDFs
     datasets.tsv        one row per corpus; also typeset as datasets.tex
     budget.tsv          each corpus' messages per suffix, live and dead, in order of E[d],
-                        and the dead ones the liveness filter skips
+                        and the dead ones the liveness filter skips and still sends
     filter.tsv          each generation's messages with the liveness filter, over the
                         replicates, against the unfiltered and the live ones
     kgram.tsv           each corpus' heaviest K-gram for every K, against its run's size
@@ -365,8 +366,8 @@ def ablation(corpus, reps, tool):
     lies between |A^(g-1)| and the unfiltered M_g, which the tool predicts
     exactly. Whether a recipient that retires in its sender's generation is
     marked in time depends on the pipeline's timing, so the replicates differ
-    slightly; the rows give their mean and range. The summary is per suffix, so
-    it holds for an unfiltered run of a slightly different partitioning too.
+    slightly; the rows give their mean and range. The summary is per suffix:
+    what the filter skips and what it still sends, from generation 0 and later.
     """
     n, retire, pay, fwd = tool["n"], tool["retire_hist"], tool["payloads"], tool["forwards"]
     D = len(retire) - 1
@@ -398,7 +399,9 @@ def ablation(corpus, reps, tool):
     U, F, A = sum(unf), sum(row["filtered"] for row in rows), sum(active)
     summary = {"reps": len(inboxes), "skipped0": (unf[0] - rows[0]["filtered"]) / n,
                "skipped_later": (U - unf[0] - F + rows[0]["filtered"]) / n,
-               "msg_cut": 1 - F / U, "dead_cut": (U - F) / (U - A)}
+               "msg_cut": 1 - F / U, "dead_cut": (U - F) / (U - A),
+               "sent": F / n, "amp_sent": F / A, "dead0_sent": (rows[0]["filtered"] - active[0]) / n,
+               "dead_later_sent": (F - rows[0]["filtered"] - A + active[0]) / n}
     return rows, summary, fails
 
 
@@ -459,7 +462,9 @@ def write_tex(path, rows):
     Waste is the share of messages dropped at the join, 1 - A/M; Pills is the
     forwarded-pill stream over the logged payloads, exact with the tool and
     bracketed from below otherwise; Flood is generation 1's share of M; and Skew
-    is the work-weighted max / mean of the per-partition active-set sizes.
+    is the work-weighted max / mean of the per-partition active-set sizes. Sent
+    is the messages per suffix that the liveness filter lets through, given its
+    runs.
 
     delta_max is exact with the tool, and only bracketed by a log otherwise: the
     last generation's cohort A^(G-1) is non-empty, so some lcp is at least
@@ -469,10 +474,10 @@ def write_tex(path, rows):
     def pct(x):
         return f"{100 * x:.1f}\\%"
 
-    lines = [r"\begin{tabular}{lrrrrrcrrrrr}",
+    lines = [r"\begin{tabular}{lrrrrrcrrrrrr}",
              r"\toprule",
              r"Corpus & $n$ ($10^9$) & $p$ & $G$ & $|\mathcal{A}^{(0)}|/n$ & $\mathrm{E}[d]$ & $\delta_{\max}$"
-             r" & $M/A$ & Waste & Pills & Flood & Skew \\",
+             r" & $M/A$ & Waste & Pills & Flood & Skew & Sent \\",
              r"\midrule"]
     for s in rows:
         exact = s["depth_max"] == s["depth_max"]
@@ -481,9 +486,10 @@ def write_tex(path, rows):
         pills = s["pill_ovh_exact"] if exact else s["pill_ovh"]
         skew = f"{s['skew_work']:.2f}" if s["skew_work"] == s["skew_work"] else "--"
         p = str(s["p"]) if s["p"] == s["p"] else "--"
+        sent = f"{s['sent']:.2f}" if "sent" in s else "--"
         lines.append(" & ".join([s["corpus"].replace("_", r"\_"), f"{s['n'] / 1e9:.2f}", p, str(s["G"]),
                                  pct(s["surv0"]), f"{s['Ed']:.3f}", depth, f"{s['amp_run']:.2f}", pct(s["waste"]),
-                                 pct(pills), pct(s["flood_share"]), skew]) + r" \\")
+                                 pct(pills), pct(s["flood_share"]), skew, sent]) + r" \\")
     lines += [r"\bottomrule", r"\end{tabular}"]
     path.write_text("\n".join(lines) + "\n")
 
@@ -496,9 +502,9 @@ SKEW = ["corpus", "label", "feasible", "K", "ell", "n", "p", "p_min", "floor", "
         "mean_full_B", "min_full_B", "q05_B", "q50_B", "q95_B", "fill", "env_B", "fmax_B"]
 DATASETS = ["corpus", "n", "p", "ell", "G", "surv0", "Ed", "depth_lo", "depth_hi", "amp_run", "waste", "pill_ovh",
             "flood_share", "flood_waste", "K", "depth_max", "pill_ovh_exact", "skew_work", "max_B",
-            "msg_cut", "dead_cut", "fmax", "fmax_B"]
+            "msg_cut", "dead_cut", "sent", "amp_sent", "fmax", "fmax_B"]
 BUDGET = ["corpus", "Ed", "live", "dead0", "dead_surv", "dead_pill", "total", "amp_run",    # Messages per suffix.
-          "skipped0", "skipped_later"]
+          "skipped0", "skipped_later", "sent", "amp_sent", "dead0_sent", "dead_later_sent"]
 FILTER = ["corpus", "g", "live", "unfiltered", "filtered", "filtered_lo", "filtered_hi", "skipped_dead"]
 
 
@@ -567,6 +573,9 @@ def main(argv):
             fails.append(f"{corpus}: no {path.name} next to its filtered runs")
             continue
         tool = json.loads(path.read_text())
+        run = next((r for r in runs if r["name"] == corpus), None)
+        fails += [f"{rep['name']}: its partition sizes differ from those of {corpus}'s run"
+                  for rep in reps if run and rep["sizes"] != run["sizes"]]
         rows, summ, bad = ablation(corpus, reps, tool)
         fails += bad
         if tool.get("kgram_max"):
@@ -608,7 +617,8 @@ def main(argv):
                                                               if row["feasible"] else "infeasible")
                for row in skew if row["label"] != "full"]
     report += [f"filtered {c}: {s['reps']} replicate(s); {100 * s['msg_cut']:.1f}% of the messages skipped,"
-               f" {100 * s['dead_cut']:.1f}% of the dead ones" for c, s in sorted(filt_sum.items())]
+               f" {100 * s['dead_cut']:.1f}% of the dead ones; {s['sent']:.3f} sent per suffix"
+               for c, s in sorted(filt_sum.items())]
     report += [f"heaviest {s['K']}-gram of {s['corpus']}: {s['fmax']}, {100 * s['fmax_B']:.2f}% of B"
                for s in sorted((r["summary"] for r in runs), key=lambda s: s["n"]) if "fmax" in s]
     report += [f"FAIL {x}" for x in fails]
