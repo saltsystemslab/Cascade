@@ -66,6 +66,7 @@ private:
     const std::string ip_path_; // Filesystem path the input text.
     inline static const idx_t TEXT_READER_C = env::get_u64("GPU_SACA_TEXT_READER_C").value_or(16);  // Threads reading the text in parallel.
     const std::string op_path_; // Filesystem path to output the suffix array to.
+    inline static const bool DIRECT_OUTPUT = env::get_u64("GPU_SACA_DIRECT_OUTPUT").value_or(1) != 0;   // Whether the output bypasses the page-cache.
 
     p_id_t p_;  // Number of partitions for the SA.
 

@@ -2189,7 +2189,7 @@ void GPU_SACA<T_sym_>::concatenate_partitions(const std::string& op)
     const auto dump = !op.empty();
     std::unique_ptr<Output_File> op_file;
     if(dump)
-        op_file = std::make_unique<Output_File>(op, lane::bytes(n_));
+        op_file = std::make_unique<Output_File>(op, lane::bytes(n_), DIRECT_OUTPUT);
 
 
     idx_t total_chunk = 0;  // Total count of chunks across all partitions.
