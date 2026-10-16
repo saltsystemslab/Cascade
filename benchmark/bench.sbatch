@@ -25,6 +25,7 @@
 #   GPU_SACA_SCRATCH   colon-separated scratch roots, required by --ours
 #   MODULES            module names to load in-job   (default none)
 #   BUILD_IN_JOB       compile the baselines in-job  (default 1; see below)
+#   RESET              reset memory before every run (default 0; see below)
 #
 # `sbatch` exports the submitting environment by default, so sourcing local.env
 # in your shell covers both the SBATCH_* directives and the in-job variables.
@@ -154,6 +155,16 @@ if [ "${BUILD_IN_JOB:-1}" = 1 ]; then
         || { echo "FATAL: build failed."; exit 1; }
 fi
 
+# RESET=1 touches and frees all of the available memory before every run
+# (benchmark/reset_memory), so that each starts from the same memory state,
+# whatever ran before it. Built here, per job, for this node.
+RESET_BIN=""
+if [ "${RESET:-0}" = 1 ]; then
+    RESET_BIN="/tmp/reset_memory-${SLURM_JOB_ID:-$$}"
+    g++ -std=c++17 -O2 -fopenmp -I "${REPO}/benchmark" "${REPO}/benchmark/reset_memory.cpp" -o "${RESET_BIN}" \
+        || { echo "FATAL: cannot build reset_memory"; exit 1; }
+fi
+
 # Nothing else is set for the runs. libsais needs OMP_DYNAMIC off, but that is
 # enforced where it belongs: bench_libsais refuses when omp_get_dynamic() != 0
 # and writes a bad_param record, so a silently-serial run is impossible without
@@ -244,6 +255,7 @@ run()
     local log="${RESULTS}/${id}.log"
 
     echo "=== ${id}"
+    [ -z "${RESET_BIN}" ] || "${RESET_BIN}"
     local t0=${SECONDS}
     "${cmd[@]}" > "${log}" 2>&1
     echo "    wall $(( SECONDS - t0 ))s   log $(basename "${log}")"

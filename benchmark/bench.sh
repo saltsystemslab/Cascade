@@ -133,6 +133,7 @@ echo "methods    ${ALL_METHODS[*]}${OURS_TAG:+  (gpu_saca @ ${OURS_TAG})}"
 echo "reps       ${REPS}"
 echo "threads    ${THREADS:-all cores on the node}"
 echo "placement  ${NUMACTL:+numactl ${NUMACTL}}${NUMACTL:-default}"
+echo "reset      $([ "${RESET:-0}" = 1 ] && echo "memory, before every run" || echo off)"
 echo "results    ${RESULTS}"
 echo
 printf '%-16s %10s %14s\n' corpus bytes "n (tokens)"
