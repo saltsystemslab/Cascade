@@ -135,8 +135,8 @@ fi
 # the split is: configure wherever there is network, compile here.
 #
 # Building in-job also guarantees the commit stamped into the binary is the one
-# that actually built it.
-if [ "${BUILD_IN_JOB:-1}" = 1 ]; then
+# that actually built it. A campaign of our method alone needs neither.
+if [ "${BUILD_IN_JOB:-1}" = 1 ] && [ -n "${METHOD_LIST[*]-}" ]; then
     if [ ! -f "${BUILD}/CMakeCache.txt" ]; then
         echo "No ${BUILD}/CMakeCache.txt -- configuring here. This needs network;"
         echo "if this node has none, run it on a login node first and resubmit:"
@@ -181,9 +181,11 @@ printf 'results  %s\nhost     %s   job %s\n' \
 # unnoticed. Observability, not policy -- nothing here sets anything.
 env | grep -E '^(OMP_|GPU_SACA_)' | sort | sed 's/^/env      /' || true
 
-for b in "${SAIS}" "${CUBWT}"; do
-    [ -x "${b}" ] || { echo "FATAL: ${b} not built; configure -DBENCHMARK=ON first."; exit 1; }
-done
+if [ -n "${METHOD_LIST[*]-}" ]; then
+    for b in "${SAIS}" "${CUBWT}"; do
+        [ -x "${b}" ] || { echo "FATAL: ${b} not built; configure -DBENCHMARK=ON first."; exit 1; }
+    done
+fi
 
 corpus_path() { echo "${CORPUS_ROOT}/$1/$1-${TOKENIZER}.tokenized.bin"; }
 
