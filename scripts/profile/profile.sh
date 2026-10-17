@@ -7,7 +7,7 @@ READER_C=24
 SCRATCH=/tmp:/tmp2
 # P_TARGET=3
 
-driver=/home/${USER}/GPU-Suffix-Array/build/src/caps_sa_gpu
+driver=/home/${USER}/GPU-Suffix-Array/build/src/cascade
 input=${1}
 output=/tmp/SA.bin
 nsys_log=${2}

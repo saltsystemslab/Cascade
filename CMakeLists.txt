@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.17)
 
 
 # Name the project, its version, and languages used in it.
-set(PROJECT_NAME caps_sa_gpu)
+set(PROJECT_NAME cascade)
 project(${PROJECT_NAME}
         VERSION 0.0.1
         LANGUAGES CUDA CXX C

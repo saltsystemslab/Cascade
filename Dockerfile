@@ -1,4 +1,4 @@
-# Compile-check container for GPU-Suffix-Array (caps_sa_gpu).
+# Compile-check container for GPU-Suffix-Array (cascade).
 #
 # Targets linux/amd64 for CUDA toolchain compatibility (runs under emulation on
 # Apple Silicon). No GPU is required: this image only verifies that the project

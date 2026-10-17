@@ -4,7 +4,7 @@
     structure.py <out-dir> <corpus>.log... [--sweep <corpus>_<label>.log...]
                  [--filtered <corpus>_<rep>.log...]
 
-Each run log is a `caps_sa_gpu` STATS run of one corpus, and is named after it.
+Each run log is a `cascade` STATS run of one corpus, and is named after it.
 A `<corpus>.structure.json` next to it is `sa_structure`'s output for that run:
 it adds the repeat-depth, look-back and run statistics, each checked against the
 log exactly. The logs after `--sweep` are partition-only runs (with
@@ -77,7 +77,7 @@ NAN = float("nan")
 
 
 def parse(path):
-    """Returns what the `caps_sa_gpu` log at `path` reports; `None` if it is not one."""
+    """Returns what the `cascade` log at `path` reports; `None` if it is not one."""
     txt = path.read_text(errors="replace")
     n = RE_N.search(txt)
     if not n:

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Structural-statistics runs of `caps_sa_gpu`, for `structure.py`. One run per
+# Structural-statistics runs of `cascade`, for `structure.py`. One run per
 # invocation, on the node with the GPU and the local scratch; e.g. inside an
 # allocation, through `srun --jobid=<id> --overlap`.
 
@@ -9,8 +9,8 @@ set -uo pipefail
 usage()
 {
     cat <<'EOF'
-Usage: benchmark/structure.sh full <corpus> <caps_sa_gpu> <sa_structure>
-       benchmark/structure.sh partition <corpus> <caps_sa_gpu> <label>
+Usage: benchmark/structure.sh full <corpus> <cascade> <sa_structure>
+       benchmark/structure.sh partition <corpus> <cascade> <label>
 
   full       a pinned run with its SA kept on $SA_DIR, then `sa_structure` on
              that SA; writes $RESULTS/runs/<corpus>.log and .structure.json,
@@ -134,7 +134,7 @@ if [ "$MODE" = full ]; then
         echo "reusing the run in $LOG and its SA"
     else
         sidecar "$LOG" "${PINS[*]} $BIN $INPUT $SA"
-        echo "[$(date '+%F %T')] $CORPUS: caps_sa_gpu, P_TARGET=$P, $THREADS threads"
+        echo "[$(date '+%F %T')] $CORPUS: cascade, P_TARGET=$P, $THREADS threads"
         cat "$INPUT" > /dev/null    # Warm the page cache, as the timed runs do.
         RUN=("$BIN" "$INPUT" "$SA")
         rm -f "$LOG.pid" "$LOG.io.tsv"

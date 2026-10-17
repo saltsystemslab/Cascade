@@ -1,10 +1,10 @@
 
-// Structural statistics of a text, from its suffix array and the STATS log of a `caps_sa_gpu` run over it:
+// Structural statistics of a text, from its suffix array and the STATS log of a `cascade` run over it:
 //
 //     sa_structure <text-file> <suffix-array-file> <run-log> <output-json>
 //
 // The text has `uint16_t` symbols and the suffix array indices of 8 or 5 bytes, per its size, both little-endian, as
-// `caps_sa_gpu` reads and writes them. The log supplies the run's `ell`, `K` and partition-sizes, and with those its
+// `cascade` reads and writes them. The log supplies the run's `ell`, `K` and partition-sizes, and with those its
 // partition-ID map `Π`.
 //
 // With `c_t = ell 2^t` and `K <= ell`, the suffix `j` is active after generation `t` iff some other suffix `j'` has
@@ -49,7 +49,7 @@ namespace
 {
 
 using gpu_saca::idx_t;
-using sym_t = uint16_t; // Symbol type of the texts, as `caps_sa_gpu` reads them.
+using sym_t = uint16_t; // Symbol type of the texts, as `cascade` reads them.
 
 static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__, "the word-wise lcp and the file formats assume little-endian");
 
@@ -67,7 +67,7 @@ constexpr uint8_t UNSET = 0xFF; // Retirement generation of a text-position the 
 }
 
 
-// Configuration of a `caps_sa_gpu` run, as its STATS log reports it.
+// Configuration of a `cascade` run, as its STATS log reports it.
 struct Run_Config
 {
     idx_t ell = 0;  // Context-size resolved at generation 0.
