@@ -60,8 +60,8 @@
 #                   time (see stage.sh). With our suffix array mapped, a failed
 #                   staging ends the job
 #   TM_KEEP_STAGE   1 keeps the staged copies for later runs; by default the job
-#                   deletes them when it ends, as Explorer's epilog does anyway
-#                   for /tmp after the user's last job on the node
+#                   deletes them when it ends, as a site's epilog may anyway for
+#                   /tmp after the user's last job on the node
 #   TM_TEXT_STAGE   node-local directory to stage the text in, apart from the
 #                   rest: our index's, and infini-gram's token array, linked to
 #                   it if the same file; default with our index
