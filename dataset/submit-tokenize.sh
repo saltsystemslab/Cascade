@@ -17,6 +17,11 @@
 #   TIME      walltime per task               (default 04:00:00)
 #   PART      Slurm partition                 (default short)
 #   PYTHON    interpreter for the tasks       (default: the python3 active at submit)
+#   BATCH     documents per tokenizer call    (default 1000; use ~100 for corpora
+#                                              with very long documents, e.g. arxiv)
+#   DEPEND    afterok:<jobid> to chain on     (unset)
+#   ARRAY_SPEC  which shard ids to submit     (default 0-(N-1)); e.g. "302,380"
+#                                              to redo just those, keeping N the same
 #
 # N need not match the file count: with striding, each task just handles
 # ceil(files/N) files. Pick N for how much parallelism you want, not per file.
@@ -39,12 +44,34 @@ PYTHON="${PYTHON:-$(command -v python3 || true)}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/tokenize.sbatch"
 EXPORTS="INPUT_DIR=$INPUT_DIR,OUT=$OUT,TOKENIZER=$TOKENIZER,GLOB=$GLOB,N=$N,TOK_DIR=$SCRIPT_DIR,PYTHON=$PYTHON"
+# BATCH: documents per tokenizer call. Lower it for long-document corpora --
+# arxiv at ~18,000 tokens/doc SIGKILLed two shards at the default 1000 with
+# --mem=8G, because a batch holds every id AND attention_mask as a Python int.
+# BATCH=100 cuts that peak ~10x at negligible throughput cost.
+[ -n "${BATCH:-}" ] && EXPORTS="$EXPORTS,BATCH=$BATCH"
+# DEPEND lets a whole corpus chain unattended (see submit-verify.sh).
+DEPEND="${DEPEND:-}"
+DEPFLAG=""
+[ -n "$DEPEND" ] && DEPFLAG="--dependency=$DEPEND"
 
-phase1=$(sbatch --parsable \
-    --partition="$PART" --array="0-$((N - 1))" \
+# ARRAY_SPEC restricts which shard ids are submitted, without changing N. Work is
+# assigned by `i % N == shard_id`, so N must stay identical to the original run or
+# the indices refer to different files -- only the SET of tasks submitted changes.
+#
+# This is for resuming a handful of failed shards. Re-running the whole array also
+# works (completed parts are skipped in ~2 s), but every skip still queues,
+# allocates, starts python and reads the file list: redoing 2 of 510 that way
+# burns 508 scheduling slots and, on a busy cluster, delays the concat by longer
+# than the real work takes.
+#
+#   ARRAY_SPEC=302,380 N=510 ... ./submit-tokenize.sh
+ARRAY_SPEC="${ARRAY_SPEC:-0-$((N - 1))}"
+
+phase1=$(sbatch --parsable $DEPFLAG \
+    --partition="$PART" --array="$ARRAY_SPEC" \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
-echo "Phase 1 (tokenize): array job $phase1  ($N tasks x 1 CPU)"
+echo "Phase 1 (tokenize): array job $phase1  (array $ARRAY_SPEC over N=$N, 1 CPU each)"
 
 phase2=$(sbatch --parsable \
     --partition="$PART" \
