@@ -60,6 +60,22 @@ set_target_properties(libcubwt PROPERTIES
     CUDA_ARCHITECTURES         ${CUDA_ARCH})
 
 
+# ======== infini-gram: the query baseline ========
+#
+# Its engine is the header `pkg/infini_gram/cpp_engine.h`, compiled unmodified.
+# Offline: -DFETCHCONTENT_SOURCE_DIR_INFINIGRAM=/path/to/infini-gram
+set(INFINIGRAM_VERSION "2.6.0")
+
+FetchContent_Declare(infinigram
+    GIT_REPOSITORY https://github.com/liujch1998/infini-gram.git
+    GIT_TAG        9567c3d7cad09a9750bc288bcce6f63adb768390  # v${INFINIGRAM_VERSION}
+)
+
+FetchContent_MakeAvailable(infinigram)  # Upstream ships no CMakeLists.txt: this only fetches.
+
+find_package(Threads REQUIRED)
+
+
 # Provenance (BENCH_COMMIT) is computed once at the root, so that our method's
 # driver (in `src/`) carries the same stamp as the baselines here.
 
@@ -85,4 +101,12 @@ target_link_libraries(bench_libsais PRIVATE bench_settings libsais OpenMP::OpenM
 add_executable(bench_libcubwt bench_libcubwt.cpp)
 target_link_libraries(bench_libcubwt PRIVATE bench_settings libcubwt CUDA::cudart)
 
-install(TARGETS bench_libsais bench_libcubwt DESTINATION bin)
+# The engine needs C++20; its header is a system include, so that its warnings
+# stay out of our builds.
+add_executable(bench_infinigram_query bench_infinigram_query.cpp)
+target_include_directories(bench_infinigram_query PRIVATE ${INCLUDE_DIR})
+target_include_directories(bench_infinigram_query SYSTEM PRIVATE ${infinigram_SOURCE_DIR}/pkg/infini_gram)
+target_link_libraries(bench_infinigram_query PRIVATE bench_settings Threads::Threads)
+set_target_properties(bench_infinigram_query PROPERTIES CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+install(TARGETS bench_libsais bench_libcubwt bench_infinigram_query DESTINATION bin)

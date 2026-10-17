@@ -231,6 +231,7 @@ set(BENCH_PROVENANCE
 # Add required subdirectories to the build.
 add_subdirectory(src)
 add_subdirectory(test)
+add_subdirectory(tools)
 
 # The harness vendors its baselines and creates its targets at configure-time,
 # and needs to be excluded from core build.
@@ -246,12 +247,18 @@ set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET bench_gpu_saca  PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET test_query      PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET query_core      PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET query           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET bench_gpu_saca  PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET test_query      PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET query_core      PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET query           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
 # Define dependencies between the targets.
@@ -272,6 +279,12 @@ target_compile_options(bench_gpu_saca PRIVATE ${COMPILE_FLAGS})
 target_compile_definitions(bench_gpu_saca PRIVATE ${BENCH_PROVENANCE})
 target_compile_options(bench_gpu_saca PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)   # `nvcc` does not recognize OpenMP directives.
 target_compile_options(sa_structure PRIVATE ${COMPILE_FLAGS})
+target_compile_options(sa_convert PRIVATE ${COMPILE_FLAGS})
+target_compile_options(test_query PRIVATE ${COMPILE_FLAGS})
+target_compile_options(test_query PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
+target_compile_options(query_core PRIVATE ${COMPILE_FLAGS})
+target_compile_options(query_core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
+target_compile_options(query PRIVATE ${COMPILE_FLAGS})
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
 # `nvcc` does not recognize OpenMP directives.
@@ -287,10 +300,12 @@ target_link_libraries(core PRIVATE ZLIB::ZLIB)
 # Link to CUDA runtime.
 target_link_libraries(core PRIVATE CUDA::cudart)
 target_link_libraries(tests PRIVATE CUDA::cudart)
+target_link_libraries(query_core PRIVATE CUDA::cudart)
 
 # Link to OpenMP for host-side parallel tasks.
 target_link_libraries(core PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(tests PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(query_core PRIVATE OpenMP::OpenMP_CXX)
 
 # Link to the tester.
 target_link_libraries(core PRIVATE tests)
@@ -299,6 +314,9 @@ target_link_libraries(core PRIVATE tests)
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
 target_link_libraries(bench_gpu_saca PRIVATE core OpenMP::OpenMP_CXX)
 target_link_libraries(sa_structure PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(sa_convert PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(test_query PRIVATE tests query_core OpenMP::OpenMP_CXX)
+target_link_libraries(query PRIVATE query_core)
 
 # Link the tester.
 target_link_libraries(test PRIVATE core)
@@ -310,6 +328,10 @@ target_link_libraries(core PRIVATE ${LINK_FLAGS})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${LINK_FLAGS})
 target_link_libraries(test PRIVATE ${LINK_FLAGS})
+target_link_libraries(sa_convert PRIVATE ${LINK_FLAGS})
+target_link_libraries(test_query PRIVATE ${LINK_FLAGS})
+target_link_libraries(query_core PRIVATE ${LINK_FLAGS})
+target_link_libraries(query PRIVATE ${LINK_FLAGS})
 
 
 # Set the installation directory. The parent directory is `/usr/local/` by default, and the

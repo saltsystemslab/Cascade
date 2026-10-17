@@ -38,6 +38,11 @@ add_executable(bench_gpu_saca bench_gpu_saca.cu)
 # run's log. Host-only, independent of `core`.
 add_executable(sa_structure sa_structure.cpp)
 
+# Query engine.
+add_library(query_core STATIC Suffix_Index.cu Sample_Table.cu Query_Engine.cu Host_Search.cpp)
+add_executable(query query.cu)
+add_executable(test_query test_query.cu)
+
 
 # Set the include directories for the targets.
 
@@ -47,3 +52,6 @@ target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE}
 target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})
 target_include_directories(bench_gpu_saca PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 target_include_directories(sa_structure PRIVATE ${INCLUDE_DIR})
+target_include_directories(query_core PRIVATE ${INCLUDE_DIR})
+target_include_directories(query PRIVATE ${INCLUDE_DIR})
+target_include_directories(test_query PRIVATE ${INCLUDE_DIR} ${TESTS_INCLUDE})
