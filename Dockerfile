@@ -11,7 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # Standard build toolchain plus the project's host-side dependencies:
 #   - build-essential / g++  : C/C++ host compiler
-#   - cmake                  : build system (>= 3.17 required; 22.04 ships 3.22)
+#   - cmake                  : build system (>= 3.22 required; 22.04 ships 3.22)
 #   - libgomp1 / libomp-dev  : OpenMP runtime + headers (find_package(OpenMP))
 #   - git / wget / ca-certs  : fetching sources and CCCL headers
 RUN apt-get update && apt-get install -y --no-install-recommends \

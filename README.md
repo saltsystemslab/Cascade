@@ -47,7 +47,7 @@ The [paper](https://arxiv.org/abs/2610.15254) has the details and the proofs.
   The default build targets compute capability 12.0, such as the RTX PRO 6000 Blackwell we evaluate on.
   Set `CUDA_ARCH` for other GPUs (see below).
 - CUDA 12.8, which bundles CCCL 2.7, and GCC 11: the versions we build with.
-- CMake 3.18 or newer and OpenMP.
+- CMake 3.22 or newer and OpenMP.
 - Host memory for the text: 2 bytes per token.
 - Node-local NVMe drives for the spills, on a filesystem supporting `O_DIRECT` and `fallocate`, such as XFS or ext4.
   Room required for the output  is 5 bytes per token.

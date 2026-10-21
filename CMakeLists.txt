@@ -3,7 +3,7 @@
 
 # Specify the minimum version of CMake to use.
 # CMake can have different behaviors (policies) based on its version used.
-cmake_minimum_required(VERSION 3.17)
+cmake_minimum_required(VERSION 3.22)
 
 
 # Name the project, its version, and languages used in it.
@@ -26,28 +26,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 
-# Fix minimum compiler versions.
-set(GCC_VERSION_MIN "9.1")
-set(CLANG_VERSION_MIN "9.0")
-
-if(CLANG)
-    set(CMAKE_C_COMPILER clang)
-    set(CMAKE_CXX_COMPILER clang++)
-    # set(CMAKE_LINKER_TYPE LLD)
-endif()
-
 
 # Bundle the warning flags that we want to pass on to the compiler.
 # Reference: https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html
 set(WARNING_FLAGS -Wall -Wextra) #-Wpedantic)
 set(SUPPRESS_WARNING_FLAGS -Wno-unused-function -Wno-unknown-pragmas)
-
-# Warning flags to be suppressed with clang.
-set(CLANG_SUPPRESS_WARNING_FLAGS "")
-
-if(CLANG)
-    list(APPEND SUPPRESS_WARNING_FLAGS ${CLANG_SUPPRESS_WARNING_FLAGS})
-endif()
 
 # Bundle debugging information flags that we want to conditionally
 # pass on to the compiler.
@@ -120,9 +103,6 @@ endif()
 # better code analysis.
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # Better `clangd` scan.
 
-
-# Set path for modules required to search for existing packages in the system.
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
 
 # Turn on position-independent code, if static libraries are used in the linked
 # dynamic libraries, then without PIC the build may fail.
