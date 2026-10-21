@@ -13,7 +13,6 @@ ENV DEBIAN_FRONTEND=noninteractive
 #   - build-essential / g++  : C/C++ host compiler
 #   - cmake                  : build system (>= 3.17 required; 22.04 ships 3.22)
 #   - libgomp1 / libomp-dev  : OpenMP runtime + headers (find_package(OpenMP))
-#   - zlib1g-dev             : zlib for gzip support via kseq (find_package(ZLIB))
 #   - git / wget / ca-certs  : fetching sources and CCCL headers
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
@@ -22,7 +21,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ninja-build \
         libgomp1 \
         libomp-dev \
-        zlib1g-dev \
         git \
         wget \
         ca-certificates \

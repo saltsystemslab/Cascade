@@ -138,10 +138,6 @@ find_package(CUDAToolkit REQUIRED)
 # Search and load the `OpenMP` runtime libraries; required for testing purposes.
 find_package(OpenMP REQUIRED)
 
-# Search and load setting for the `zlib` library. The library is required to seamlessly adapt
-# the `kseq` library to gzip-compressed files.
-find_package(ZLIB REQUIRED)
-
 # Module required to download and install external projects.
 include(ExternalProject)
 
@@ -245,7 +241,6 @@ endif()
 set_property(TARGET core            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET bench_gpu_saca  PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET test_query      PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET query_core      PROPERTY CUDA_SEPARABLE_COMPILATION ON)
@@ -254,7 +249,6 @@ set_property(TARGET query           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET bench_gpu_saca  PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET test_query      PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET query_core      PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
@@ -274,7 +268,6 @@ target_compile_options(core PRIVATE ${COMPILE_FLAGS})
 target_compile_options(tests PRIVATE ${COMPILE_FLAGS})
 
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_FLAGS})
-target_compile_options(test PRIVATE ${COMPILE_FLAGS})
 target_compile_options(bench_gpu_saca PRIVATE ${COMPILE_FLAGS})
 target_compile_definitions(bench_gpu_saca PRIVATE ${BENCH_PROVENANCE})
 target_compile_options(bench_gpu_saca PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)   # `nvcc` does not recognize OpenMP directives.
@@ -293,9 +286,6 @@ target_compile_options(tests PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fop
 
 
 # Link appropriate libraries and targets.
-
-# Link to `zlib`, required to support `gzip` files.
-target_link_libraries(core PRIVATE ZLIB::ZLIB)
 
 # Link to CUDA runtime.
 target_link_libraries(core PRIVATE CUDA::cudart)
@@ -318,16 +308,12 @@ target_link_libraries(sa_convert PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(test_query PRIVATE tests query_core OpenMP::OpenMP_CXX)
 target_link_libraries(query PRIVATE query_core)
 
-# Link the tester.
-target_link_libraries(test PRIVATE core)
-
 
 # Set the link flags for the targets.
 
 target_link_libraries(core PRIVATE ${LINK_FLAGS})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${LINK_FLAGS})
-target_link_libraries(test PRIVATE ${LINK_FLAGS})
 target_link_libraries(sa_convert PRIVATE ${LINK_FLAGS})
 target_link_libraries(test_query PRIVATE ${LINK_FLAGS})
 target_link_libraries(query_core PRIVATE ${LINK_FLAGS})

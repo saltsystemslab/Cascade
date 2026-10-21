@@ -27,7 +27,6 @@ add_library(core STATIC ${PROJECT_SRC})
 
 # Define an executable from the driver programs.
 add_executable(${PROJECT_NAME} main.cu)
-add_executable(test test.cu)
 
 # Benchmark driver for our own method. Placement is with `core` rather than in
 # the independent `benchmark/` so that our definitions do not leak to the
@@ -49,7 +48,6 @@ add_executable(test_query test_query.cu)
 target_include_directories(core PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
-target_include_directories(test PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE})
 target_include_directories(bench_gpu_saca PRIVATE ${INCLUDE_DIR} ${EXT_INCLUDE} ${TESTS_INCLUDE})
 target_include_directories(sa_structure PRIVATE ${INCLUDE_DIR})
 target_include_directories(query_core PRIVATE ${INCLUDE_DIR})
