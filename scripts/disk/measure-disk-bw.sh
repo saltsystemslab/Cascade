@@ -1,6 +1,6 @@
 #!/bin/bash
 
-driver="/home/$USER/fio/fio"
+driver="${FIO:-fio}"
 test_dir="${1}"
 ioengine="${2:-"psync"}"
 
@@ -27,6 +27,6 @@ echo "$cmd"
 eval "$cmd"
 
 # Multiple read jobs
-cmd="/${driver} --name=sw --rw=read --bs=1M --size=64G --direct=1 --ioengine=${ioengine} --numjobs=8 --group_reporting --end_fsync=1 --filename=${test_dir}/fio_test"
+cmd="${driver} --name=sw --rw=read --bs=1M --size=64G --direct=1 --ioengine=${ioengine} --numjobs=8 --group_reporting --end_fsync=1 --filename=${test_dir}/fio_test"
 echo "$cmd"
 eval "$cmd"

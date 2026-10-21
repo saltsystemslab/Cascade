@@ -15,9 +15,9 @@
 # Prereqs:  pip install -U "huggingface_hub[hf_xet]" transformers tokenizers \
 #                          numpy pyarrow zstandard sentencepiece
 #           sentencepiece: Llama-2 only | pyarrow: parquet corpora (pile,
-#           fineweb) | zstandard: .jsonl.zst only. On this cluster the login
-#           nodes kill pip, so use submit-setup-env.sh instead of installing by
-#           hand, and pass PYTHON=<venv>/bin/python to every job.
+#           fineweb) | zstandard: .jsonl.zst only. Where login nodes kill pip,
+#           build the venv with submit-setup-env.sh instead, and pass
+#           PYTHON=<venv>/bin/python to every job.
 set -euo pipefail
 
 # Absolute dir of this script, so its sibling tokenizer is found regardless of

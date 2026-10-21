@@ -108,9 +108,9 @@ PLACE=(${NUMACTL:+numactl ${NUMACTL}})
 # omp_get_max_threads() at construction. For us this is a tuning knob.
 #
 # From `nproc`, ie the affinity mask, not from SLURM_CPUS_ON_NODE. This was
-# briefly set the other way round and that was wrong: on the d4067 machine, an
-# `--exclusive` allocation reports SLURM_CPUS_ON_NODE=128 but the job cpuset
-# grants only 65 CPUs, so taking 128 runs every method ~2x oversubscribed on ~1
+# briefly set the other way round and that was wrong: on one benchmark node, an
+# `--exclusive` allocation reported SLURM_CPUS_ON_NODE=128 but the job cpuset
+# granted only 65 CPUs, so taking 128 ran every method ~2x oversubscribed on ~1
 # socket.
 THREADS="${THREADS:-}"
 [ -n "${THREADS}" ] || THREADS="$(nproc)"

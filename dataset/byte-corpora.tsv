@@ -78,8 +78,8 @@ pc-dblp	http://pizzachili.dcc.uchile.cl/texts/xml/dblp.xml.gz|http://pizzachili.
 # --- this is the only source of graded, real repetitiveness (the deduplicated
 # --- Pile has had exactly that removed). einstein.en is a real-text worst
 # --- case; cere is a small-alphabet one.
-# --- BLOCKED unless 7z can be read: the cluster has no 7z/7za/bsdtar. Either
-# --- pip install py7zr into the venv, or use the repcorpus.tar.gz bundle.
+# --- Needs a 7z reader (7z, 7za or bsdtar). Without one, pip install py7zr
+# --- into the venv, or use the repcorpus.tar.gz bundle.
 rep-einstein-en	http://pizzachili.dcc.uchile.cl/repcorpus/real/einstein.en.txt.7z	7z	einstein.en.txt	-	-	-	-
 rep-cere	http://pizzachili.dcc.uchile.cl/repcorpus/real/cere.7z	7z	cere	-	-	-	-
 rep-kernel	http://pizzachili.dcc.uchile.cl/repcorpus/real/kernel.7z	7z	kernel	-	-	-	-

@@ -154,9 +154,9 @@ mixing them within one table would confound both n and throughput.
   driver therefore allocates *device* storage first: otherwise the C4 row would
   report `oom_host` for what is really a GPU wall.
 - **Its H2D copy of `T` is from unpinned memory** (`libcubwt.cu:675`), so it runs
-  at pageable-copy bandwidth. Not currently addressed; if a reviewer raises it,
-  `cudaHostRegister` is the experiment, and registering a multi-GB buffer may
-  well be a net loss for a single-shot run.
+  at pageable-copy bandwidth. Not currently addressed; `cudaHostRegister` is the
+  experiment to try, and registering a multi-GB buffer may well be a net loss
+  for a single-shot run.
 - **Do not put the source directory on the include path.** It contains a
   plain-text file named `VERSION`, and on a case-insensitive filesystem — which
   the macOS bind mount behind `./build.sh` is — libstdc++'s `#include <version>`
@@ -272,8 +272,9 @@ mid-token. Such a check fails correctly and wastes a day.
   matters: it moved `t_load`, and `t_load` is already unusable on this node, where
   back-to-back reads of the same file measured 0.70 and 1.64 GB/s.
 - **Every knob the harness used to set has now been measured, and all of them
-  were removed.** Four conditions on d4067, libsais over a 2e9-token prefix,
-  medians of 3 replicates; our method over full dolmasample, medians of 2:
+  were removed.** Four conditions on the benchmark node, libsais over a
+  2e9-token prefix, medians of 3 replicates; our method over full dolmasample,
+  medians of 2:
 
   | condition | libsais | ours |
   |---|---:|---:|

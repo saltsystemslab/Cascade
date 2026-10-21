@@ -18,7 +18,7 @@
 # Environment (all optional):
 #   HWPROBE_PINNED_GIB  footprints of pinned_host on the GPU's NUMA node; default 16,64,140,300
 #   HWPROBE_HOST_GIB    footprint of host_memory; default 64
-#   HWPROBE_NVME_DIRS   colon-separated scratch directories on the drives; default /tmp/$USER-hwprobe:/tmp2/$USER-hwprobe
+#   HWPROBE_NVME_DIRS   colon-separated scratch directories, one per drive; default /tmp/$USER-hwprobe
 #   HWPROBE_ARCH        nvcc target architecture; default sm_120
 #   HWPROBE_SKIP        comma-separated subset of gpu,pinned,host,nvme to skip
 
@@ -64,7 +64,7 @@ fi
 
 OUT="${1:-${RESULTS_ROOT:-${HOME}/gpu-saca-results}/hwprobe-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "${OUT}/bin"
-NVME_DIRS="${HWPROBE_NVME_DIRS:-/tmp/${USER}-hwprobe:/tmp2/${USER}-hwprobe}"
+NVME_DIRS="${HWPROBE_NVME_DIRS:-/tmp/${USER}-hwprobe}"
 skip() { [[ ",${HWPROBE_SKIP:-}," == *",$1,"* ]]; }
 echo "results: ${OUT}"
 

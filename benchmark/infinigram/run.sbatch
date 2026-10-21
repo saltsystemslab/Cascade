@@ -25,9 +25,10 @@ if [ -r "${REPO}/benchmark/local.env" ]; then
     set +u; . "${REPO}/benchmark/local.env"; set -u
 fi
 
-# Two node-local NVMe drives: input is staged on one, temp and output on the other.
+# Node-local NVMe: input is staged on IG_STAGE_ROOT, and temp and output go to
+# IG_TEMP_ROOT; a node with two drives keeps them apart through local.env.
 export IG_TEMP_ROOT="${IG_TEMP_ROOT:-/tmp}"
-export IG_STAGE_ROOT="${IG_STAGE_ROOT:-/tmp2}"
+export IG_STAGE_ROOT="${IG_STAGE_ROOT:-/tmp}"
 
 if [ -n "${MODULES:-}" ]; then
     set +u

@@ -47,6 +47,7 @@ external/
 scripts/local/
 docs/
 benchmark/local.env
+dataset/local.env
 benchmark/local-node.md
 logs/
 

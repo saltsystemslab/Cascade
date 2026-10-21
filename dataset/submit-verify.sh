@@ -23,20 +23,17 @@
 #   LABEL         label for the tsv row   (default: the filename stem)
 #   MEM           job memory             (default 8G; peak is ~1 GB/chunk)
 #   TIME          walltime               (default 02:00:00; 341 GB took minutes)
-#   PART          partition              (default short)
-#   EXCLUDE       nodes to avoid         (default d4067 -- see below)
+#   PART          partition              (default: the site's)
+#   EXCLUDE       nodes to avoid         (default: none)
 #   PYTHON        interpreter, pinned by absolute path
+#
+# PART and EXCLUDE can also be set in dataset/local.env (untracked; see
+# local.env.example).
 set -euo pipefail
 : "${ARRAY:?set ARRAY to the token-array path}"
 
 MEM="${MEM:-8G}"
 TIME="${TIME:-02:00:00}"
-PART="${PART:-short}"
-
-# d4067 is the pinned benchmark node. Its cache policy is a recorded measurement
-# constant with only ~118 GiB of page cache, so streaming a 341 GB array through
-# it would silently corrupt a timing. Dataset work never runs there.
-EXCLUDE="${EXCLUDE:-d4067}"
 
 if [ -z "${TSV:-}" ] && [ -n "${ROOT:-}" ]; then TSV="$ROOT/corpora.tsv"; fi
 
@@ -44,10 +41,11 @@ if [ -z "${TSV:-}" ] && [ -n "${ROOT:-}" ]; then TSV="$ROOT/corpora.tsv"; fi
 # (after your `module load`) so a batch node that resets PATH cannot fall back
 # to a system python with different site-packages.
 PYTHON="${PYTHON:-$(command -v python3 || true)}"
-[ -n "$PYTHON" ] || { echo "no python3 on PATH -- 'module load python/3.13.5' (or set PYTHON=/abs/path/python3) before submitting" >&2; exit 1; }
+[ -n "$PYTHON" ] || { echo "no python3 on PATH -- load one (e.g. 'module load python') or set PYTHON=/abs/path/python3 before submitting" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/verify.sbatch"
+if [ -r "$SCRIPT_DIR/local.env" ]; then . "$SCRIPT_DIR/local.env"; fi
 
 EXPORTS="ARRAY=$ARRAY,VER_DIR=$SCRIPT_DIR,PYTHON=$PYTHON"
 for v in TOKENIZER VOCAB EXPECT_DOCS EXPECT_TOKENS SEP_FIRST QUICK SHA256 TSV LABEL; do
@@ -66,8 +64,8 @@ DEPFLAG=""
 
 NAME="verify-$(basename "$ARRAY" .tokenized.bin)"
 job=$(sbatch --parsable $DEPFLAG \
-    --partition="$PART" --job-name="$NAME" \
-    --exclude="$EXCLUDE" \
+    ${PART:+--partition="$PART"} --job-name="$NAME" \
+    ${EXCLUDE:+--exclude="$EXCLUDE"} \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
 

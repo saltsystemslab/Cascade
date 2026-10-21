@@ -34,8 +34,9 @@ validation's pins, and must be set for any other corpus.
 
 Environment (defaults): RESULTS (~/structure-results), CORPUS_ROOT
 (/scratch/$USER/corpora), TOKENIZER (olmo for dolmasample, else llama2),
-SCRATCH_ROOTS (/tmp:/tmp2), SA_DIR (/tmp2/$USER-structure/sa: /tmp2 outlives
-the job, unlike /tmp), THREADS, P_TARGET, KEEP_SA (0), IO_TRACE (0).
+SCRATCH_ROOTS (/tmp; colon-separated, one root per drive), SA_DIR
+(/tmp/$USER-structure/sa; with KEEP_SA=1, a drive that outlives the job),
+THREADS, P_TARGET, KEEP_SA (0), IO_TRACE (0).
 
 The campaign; BIN_k is a STATS build with -DPIVOT_WORDS=k, i.e. K = 4k tokens:
   E1  for c in dolmasample stackexchange wikipedia arxiv github; do
@@ -58,7 +59,7 @@ MODE=$1 CORPUS=$2 BIN=$3 ARG=$4
 
 RESULTS=${RESULTS:-$HOME/structure-results}
 CORPUS_ROOT=${CORPUS_ROOT:-/scratch/$USER/corpora}
-SA_DIR=${SA_DIR:-/tmp2/$USER-structure/sa}
+SA_DIR=${SA_DIR:-/tmp/$USER-structure/sa}
 THREADS=${THREADS:-128}
 KEEP_SA=${KEEP_SA:-0}
 IO_TRACE=${IO_TRACE:-0}
@@ -75,7 +76,7 @@ P=${P_TARGET:-$PIN}
 
 # Dedicated spill directories, so that clearing them after a run touches nothing else.
 SPILL=()
-IFS=':' read -r -a ROOTS <<< "${SCRATCH_ROOTS:-/tmp:/tmp2}"
+IFS=':' read -r -a ROOTS <<< "${SCRATCH_ROOTS:-/tmp}"
 for r in "${ROOTS[@]}"; do SPILL+=("$r/$USER-structure/spill"); done
 mkdir -p "${SPILL[@]}" "$SA_DIR" || die "cannot create the scratch directories"
 PINS=(OMP_NUM_THREADS="$THREADS" GPU_SACA_P_TARGET="$P" GPU_SACA_SCRATCH="$(IFS=:; echo "${SPILL[*]}")")

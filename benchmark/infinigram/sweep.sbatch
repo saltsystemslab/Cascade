@@ -48,8 +48,8 @@ done
 [ -x "${OURS_BIN:-}" ] || { echo "FATAL: OURS_BIN must name a built bench_gpu_saca; got '${OURS_BIN:-}'"; exit 1; }
 export OURS_BIN OURS_TAG="${OURS_TAG:-unknown}"
 export IG_TEMP_ROOT="${IG_TEMP_ROOT:-/tmp}"
-export IG_STAGE_ROOT="${IG_STAGE_ROOT:-/tmp2}"
-export GPU_SACA_SCRATCH="${GPU_SACA_SCRATCH:-/tmp:/tmp2}"
+export IG_STAGE_ROOT="${IG_STAGE_ROOT:-/tmp}"
+export GPU_SACA_SCRATCH="${GPU_SACA_SCRATCH:-/tmp}"
 
 if [ -n "${MODULES:-}" ]; then
     set +u

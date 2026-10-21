@@ -15,13 +15,17 @@
 #   GLOB      input file pattern              (default *.jsonl*)
 #   MEM       memory per 1-CPU task           (default 4G)
 #   TIME      walltime per task               (default 04:00:00)
-#   PART      Slurm partition                 (default short)
+#   PART      Slurm partition                 (default: the site's)
+#   EXCLUDE   nodes to keep the tasks off     (default: none)
 #   PYTHON    interpreter for the tasks       (default: the python3 active at submit)
 #   BATCH     documents per tokenizer call    (default 1000; use ~100 for corpora
 #                                              with very long documents, e.g. arxiv)
 #   DEPEND    afterok:<jobid> to chain on     (unset)
 #   ARRAY_SPEC  which shard ids to submit     (default 0-(N-1)); e.g. "302,380"
 #                                              to redo just those, keeping N the same
+#
+# PART and EXCLUDE can also be set in dataset/local.env (untracked; see
+# local.env.example).
 #
 # N need not match the file count: with striding, each task just handles
 # ceil(files/N) files. Pick N for how much parallelism you want, not per file.
@@ -33,16 +37,16 @@ TOKENIZER="${TOKENIZER:-allenai/OLMo-7B-hf}"
 GLOB="${GLOB:-*.jsonl*}"
 MEM="${MEM:-4G}"
 TIME="${TIME:-04:00:00}"
-PART="${PART:-short}"
 
 # Pin the interpreter: capture the absolute path of the python3 active *now* (after
 # your `module load`) and pass it to every task, so a batch node that resets PATH to
 # a system python can't run the tasks under the wrong version + stale site-packages.
 PYTHON="${PYTHON:-$(command -v python3 || true)}"
-[ -n "$PYTHON" ] || { echo "no python3 on PATH -- 'module load python/3.13.5' (or set PYTHON=/abs/path/python3) before submitting" >&2; exit 1; }
+[ -n "$PYTHON" ] || { echo "no python3 on PATH -- load one (e.g. 'module load python') or set PYTHON=/abs/path/python3 before submitting" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/tokenize.sbatch"
+if [ -r "$SCRIPT_DIR/local.env" ]; then . "$SCRIPT_DIR/local.env"; fi
 EXPORTS="INPUT_DIR=$INPUT_DIR,OUT=$OUT,TOKENIZER=$TOKENIZER,GLOB=$GLOB,N=$N,TOK_DIR=$SCRIPT_DIR,PYTHON=$PYTHON"
 # BATCH: documents per tokenizer call. Lower it for long-document corpora --
 # arxiv at ~18,000 tokens/doc SIGKILLed two shards at the default 1000 with
@@ -68,13 +72,15 @@ DEPFLAG=""
 ARRAY_SPEC="${ARRAY_SPEC:-0-$((N - 1))}"
 
 phase1=$(sbatch --parsable $DEPFLAG \
-    --partition="$PART" --array="$ARRAY_SPEC" \
+    ${PART:+--partition="$PART"} --array="$ARRAY_SPEC" \
+    ${EXCLUDE:+--exclude="$EXCLUDE"} \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
 echo "Phase 1 (tokenize): array job $phase1  (array $ARRAY_SPEC over N=$N, 1 CPU each)"
 
 phase2=$(sbatch --parsable \
-    --partition="$PART" \
+    ${PART:+--partition="$PART"} \
+    ${EXCLUDE:+--exclude="$EXCLUDE"} \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --dependency="afterok:$phase1" \
     --export="ALL,$EXPORTS,MODE=concat" "$SB")

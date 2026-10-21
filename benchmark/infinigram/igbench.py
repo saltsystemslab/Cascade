@@ -374,8 +374,8 @@ class MemSampler(threading.Thread):
 def stage(src_ds, src_od, root, tag):
     if not os.path.isdir(root) or not os.access(root, os.W_OK):
         die(f"stage root {root} is not a writable directory on "
-            f"{os.uname().nodename}. The node-local drives differ per node "
-            f"-- /tmp2 exists on d4067 only. Set --stage-root/IG_STAGE_ROOT.")
+            f"{os.uname().nodename}. The node-local drives differ per node; "
+            f"set --stage-root or IG_STAGE_ROOT.")
 
     parent = os.path.join(root, "ig-stage")
     os.makedirs(parent, exist_ok=True)
@@ -908,7 +908,7 @@ def main():
     q = s.add_parser("stage", parents=[common], help="copy a corpus's input to the node-local drive")
     q.add_argument("corpus")
     q.add_argument("--tokenizer")
-    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp"))
     q.set_defaults(fn=cmd_stage)
 
     q = s.add_parser("ours", parents=[common], help="run our builder end to end on the staged input")
@@ -919,7 +919,7 @@ def main():
     q.add_argument("--method-version", default=os.environ.get("OURS_TAG", "unknown"))
     q.add_argument("--cpus", type=int, help=f"default {THREADS}")
     q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"))
-    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp"))
     q.add_argument("--run-id")
     q.add_argument("--rep", type=int, default=1)
     q.add_argument("--rerun", action="store_true")
@@ -936,7 +936,7 @@ def main():
                    help='placement, e.g. --numactl=--cpunodebind=0 (the = is needed)')
     q.add_argument("--unstaged", action="store_true", help="read the corpus in place")
     q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"))
-    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"))
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp"))
     q.add_argument("--run-id")
     q.add_argument("--rep", type=int, default=1)
     q.add_argument("--rerun", action="store_true")
@@ -972,8 +972,8 @@ def main():
     q.add_argument("--cpus", type=int, help=f"default {THREADS}")
     q.add_argument("--temp-root", default=os.environ.get("IG_TEMP_ROOT", "/tmp"),
                    help="node-local drive for temp and output (default /tmp)")
-    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp2"),
-                   help="node-local drive for the staged input (default /tmp2)")
+    q.add_argument("--stage-root", default=os.environ.get("IG_STAGE_ROOT", "/tmp"),
+                   help="node-local drive for the staged input (default /tmp)")
     q.add_argument("--run-id")
     q.add_argument("--rep", type=int, default=1)
     q.add_argument("--keep-temp", action="store_true")

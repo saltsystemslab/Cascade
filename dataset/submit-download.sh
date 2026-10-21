@@ -21,7 +21,11 @@
 #   MEM       job memory                  (default 16G; lower for wget subsets,
 #                                          raise to ~32G for Xet c4/pile/fineweb)
 #   TIME      walltime                    (default 08:00:00)
-#   PART      Slurm partition             (default short)
+#   PART      Slurm partition             (default: the site's)
+#   EXCLUDE   nodes to keep the job off   (default: none)
+#
+# PART and EXCLUDE can also be set in dataset/local.env (untracked; see
+# local.env.example).
 #
 # The download resumes on resubmit (wget -c / hf Xet), so if the job hits the
 # walltime just run this again -- completed files are skipped.
@@ -37,7 +41,6 @@ SUBSET="${SUBSET:-arxiv}"
 DL_PROC="${DL_PROC:-8}"
 MEM="${MEM:-16G}"
 TIME="${TIME:-08:00:00}"
-PART="${PART:-short}"
 
 # Display/job label: redpajama is split by subset, others are not.
 LABEL="$DATASET"
@@ -48,6 +51,7 @@ LABEL="${LABEL_OVERRIDE:-$LABEL}"   # keep the job name in step with the output 
 # batch job as DL_DIR (sbatch runs a spooled copy that can't self-locate).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/download.sbatch"
+if [ -r "$SCRIPT_DIR/local.env" ]; then . "$SCRIPT_DIR/local.env"; fi
 
 EXPORTS="DL_DIR=$SCRIPT_DIR,DATASET=$DATASET,ROOT=$ROOT,SUBSET=$SUBSET,DL_PROC=$DL_PROC"
 if [ -n "${INCLUDE:-}" ]; then EXPORTS="$EXPORTS,INCLUDE=$INCLUDE"; fi
@@ -69,14 +73,9 @@ for v in PRESPLIT SPLITS DROP_MONOLITH REFRESH_URLS CHECK_URLS; do
     if [ -n "$val" ]; then EXPORTS="$EXPORTS,$v=$val"; fi
 done
 
-# d4067 is the pinned benchmark node: its page cache is a recorded measurement
-# constant, so streaming hundreds of GB of raw text through it would silently
-# corrupt a timing. Dataset jobs never land there.
-EXCLUDE="${EXCLUDE:-d4067}"
-
 job=$(sbatch --parsable \
-    --partition="$PART" --job-name="dl-$LABEL" \
-    --exclude="$EXCLUDE" \
+    ${PART:+--partition="$PART"} --job-name="dl-$LABEL" \
+    ${EXCLUDE:+--exclude="$EXCLUDE"} \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
 

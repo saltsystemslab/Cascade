@@ -10,7 +10,7 @@
 #   unless HWPROBE_NVME_KEEP=1.
 #
 # Environment:
-#   FIO              fio binary; default /home/$USER/fio/fio, else `fio` on PATH
+#   FIO              fio binary; default `fio` on PATH
 #   HWPROBE_NVME_SIZE     test-file size per drive; default 64g
 #   HWPROBE_NVME_RUNTIME  seconds per test; default 20
 #
@@ -24,8 +24,7 @@ usage() { echo "usage: nvme.sh OUT_DIR DIR [DIR...]" >&2; exit 2; }
 out="$1"; shift
 dirs=("$@")
 
-FIO="${FIO:-/home/${USER}/fio/fio}"
-[ -x "${FIO}" ] || FIO="$(command -v fio || true)"
+FIO="${FIO:-$(command -v fio || true)}"
 [ -n "${FIO}" ] || { echo "error: fio not found; set FIO" >&2; exit 1; }
 SIZE="${HWPROBE_NVME_SIZE:-64g}"
 RUNTIME="${HWPROBE_NVME_RUNTIME:-20}"

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Build the pipeline's Python venv and warm the HF tokenizer cache, as a job.
 #
-#   module load python/3.13.5
+#   module load python    # or any python3 on PATH
 #   ./submit-setup-env.sh
 #
-# Why a job: the login nodes SIGKILL anything substantial -- `python3 -m venv`
-# and `import transformers` were both killed there. Compute nodes on `short`
-# have network, so pip and the HF fetch work.
+# Why a job: shared login nodes often SIGKILL anything substantial, and
+# `python3 -m venv` and `import transformers` are both killed on some. The
+# compute nodes need network access for pip and the HF fetch.
 #
 # Optional env:
 #   VENV        venv location      (default /scratch/$USER/venv-dataset)
@@ -25,14 +25,12 @@ VENV="${VENV:-/scratch/$USER/venv-dataset}"
 HF_HOME="${HF_HOME:-/scratch/$USER/hf}"
 MEM="${MEM:-8G}"
 TIME="${TIME:-01:00:00}"
-PART="${PART:-short}"
-EXCLUDE="${EXCLUDE:-d4067}"
 
 # The venv is built from whichever python3 is active now, so `module load` before
 # submitting -- exactly the same pinning discipline as submit-tokenize.sh, and
 # for the same reason: a batch node resetting PATH must not pick a system python.
 BASE_PYTHON="${BASE_PYTHON:-$(command -v python3 || true)}"
-[ -n "$BASE_PYTHON" ] || { echo "no python3 on PATH -- 'module load python/3.13.5' first" >&2; exit 1; }
+[ -n "$BASE_PYTHON" ] || { echo "no python3 on PATH -- load one (e.g. 'module load python') or set BASE_PYTHON" >&2; exit 1; }
 
 DEPEND="${DEPEND:-}"
 DEPFLAG=""
@@ -40,14 +38,15 @@ DEPFLAG=""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/setup-env.sbatch"
+if [ -r "$SCRIPT_DIR/local.env" ]; then . "$SCRIPT_DIR/local.env"; fi
 
 EXPORTS="VENV=$VENV,BASE_PYTHON=$BASE_PYTHON,HF_HOME=$HF_HOME"
 [ -n "${FRESH:-}" ]      && EXPORTS="$EXPORTS,FRESH=$FRESH"
 [ -n "${TOKENIZERS:-}" ] && EXPORTS="$EXPORTS,TOKENIZERS=$TOKENIZERS"
 
 job=$(sbatch --parsable $DEPFLAG \
-    --partition="$PART" --job-name=setup-env \
-    --exclude="$EXCLUDE" \
+    ${PART:+--partition="$PART"} --job-name=setup-env \
+    ${EXCLUDE:+--exclude="$EXCLUDE"} \
     --cpus-per-task=2 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
 

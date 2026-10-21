@@ -4,10 +4,10 @@ THREADS=64
 PREFETCH_DEPTH=0
 FORCE_SPILL=0
 READER_C=24
-SCRATCH=/tmp:/tmp2
+SCRATCH=/tmp
 # P_TARGET=3
 
-driver=/home/${USER}/GPU-Suffix-Array/build/src/cascade
+driver=$(dirname "$0")/../../build/src/cascade
 input=${1}
 output=/tmp/SA.bin
 nsys_log=${2}

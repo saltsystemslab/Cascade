@@ -1,6 +1,6 @@
 #!/bin/bash
 
-driver="/home/$USER/fio/fio"
+driver="${FIO:-fio}"
 test_dir_1="${1}"
 test_dir_2="${2}"
 ioengine="${3:-"psync"}"

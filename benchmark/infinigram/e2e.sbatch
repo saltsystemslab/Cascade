@@ -67,13 +67,14 @@ case ":${METHODS}:" in
 esac
 export OURS_BIN="${OURS_BIN:-}" OURS_TAG="${OURS_TAG:-unknown}" LIBSAIS_BIN="${LIBSAIS_BIN:-}"
 
-# Two node-local NVMe drives: input is staged on one, temp and output on the
-# other. Ours stripes its spill across both, so the staged input shares /tmp2
+# Node-local NVMe: input is staged on IG_STAGE_ROOT, and temp and output go to
+# IG_TEMP_ROOT; a node with two drives keeps them apart through local.env. Ours
+# stripes its spill across GPU_SACA_SCRATCH, so the staged input shares a drive
 # with it; Spill_Store statvfs's the roots and aborts at plan time when the
 # striping will not fit, so a shortfall costs a submit rather than a campaign.
 export IG_TEMP_ROOT="${IG_TEMP_ROOT:-/tmp}"
-export IG_STAGE_ROOT="${IG_STAGE_ROOT:-/tmp2}"
-export GPU_SACA_SCRATCH="${GPU_SACA_SCRATCH:-/tmp:/tmp2}"
+export IG_STAGE_ROOT="${IG_STAGE_ROOT:-/tmp}"
+export GPU_SACA_SCRATCH="${GPU_SACA_SCRATCH:-/tmp}"
 
 if [ -n "${MODULES:-}" ]; then
     set +u

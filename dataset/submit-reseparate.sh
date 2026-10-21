@@ -18,21 +18,23 @@
 #   DRYRUN  set to write <ARRAY>.sepfirst and stop, without swapping
 #   MEM     job memory      (default 4G; the script streams in 16 MiB blocks)
 #   TIME    walltime        (default 04:00:00; 341 GB is ~2x341 GB of I/O)
-#   PART    partition       (default short)
-#   EXCLUDE nodes to avoid  (default d4067, the pinned benchmark node)
+#   PART    partition       (default: the site's)
+#   EXCLUDE nodes to avoid  (default: none)
 #   PYTHON  interpreter, pinned by absolute path
+#
+# PART and EXCLUDE can also be set in dataset/local.env (untracked; see
+# local.env.example).
 set -euo pipefail
 : "${ARRAY:?set ARRAY to the token-array path}"
 
 MEM="${MEM:-4G}"
 TIME="${TIME:-04:00:00}"
-PART="${PART:-short}"
-EXCLUDE="${EXCLUDE:-d4067}"
 
 PYTHON="${PYTHON:-$(command -v python3 || true)}"
-[ -n "$PYTHON" ] || { echo "no python3 on PATH -- 'module load python/3.13.5' first" >&2; exit 1; }
+[ -n "$PYTHON" ] || { echo "no python3 on PATH -- load one (e.g. 'module load python') or set PYTHON" >&2; exit 1; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -r "$SCRIPT_DIR/local.env" ]; then . "$SCRIPT_DIR/local.env"; fi
 # Chain on another job so the whole sequence runs unattended. This is what makes
 # the pipeline independent of any local machine staying awake: once submitted,
 # Slurm advances it. afterok specifically means a FAILED predecessor leaves this
@@ -51,8 +53,8 @@ FLAGS=""
 [ -n "${KEEP:-}" ]   && FLAGS="$FLAGS --keep"
 
 job=$(sbatch --parsable $DEPFLAG \
-    --partition="$PART" --job-name="$NAME" \
-    --exclude="$EXCLUDE" \
+    ${PART:+--partition="$PART"} --job-name="$NAME" \
+    ${EXCLUDE:+--exclude="$EXCLUDE"} \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --output="slurm-%x-%j.out" \
     --wrap="$PYTHON $SCRIPT_DIR/reseparate.py$FLAGS $ARRAY")
