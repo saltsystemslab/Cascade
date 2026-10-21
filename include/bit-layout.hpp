@@ -5,14 +5,18 @@
 
 
 #include "types.hpp"
+#include "Partition_ID_Map.hpp"
+#include "lane.hpp"
 #include "cross-compile.hpp"
 
 #include <iostream>
+#include <algorithm>
 
 
 // Bit-layout of the two packed 64-bit words the algorithm carries:
 // suffix:
-//      63 .. 48 :  forward routing tag;
+//      63 .. 48 :  forward tag: (biased) partition-ID of the secondary-source of the next generation (see `fwd_tag` for the "bias");
+//                  packed in at generation 0's upload, used at generation 0 only, and stale afterwards;
 //      47 .. 0 :   value
 // key:
 //      63 :        spare;
@@ -23,13 +27,16 @@ namespace gpu_saca::bit_layout
 {
 
 constexpr idx_t WORD_BITS = 64;
-constexpr idx_t TAG_BITS = 16;  // Forward-tag: a partition-ID.
+constexpr idx_t TAG_BITS = 16;  // Forward-tag: a partition-ID, biased past the reserved band; see `fwd_tag`.
 constexpr idx_t VAL_BITS = WORD_BITS - TAG_BITS;    // 48: suffix-indices and global ranks up to ~2.8e14.
-constexpr idx_t SUF_BITS = VAL_BITS;
+constexpr idx_t SUF_BITS = std::min(VAL_BITS, lane::BITS);  // Suffix-indices fit the value field and the index-lanes: 40 bits at 5 bytes.
 
 static_assert(TAG_BITS + VAL_BITS == WORD_BITS, "fields must tile a full word");
-static_assert(sizeof(p_id_t) * 8 <= TAG_BITS, "tag field must hold be able to hold `p_id_t`");
 static_assert(sizeof(idx_t) * 8 == WORD_BITS, "bit_layout assumes a 64-bit `idx_t`");
+
+// NB: necessary, but not sufficient: the tag also carries the `ell`-wide bias `fwd_tag` applies,
+// so `validate` must be passed the biased partition-count.
+static_assert(sizeof(p_id_t) * 8 <= TAG_BITS, "tag field must hold be able to hold `p_id_t`");
 
 
 constexpr idx_t TAG_SHIFT = VAL_BITS;   // Bit position of the forward-tag in a word.
@@ -37,7 +44,7 @@ constexpr idx_t TAG_MASK = (idx_t(1) << TAG_BITS) - 1;  // Mask to extract the f
 constexpr idx_t VAL_MASK = (idx_t(1) << VAL_BITS) - 1;  // Mask to extract the actual values (bar the forward-tag) from a word.
 
 // Largest text length and partition-count the bit_layout supports.
-constexpr idx_t MAX_N = idx_t(1) << VAL_BITS;
+constexpr idx_t MAX_N = idx_t(1) << SUF_BITS;
 constexpr idx_t MAX_P = idx_t(1) << TAG_BITS;
 
 
@@ -67,6 +74,7 @@ static_assert(PRIMARY_BITS == SECONDARY_BITS, "primary and secondary must share 
 
 constexpr idx_t BETA_BITS = 16; // Current generation's backward routing tag in low half of the pair, and preceding generation's one in high half.
 constexpr idx_t BETA_CUR_GEN_MASK = (idx_t(1) << BETA_BITS) - 1;
+constexpr idx_t BETA_RETIRED = idx_t(1) << (BETA_BITS - 1); // Flag in a half: its recipient has retired, so its message is not sent.
 
 
 // Returns the word packing `val` with forward tag `tag`.
@@ -80,6 +88,22 @@ CUDA_SPECIFIER inline idx_t tag_of(const idx_t w) { return w >> TAG_SHIFT; }
 
 // Returns word `w` with its forward tag replaced by `tag`.
 CUDA_SPECIFIER inline idx_t retag(const idx_t w, const idx_t tag) { return pack(w & VAL_MASK, tag); }
+
+// Returns the forward tag for a suffix whose secondary-source of the next
+// generation is the suffix `tgt`, of an `n`-length text, where `id(x)` returns
+// the partition-ID of the `x`'th suffix. Real partition-IDs are biased up by
+// `ell`, reserving the bottom `ell` tag-values for sources lying past the text's
+// end. Reserved value decreases as the source runs farther past, ordering the
+// shorter of two such sources first. In absence of a text-terminator, this keeps
+// the ranking prefix-aware.
+template <typename F_>
+inline idx_t fwd_tag(const F_& id, const idx_t tgt, const idx_t n, const idx_t ell) { return tgt < n ? static_cast<idx_t>(id(tgt)) + ell : (n + ell - 1 - tgt); }
+
+// Returns the forward tag for a suffix whose secondary-source of the next
+// generation is the suffix `tgt`, of an `n`-length text with partition-ID map
+// `P_id`.
+inline idx_t fwd_tag(const Partition_ID_Map& P_id, const idx_t tgt, const idx_t n, const idx_t ell)
+{ return fwd_tag([&P_id](const idx_t x){ return P_id[x]; }, tgt, n, ell); }
 
 // Returns the suffix-index held in word `w`.
 CUDA_SPECIFIER inline idx_t suffix_of(const idx_t w) { return value_of(w); }
@@ -108,7 +132,8 @@ CUDA_SPECIFIER inline idx_t mark_poison_pill_receipt(const idx_t key) { return k
 
 // Returns the backward routing tag pair for a suffix whose payload-message and
 // forwarded poison-pill route to the `cur`'th partition and the `prev`'th
-// partitions, respectively.
+// partitions, respectively. At generation 0, which forwards no pills, `prev`
+// is the suffix's forward tag instead (used to seed TCI).
 CUDA_SPECIFIER inline beta_t beta_pair(const p_id_t cur, const p_id_t prev) { return (static_cast<beta_t>(prev) << BETA_BITS) | cur; }
 
 // Returns the current generation's backward routing tag from the tag-pair
@@ -119,6 +144,18 @@ CUDA_SPECIFIER inline p_id_t beta_cur_gen(const beta_t beta) { return beta & BET
 // `beta`.
 CUDA_SPECIFIER inline p_id_t beta_prev_gen(const beta_t beta) { return beta >> BETA_BITS; }
 
+// Returns the backward routing tag to the `p_id`'th partition, flagged iff its
+// recipient has retired.
+CUDA_SPECIFIER inline p_id_t route(const p_id_t p_id, const bool retired) { return retired ? static_cast<p_id_t>(p_id | BETA_RETIRED) : p_id; }
+
+// Returns `true` iff the current generation's backward routing tag in the tag-
+// pair `beta` is flagged retired.
+CUDA_SPECIFIER inline bool beta_cur_retired(const beta_t beta) { return beta & BETA_RETIRED; }
+
+// Returns `true` iff the previous generation's backward routing tag in the tag-
+// pair `beta` is flagged retired.
+CUDA_SPECIFIER inline bool beta_prev_retired(const beta_t beta) { return (beta >> BETA_BITS) & BETA_RETIRED; }
+
 
 // Returns `true` iff a text of size `n` partitioned into `p` parts fits the
 // bit-layout.
@@ -126,7 +163,7 @@ inline bool validate(const idx_t n, const idx_t p)
 {
     if(n > MAX_N)
     {
-        std::cerr << "Text length " << n << " exceeds the " << VAL_BITS << "-bit value field (max " << MAX_N << ") of the packed-bit layout.\n";
+        std::cerr << "Text length " << n << " exceeds the " << SUF_BITS << "-bit suffix-indices (max " << MAX_N << ") of the packed-bit layout and the index-lanes.\n";
         return false;
     }
 

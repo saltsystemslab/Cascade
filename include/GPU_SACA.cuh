@@ -7,6 +7,7 @@
 #include "types.hpp"
 #include "Packed_Prefix.hpp"
 #include "bit-layout.hpp"
+#include "lane.hpp"
 #include "message.hpp"
 #include "tests.hpp"
 
@@ -72,6 +73,66 @@ void compute_partition_IDs_kernel(  const T_sym_* const __restrict__ T_chunk, co
 }
 
 
+// Packs the partition-IDs `P_id` of `n` suffixes into the words `word`, at
+// `bits` bits per entry, in the layout of `Partition_ID_Map`.
+// Grid organization: one thread per group of `Partition_ID_Map::GROUP_SZ`
+// suffixes.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void pack_partition_IDs_kernel(const p_id_t* const __restrict__ P_id, const idx_t n, const uint32_t bits, uint64_t* const __restrict__ word)
+{
+    constexpr auto GROUP_SZ = Partition_ID_Map::GROUP_SZ;
+
+    const idx_t g = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;    // Group of this thread.
+    const idx_t off = g * GROUP_SZ; // Offset of the group's first suffix.
+    if(off < n)
+        Partition_ID_Map::pack(P_id + off, (n - off < GROUP_SZ ? n - off : GROUP_SZ), bits, word + g * bits);
+}
+
+
+// Unpacks the `n` index-lanes `lanes` into the words `word`.
+// Grid organization: one thread per index.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void unpack_lanes_kernel(const uint8_t* const __restrict__ lanes, const idx_t n, idx_t* const __restrict__ word)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        word[i] = lane::load(lanes, i);
+}
+
+
+// Unpacks the `n` suffix-lanes `lanes` of generation 0 into the words `SA`,
+// each packed with its forward tag: the high half of its backward routing tag-
+// pair in `beta`.
+// Grid organization: one thread per suffix.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void unpack_tagged_lanes_kernel(const uint8_t* const __restrict__ lanes, const beta_t* const __restrict__ beta, const idx_t n, idx_t* const __restrict__ SA)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        SA[i] = bit_layout::pack(bit_layout::value_of(lane::load(lanes, i)), bit_layout::beta_prev_gen(beta[i]));
+}
+
+
+// Packs the `n` words `word` into the index-lanes `lanes`: the low `lane::BITS`
+// bits of each.
+// Grid organization: one thread per index.
+// Shared memory layout: no usage.
+template <idx_t BLOCK_SZ>
+__global__
+void pack_lanes_kernel(const idx_t* const __restrict__ word, const idx_t n, uint8_t* const __restrict__ lanes)
+{
+    const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
+    if(i < n)
+        lane::store(lanes, i, word[i]);
+}
+
+
 // Fills `I[0, n)` with the identity permutation.
 // Grid organization: one thread per index.
 // Shared memory layout: no usage.
@@ -99,13 +160,13 @@ void shuffle_kernel(T_* const __restrict__ dest, const T_* const __restrict__ sr
 }
 
 
-// Scatters the suffixes in `suf` per their ranks in `rank` into `SA`, all of
-// size `n`.
+// Scatters the suffixes in the lanes `suf` per their ranks in `rank` into `SA`,
+// all of size `n`.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void scatter_suffixes_to_rank_kernel(   const idx_t* const __restrict__ suf, const p_sz_t* const __restrict__ rank,
+void scatter_suffixes_to_rank_kernel(   const uint8_t* const __restrict__ suf, const p_sz_t* const __restrict__ rank,
                                         idx_t* const __restrict__ SA, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -117,7 +178,7 @@ void scatter_suffixes_to_rank_kernel(   const idx_t* const __restrict__ suf, con
         __trap();
 #endif
 
-    SA[rank[i]] = bit_layout::suffix_of(suf[i]);
+    SA[rank[i]] = bit_layout::suffix_of(lane::load(suf, i));
 }
 
 
@@ -147,8 +208,8 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 }
 
 
-// Ranks the distinct key groups and primary-key groups from the sorted arrays
-// `K` and `SA` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
+// Ranks the distinct key groups and primary-key groups from the sorted array
+// `K` (of size `n`) into `key_group_rank` and `primary_key_group_rank`
 // respectively, and marks the keys' activeness-flags into `is_active`. The
 // first entry of a group is ranked by its offset into `K`, whereas the rest of
 // the entries in the group are ranked `0`.
@@ -156,9 +217,10 @@ void initialize_key_group_ranks_and_mark_active_flags_kernel(   const Prefix_Key
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t* const __restrict__ SA, const idx_t n,
+void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   const idx_t* const __restrict__ K, const idx_t n,
                                                                             idx_t* const __restrict__ key_group_rank, idx_t* const __restrict__ primary_key_group_rank,
-                                                                            uint8_t* const __restrict__ is_active, idx_t* const __restrict__ unserved_c)
+                                                                            uint8_t* const __restrict__ is_active,
+                                                                            idx_t* const __restrict__ unserved_c, idx_t* const __restrict__ pill_c)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= n)
@@ -167,9 +229,11 @@ void rank_key_groups_and_primary_key_groups_and_mark_active_flags_kernel(   cons
 #ifdef TESTS
     if(bit_layout::secondary_absent(K[i]))  // No message joined this suffix.
         atomicAdd(reinterpret_cast<unsigned long long*>(unserved_c), (unsigned long long)1);
+    else if(bit_layout::received_poison_pill(K[i])) // A poison-pill joined this suffix.
+        atomicAdd(reinterpret_cast<unsigned long long*>(pill_c), (unsigned long long)1);
 #endif
 
-    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y] && bit_layout::tag_of(SA[x]) == bit_layout::tag_of(SA[y]); };
+    const auto tied = [&](const idx_t x, const idx_t y){ return K[x] == K[y]; };
 
     if(i == 0)
     {
@@ -220,7 +284,8 @@ void refine_primary_keys_kernel(idx_t* const __restrict__ K, const idx_t n,
 // next generation from the cohort `SA` (of size `n`) into `msg_count`. `K` has
 // the cohort's packed keys, required for detecting poison-pill forwarding. The
 // current generation resolved context-size `ctx`. The backward routing tag for
-// each sender from `SA` is in the corresponding entry in `beta`.
+// each sender from `SA` is in the corresponding entry in `beta`; a message to a
+// recipient flagged retired there is not sent.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
@@ -235,21 +300,22 @@ void count_message_destination_distribution_kernel( const idx_t* const __restric
         return;
 
     const auto j = bit_layout::suffix_of(SA[i]);
-    if(j >= ctx)    // Regular payload message.
+    if(j >= ctx && !bit_layout::beta_cur_retired(beta[i]))  // Regular payload message.
         atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + bit_layout::beta_cur_gen(beta[i]), static_cast<unsigned int>(1));
 
-    if(bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1))   // Poison-pill forwarding.
+    if(bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1) && !bit_layout::beta_prev_retired(beta[i]))    // Poison-pill forwarding.
         atomicAdd(reinterpret_cast<unsigned int*>(msg_count) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
 }
 
 
-// Emits the rank-propagation messages from cohort `SA` (of size `n`) into
-// `msg_target` (target recipient, computed from the sender and the current
-// generation's context-size `ctx`) and `msg_rank` (target's secondary key,
-// computed from local rank `K`). Backward routing tag for each sender from `SA`
-// is in the corresponding entry of `beta`. Messages are collated by destination
-// partitions using the per- partition append-offsets in `msg_off`. `active_sz`
-// delineates the active-retired set split of the cohort.
+// Emits the rank-propagation messages from cohort `SA` (of size `n`) into the
+// lanes `msg_target` (target recipient, computed from the sender and the
+// current generation's context-size `ctx`) and `msg_rank` (target's secondary
+// key, computed from local rank `K`). Backward routing tag for each sender from
+// `SA` is in the corresponding entry of `beta`; a message to a recipient flagged
+// retired there is not sent. Messages are collated by destination partitions
+// using the per- partition append-offsets in `msg_off`.
+// `active_sz` delineates the active-retired set split of the cohort.
 // Grid organization: one thread per suffix.
 // Shared memory layout: no usage.
 template <bool packed_key_, idx_t BLOCK_SZ>
@@ -257,7 +323,7 @@ __global__
 void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* const __restrict__ K,
                             const beta_t* const __restrict__ beta,
                             const idx_t n, const idx_t ctx, const idx_t* const __restrict__ active_sz,
-                            idx_t* const __restrict__ msg_target, msg_rank_t* const __restrict__ msg_rank,
+                            uint8_t* const __restrict__ msg_target, msg_rank_t* const __restrict__ msg_rank,
                             p_sz_t* const __restrict__ msg_off)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
@@ -265,45 +331,44 @@ void emit_messages_kernel(  const idx_t* const __restrict__ SA, const idx_t* con
         return;
 
     const auto j = bit_layout::suffix_of((SA[i]));  // Suffix.
-    if(j >= ctx)    // Regular payload message.
+    if(j >= ctx && !bit_layout::beta_cur_retired(beta[i]))  // Regular payload message.
     {
         // Where to put the `beta[i]`'th partition's next incoming message.
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_cur_gen(beta[i]), static_cast<unsigned int>(1));
         const msg_rank_t primary = packed_key_ ? bit_layout::primary_of(K[i]) : K[i];   // `j`'s local rank.
 
-        // Target recipient `j - ctx` will need `j`'s rank as its secondary and `j`'s forward-tag as its tertiary at next gen.
-        msg_target[slot] = bit_layout::pack(j - ctx, bit_layout::tag_of(SA[i]));
+        // Target recipient `j - ctx` will need `j`'s rank as its secondary at next gen.
+        lane::store(msg_target, slot, j - ctx);
         msg_rank[slot] = (i < *active_sz ? primary : poison_pill(primary));
     }
 
-    if(packed_key_ && bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1))    // Poison-pill forwarding.
+    if(packed_key_ && bit_layout::received_poison_pill(K[i]) && j >= (ctx >> 1) && !bit_layout::beta_prev_retired(beta[i])) // Poison-pill forwarding.
     {
         // Where to put the `beta[i]`'th partition's next incoming message.
         const auto slot = atomicAdd(reinterpret_cast<unsigned int*>(msg_off) + bit_layout::beta_prev_gen(beta[i]), static_cast<unsigned int>(1));
         const msg_rank_t to_forward = bit_layout::secondary_of(K[i]);
-        msg_target[slot] = bit_layout::pack(j - (ctx >> 1), 0); // Forwarded poison-pills need not carry a forward tag;
-                                                                // recipient will retire regardless due to uniqueness pullback.
+        lane::store(msg_target, slot, j - (ctx >> 1));
         msg_rank[slot] = poison_pill(to_forward);
     }
 }
 
 
-// Locates each message's (target in `msg_tgt` and rank in `msg_rank`) recipient
-// in the suffix-ordered active set `SA` (of size `n`). If found, constructs the
-// recipient's composite key into `K` from its primary rank in `primary` and the
-// secondary key in the message's rank.
+// Locates each message's (target in the lanes `msg_tgt`, and rank in
+// `msg_rank`) recipient in the suffix-ordered active set `SA` (of size `n`). If
+// found, constructs the recipient's composite key into `K` from its primary
+// rank in `primary` and the secondary key in the message's rank.
 // Grid organization: one thread per message.
 // Shared memory layout: no usage.
 template <idx_t BLOCK_SZ>
 __global__
-void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
-                            idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
+void join_messages_kernel(  const uint8_t* const __restrict__ msg_tgt, const msg_rank_t* const __restrict__ msg_rank, const p_sz_t msg_c,
+                            const idx_t* const __restrict__ SA, const p_sz_t* const __restrict__ primary, idx_t* const __restrict__ K, const idx_t n)
 {
     const idx_t i = static_cast<idx_t>(blockIdx.x) * BLOCK_SZ + threadIdx.x;
     if(i >= msg_c)
         return;
 
-    const auto tgt = bit_layout::suffix_of(msg_tgt[i]); // Recipient suffix of the message.
+    const auto tgt = bit_layout::suffix_of(lane::load(msg_tgt, i)); // Recipient suffix of the message.
     idx_t low = 0, high = n;
     while(low < high)   // Locate `tgt` in the suffix-ordered active-set.
     {
@@ -321,7 +386,6 @@ void join_messages_kernel(  const idx_t* const __restrict__ msg_tgt, const msg_r
     // Deliver the message's payload.
     const auto key = bit_layout::key(primary[low], extract_rank(msg_rank[i]));  // Pack in the received secondary.
     K[low] = is_poison_pill(msg_rank[i]) ? bit_layout::mark_poison_pill_receipt(key) : key; // Mark poison-pill if received, to forward it afterwards.
-    SA[low] = bit_layout::pack(tgt, bit_layout::tag_of(msg_tgt[i]));    // Pack in the received forward tag.
 }
 
 

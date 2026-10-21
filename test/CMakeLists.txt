@@ -11,6 +11,7 @@ set(TESTS_SRC
         ranking.cpp
         rank-propagation.cpp
         end-to-end.cpp
+        query.cpp
 )
 
 # Define the tester library.

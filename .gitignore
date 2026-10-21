@@ -46,9 +46,22 @@ external/
 # local content
 scripts/local/
 docs/
+benchmark/local.env
+dataset/local.env
+benchmark/local-node.md
+logs/
 
 # docker-build
 build/
 
 # cache
 .cache/
+__pycache__/
+
+# job logs
+*.err
+
+# agent and editor state
+.claude/
+CLAUDE.md
+.DS_Store

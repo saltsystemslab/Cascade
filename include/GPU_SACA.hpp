@@ -5,11 +5,14 @@
 
 
 #include "types.hpp"
+#include "bit-layout.hpp"
 #include "Packed_Prefix.hpp"
+#include "Partition_ID_Map.hpp"
 #include "Partition_Backend.hpp"
 #include "Spill_Store.hpp"
 #include "Staging_Slab.hpp"
 #include "Read_Task.hpp"
+#include "Build_Timing.hpp"
 #include "env.hpp"
 #include "tests.hpp"
 
@@ -22,13 +25,14 @@
 #include <limits>
 #include <string>
 #include <vector>
+#include <thread>
 
 
 // TODO: name algorithm.
 namespace gpu_saca
 {
 
-constexpr p_id_t MAX_PART_COUNT = std::numeric_limits<p_id_t>::max();  // Maximum supported number of partitions.
+constexpr p_id_t MAX_PART_COUNT = bit_layout::BETA_RETIRED - 1; // Maximum supported number of partitions: the routing tags keep their top bit for a flag.
 
 
 // The suffix array constructor in GPUs for texts with symbols of type `T_sym_`.
@@ -39,6 +43,9 @@ private:
 
     static constexpr double MEM_SAFETY_MARGIN = 0.1;    // Safety margin to spare some global memory for CUDA runtime overhead and possible fragmentation.
                                                         // TODO: what happens if we bump it down? How far can we go?
+
+    static constexpr idx_t PREFIX_KEY_GATHER_PREFETCH_D = 16;   // Software-prefetch lookahead for prefix-key gathering in initial ranking.
+    static constexpr idx_t RETIREE_MARK_PREFETCH_D = 16;    // Software-prefetch lookahead for marking retirees in the partition-ID map.
 
     // Bytes per suffix required in each of the two device key-buffers, per
     // partition. The initial-ranking phase sorts the suffixes by their `\ell`-
@@ -52,12 +59,14 @@ private:
     // Assumed worst-case ratio of actual max partition-size to the target
     // estimated during pivots-selection.
     static constexpr double PART_SZ_IMBALANCE_SLACK = 1.20;
+    inline static const double IMBALANCE_SLACK = env::get_f64("GPU_SACA_IMBALANCE_SLACK").value_or(PART_SZ_IMBALANCE_SLACK);    // The slack in effect.
 
     const idx_t n_; // Size of the text.
     T_sym_* T_h_;   // Text.
     const std::string ip_path_; // Filesystem path the input text.
+    inline static const idx_t TEXT_READER_C = env::get_u64("GPU_SACA_TEXT_READER_C").value_or(16);  // Threads reading the text in parallel.
     const std::string op_path_; // Filesystem path to output the suffix array to.
-
+    inline static const bool DIRECT_OUTPUT = env::get_u64("GPU_SACA_DIRECT_OUTPUT").value_or(1) != 0;   // Whether the output bypasses the page-cache.
 
     p_id_t p_;  // Number of partitions for the SA.
 
@@ -66,7 +75,10 @@ private:
 
     std::vector<Pivot_Key> pivots;  // The pivots to break the SA into partitions. The pivots are inclusive upper bounds of their partition.
 
-    p_id_t* P_id;   // Partition-IDs of the suffixes.
+    Partition_ID_Map P_id;  // Partition-IDs of the suffixes, with their retirement-flags; the flags alone while `Π` is on disk.
+    bool pid_spill_;    // Whether `Π` is kept on disk until the initial ranking completes.
+    Direct_File pid_file_;  // File of `Π`'s words, while it is on disk.
+    Partition_ID_Map P_id_check_;   // Copy of `Π` while it is on disk, for the tests' checks.
 
     std::vector<idx_t> P_cap;   // Full initial sizes of the partitions.
     std::vector<idx_t> Active_sz;   // Active-set sizes of the suffix partitions.
@@ -87,6 +99,9 @@ private:
         static constexpr idx_t CHUNK_CAP = (idx_t(1) << 21);
         inline static const idx_t PREFETCH_DEPTH = env::get_u64("GPU_SACA_PREFETCH_DEPTH").value_or(0); // Complete partitions to stage ahead for the device-dispatcher.
         inline static const idx_t WRITEBACK_DEPTH = env::get_u64("GPU_SACA_WRITEBACK_DEPTH").value_or(0);   // Complete partitions to stage ahead to return to the backend.
+        inline static const idx_t READER_C = env::get_u64("GPU_SACA_READER_C").value_or(24);    // Reader-threads count. TODO: tune default.
+        inline static const idx_t WRITER_C = env::get_u64("GPU_SACA_WRITER_C").value_or(8); // Writer-threads count. TODO: tune default.
+        static constexpr std::size_t SLAB_ELEM_BYTES = LANE_BYTES + sizeof(Prefix_Key) + sizeof(beta_t) + 2 * MESSAGE_BYTES;    // Bytes per element of a slab.
 
         // Suffixes per chunk in the partition-ID computation.
         inline static const idx_t PID_CHUNK_CAP = env::get_u64("GPU_SACA_PID_CHUNK_CAP").value_or(idx_t(1) << 26);
@@ -100,6 +115,8 @@ private:
         idx_t admit_budget_;    // Maximum slab-count that may be posted for reading at the same time (i.e. committed to open assemblies).
 
         std::vector<Staging_Slab> S;    // The pinned staging-slab pool, bridging partition-backend to device.
+        std::thread slab_pinner_;   // Background thread to pin the slab pool.
+        double slab_pin_time_;  // Time taken to pin the slab pool, in seconds.
 
         // TODO: the following staging data structures need to move to their dedicated class.
 
@@ -112,10 +129,20 @@ private:
 
         std::unique_ptr<Partition_Assembly[]> part_assembly;    // Per-partition assembly records (i.e. which chunks assemble them); `p_` of them.
 
+        Build_Timing build_timing_; // Per-phase wall-clock timings.
+
 
         // Sets the staging configurations: slab capacity, slab pool size, and
         // reader- / writer-pool sizes.
         void setup_staging_config();
+
+        // Returns the capacity of each staging-slab for partitions of at most
+        // `P_sz_max` suffixes.
+        static idx_t slab_capacity(idx_t P_sz_max);
+
+        // Returns the count of slabs, of capacity `cap`, in the pool for
+        // partitions of at most `P_sz_max` suffixes.
+        static idx_t slab_count(idx_t P_sz_max, idx_t cap);
 
         // Returns the total memory used by the slab-pool.
         std::size_t slab_pool_memory() const;
@@ -143,6 +170,8 @@ private:
 
         idx_t* unserved_c_d;                // Counters across partitions in a generation: active suffixes with no messaged received;
                                             // temporary, for verification purposes.
+        idx_t* pill_c_d;                    // Counters across partitions in a generation: active suffixes with a poison-pill received;
+                                            // temporary, for verification purposes.
     // }
 
 
@@ -151,9 +180,24 @@ private:
     void load_text();
 
     // Returns the fixed RAM-budget (in bytes) required in the algorithm.
-    // Currently: the text (`T`), the partition-IDs (`Π`), the scatter-buffers
-    // in partitioning, and backend's fixed space.
+    // Currently: the text (`T`) and the partition-IDs (`Π`)—or, while `Π` is on
+    // disk, the larger of the two, `Π`'s retirement-flags, and a window of it in
+    // partitioning—the slab-pool, the scatter-buffers in partitioning, and
+    // backend's fixed space.
     std::size_t fixed_budget() const;
+
+    // Returns, ahead of partitioning, a bound of the fixed RAM-budget with `T`
+    // and `Π` both resident: the slab-pool, sized by the largest partition, is
+    // sized for the partitions' mean size past the imbalance slack.
+    std::size_t fixed_budget_bound() const;
+
+    // Returns the count of suffixes per window of `Π` read back in partitioning
+    // while it is on disk.
+    idx_t pid_window() const;
+
+    // Returns the partition-ID of the `x`'th suffix: the pivots' interval of its
+    // `K`-prefix in the text, as partitioning finds it.
+    p_id_t partition_of(idx_t x) const;
 
     // Selects the set of pivots for the partitioning of the suffixes.
     void select_pivots();
@@ -180,6 +224,10 @@ private:
     // of data between the partition-backend and the device buffers.
     void setup_staging();
 
+    // Opens the spill-store on the scratch roots set by `GPU_SACA_SCRATCH`,
+    // unless open already.
+    void open_scratch();
+
     // Partitions the suffixes based on the selected pivots.
     void partition();
 
@@ -194,6 +242,11 @@ private:
     // Computes the partition-IDs of the suffixes.
     void compute_partition_IDs();
 
+    // Reads `Π` back whole from its file, and marks in it the retirement-flags
+    // held meanwhile; then the larger of `T`'s and `Π`'s space, and the flags',
+    // go to the backend's RAM-tier, less `Π`'s.
+    void reload_partition_IDs();
+
     // Returns the active set size.
     idx_t active_set_size() const;
 
@@ -205,6 +258,11 @@ private:
 
     // Stages the slab `s`'s content for upload with required host-side compute.
     template <bool init_rank_> void stage_slab(Staging_Slab& s);
+
+    // Marks the retirees in the slab `s`, processed at the device, as retired
+    // in the partition-ID map: the suffixes past their partition's new active-
+    // set.
+    void destage_slab(const Staging_Slab& s);
 
     // Sorts and initially ranks the `p_id`'th partition, and filters the
     // entries in the partition with unique ranks by grouping them into the tail
@@ -241,13 +299,18 @@ private:
 public:
 
     // Constructs a GPU-SACA object for the input text at path `ip_path`, to
-    // output the suffix array to the file at path `op_path`.
+    // output the suffix array in index-lanes to the file at path `op_path`. An
+    // empty `op_path` constructs the suffix array without dumping it.
     GPU_SACA(const std::string& ip_path, const std::string& op_path);
 
     ~GPU_SACA();
 
-    // Builds the suffix array into the file at the output path.
+    // Builds the suffix array into the file at the output path. Throws
+    // `Host_Budget_Refusal` if the host-budget cannot fit the fixed allocation.
     void build_SA();
+
+    // Returns per-phase timings of the method's execution.
+    const Build_Timing& timings() const { return build_timing_; }
 };
 
 }

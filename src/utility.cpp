@@ -1,28 +1,30 @@
 
 #include "utility.hpp"
 #include "utility.cuh"
+#include "env.hpp"
 
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
 
 #include <cstring>
 #include <fstream>
+#include <cerrno>
 #include <cstdlib>
 
 
 namespace gpu_saca
 {
 
-void CUDART_CB fatal_error_callback(void* const user_data)
+void synchronize_or_abort(const cudaStream_t s, const char* const reason)
 {
-    // Check if the stream or device has fallen into an error state.
-    const auto err = cudaGetLastError();
+    const auto err = cudaStreamSynchronize(s);
 
-    // If the kernel prior to this `__trap()`-ed, `err` will be `cudaErrorLaunchFailure`.
+    // If a kernel on `s` `__trap()`-ed, `err` will be `cudaErrorLaunchFailure`.
     if(err != cudaSuccess)
     {
-        std::cerr <<    "\n[ASYNC BACKDOOR] Fatal GPU error detected: " << cudaGetErrorString(err) <<
-                        "; due to: " << static_cast<const char*>(user_data) << ". Aborting.\n";
+        std::cerr << "\nFatal GPU error detected: " << cudaGetErrorString(err) << "; due to: " << reason << ". Aborting.\n";
         std::exit(EXIT_FAILURE);
     }
 }
@@ -48,6 +50,113 @@ std::size_t available_memory()
 
     std::cerr << "Could not read `MemAvailable` from /proc/meminfo. Aborting.\n";
     std::exit(EXIT_FAILURE);
+}
+
+
+std::size_t resident_memory()
+{
+    constexpr const char* field = "VmRSS:";
+    std::ifstream status("/proc/self/status");
+    std::string line;
+
+    while(std::getline(status, line))
+        if(line.rfind(field, 0) == 0)
+        {
+            std::stringstream ss(line.substr(sizeof("VmRSS:") - 1));
+            std::size_t memory_KB = 0;
+            if(ss >> memory_KB)
+                return memory_KB * 1024;
+        }
+
+    return 0;
+}
+
+
+void* reserve_memory(const std::size_t bytes)
+{
+    if(bytes == 0)
+        return nullptr;
+
+    // Over-map by a huge page, and trim the mapping down to a huge-page aligned base.
+    const auto res_bytes = (bytes + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
+    const auto map_bytes = res_bytes + HUGE_PAGE_SIZE;
+    void* const map = ::mmap(nullptr, map_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if(map == MAP_FAILED)
+    {
+        std::cerr   << "Could not reserve " << (res_bytes / (1024.0 * 1024.0 * 1024.0)) << "GBs of address-space: " << std::strerror(errno) << "."
+                    << " Address-space reservations require `vm.overcommit_memory` to be 0 or 1. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    const auto map_addr = reinterpret_cast<std::uintptr_t>(map);
+    const auto base = (map_addr + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1);
+    const auto head = base - map_addr;  // Unaligned head to trim.
+    const auto tail = map_bytes - head - res_bytes; // Surplus tail to trim.
+    if(head > 0)
+        ::munmap(map, head);
+    if(tail > 0)
+        ::munmap(reinterpret_cast<void*>(base + res_bytes), tail);
+
+    if(env::get_u64("GPU_SACA_MADV_HUGEPAGE").value_or(0) != 0) // Best-effort: opts into synchronous compaction on faults too, under `defrag=madvise`.
+        ::madvise(reinterpret_cast<void*>(base), res_bytes, MADV_HUGEPAGE);
+
+    return reinterpret_cast<void*>(base);
+}
+
+
+void unreserve_memory(void* const ptr, const std::size_t bytes)
+{
+    if(ptr != nullptr)
+        ::munmap(ptr, (bytes + HUGE_PAGE_SIZE - 1) & ~(HUGE_PAGE_SIZE - 1));
+}
+
+
+void release_memory(void* const ptr, const std::size_t bytes)
+{
+    if(ptr != nullptr && bytes > 0)
+        ::madvise(ptr, bytes, MADV_DONTNEED);
+}
+
+
+std::pair<std::size_t, std::size_t> thp_coverage(const void* const p)
+{
+    std::ifstream smaps("/proc/self/smaps");
+    if(!smaps)
+        return {0, 0};
+
+    const auto addr = reinterpret_cast<std::uintptr_t>(p);
+    bool in_target_block = false;
+    std::size_t rss = 0, thp = 0;
+
+    std::string line;
+    while(std::getline(smaps, line))
+    {
+        std::uintptr_t low, high;
+        if(std::sscanf(line.c_str(), "%lx-%lx", &low, &high) == 2)  // A mapping header.
+        {
+            if(in_target_block) // Just walked past the target mapping block.
+                break;
+
+            in_target_block = (addr >= low && addr < high);
+            continue;
+        }
+
+        if(!in_target_block)
+            continue;
+
+
+        // Parse metrics from the target block.
+
+        std::size_t kb;
+        if(std::sscanf(line.c_str(), "Rss: %zu kB", &kb) == 1)
+            rss = (kb << 10);
+        else if(std::sscanf(line.c_str(), "AnonHugePages: %zu kB", &kb) == 1 ||
+                std::sscanf(line.c_str(), "ShmemHugePages: %zu kB", &kb) == 1 ||
+                std::sscanf(line.c_str(), "FileHugeMapped: %zu kB", &kb) == 1) 
+            thp += (kb << 10);
+    }
+
+    return {rss, thp};
 }
 
 }
@@ -77,6 +186,72 @@ void write_and_flush(const int fd, const std::string& path, const void* const bu
     // This does not wait, hence the dirty set stays small without the writer stalling.
     if(::sync_file_range(fd, off, bytes, SYNC_FILE_RANGE_WRITE) != 0)
         exit_on_io_failure("sync_file_range", path);
+}
+
+
+void read_parallel(const std::string& path, void* const dst, const std::size_t bytes, const std::size_t thread_c)
+{
+    auto fd = ::open(path.c_str(), O_RDONLY | O_DIRECT);
+    if(fd < 0 && errno == EINVAL)   // The filesystem does not support direct I/O.
+    {
+        std::cerr << "Warning: no direct reads at filesystem-path: " << path << "; reading through the page-cache.\n";
+        fd = ::open(path.c_str(), O_RDONLY);
+    }
+
+    if(fd < 0)
+        exit_on_io_failure("open", path);
+
+    constexpr std::size_t BLOCK = std::size_t(1) << 26; // Bytes per read.
+    const auto block_c = (bytes + BLOCK - 1) / BLOCK;
+
+    #pragma omp parallel for num_threads(thread_c) schedule(dynamic, 1)
+    for(std::size_t b = 0; b < block_c; ++b)
+    {
+        const auto off = b * BLOCK;
+        const auto sz = std::min(BLOCK, bytes - off);
+        const auto to_read = math::block_up<PAGE_SIZE>(sz); // Direct reads take whole pages; the file's last one ends short.
+        std::size_t read = 0;
+        while(read < sz)
+        {
+            const auto read_bytes = ::pread(fd, static_cast<char*>(dst) + off + read, to_read - read, off + read);
+            if(read_bytes < 0)
+                exit_on_io_failure("pread", path);
+            else if(read_bytes == 0)
+                exit_on_io_failure("pread: unexpected EOF", path);  // `errno` may be stale for the EOF case.
+
+            read += read_bytes;
+        }
+    }
+
+    if(::close(fd) != 0)
+        exit_on_io_failure("close", path);
+}
+
+
+void raise_open_files_limit(const std::size_t required)
+{
+    rlimit lim;
+    if(::getrlimit(RLIMIT_NOFILE, &lim) != 0)
+    {
+        std::cerr << "getrlimit(RLIMIT_NOFILE) failed; error: " << std::strerror(errno) << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    if(lim.rlim_cur == RLIM_INFINITY || lim.rlim_cur >= required)
+        return;
+
+    if(lim.rlim_max != RLIM_INFINITY && lim.rlim_max < required)
+    {
+        std::cerr << "The hard limit of " << lim.rlim_max << " open files falls below the " << required << " the spill-store may require. Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
+
+    lim.rlim_cur = (lim.rlim_max == RLIM_INFINITY ? required : lim.rlim_max);   // The open-files limit cannot go infinite.
+    if(::setrlimit(RLIMIT_NOFILE, &lim) != 0)
+    {
+        std::cerr << "setrlimit(RLIMIT_NOFILE) failed; error: " << std::strerror(errno) << ". Aborting.\n";
+        std::exit(EXIT_FAILURE);
+    }
 }
 
 }

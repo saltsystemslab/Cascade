@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 """
-Tokenize a JSONL corpus into ONE little-endian uint16 token array, matching the
+Tokenize a JSONL or Parquet corpus into ONE little-endian uint16 token array, matching the
 infini-gram on-disk layout (2 bytes/token, 0xFFFF as the document separator).
+
+The separator is written BEFORE each document, so an array looks like
+    SEP doc1 SEP doc2 ... SEP docN
+and ends in a real token id. This matches infini-gram's convention. Arrays built
+before 2026-09-11 used a TRAILING separator and ended in 0xFFFF; reseparate.py
+converts them, and verifier.py --sep-last still checks one.
+
+Note the tradeoff: a trailing-separator array could be checked for truncation by
+asserting its last element is 0xFFFF. Here the last element is legitimately a
+real token, so truncation is caught by the document count and size instead.
 
 Many independent 1-CPU tasks, then a concat.
     # Phase 1 (run as a job array, task i of N):
@@ -23,11 +33,14 @@ refers to the same file everywhere; downloads must be complete before tokenizing
 Notes:
   * Llama-2 tokenizer is gated and needs `sentencepiece`. GPT-2 ("gpt2") and OLMo
     ("allenai/OLMo-7B-hf") are ungated; use the -hf OLMo repo (no trust_remote_code).
+  * Parquet inputs need `pyarrow`, and want a larger --mem: pyarrow decompresses
+    a whole row group's column chunk at a time, which --batch-size cannot bound.
   * Token id 0xFFFF (65535) is the reserved separator; tokenizer vocab must be
     <= 65535 (Llama-2 32k / GPT-2 50k / OLMo 50k all fit).
 """
 
 import argparse
+import contextlib
 import gzip
 import io
 import json
@@ -56,6 +69,69 @@ def open_text(path):
     return open(p, "rt", encoding="utf-8")
 
 
+def iter_records(path, field, batch_size):
+    """Yield the raw FIELD value of every record in PATH.
+
+    .parquet  -> pyarrow, one row group at a time, FIELD column only
+    otherwise -> JSONL (plain / .gz / .zst) via open_text(), line by line
+
+    Validation is EAGER: this function is deliberately not itself a generator,
+    so a missing or wrongly-typed column raises here -- before the caller opens
+    the output file. If it were a generator the check would not run until the
+    first next(), by which point a part file would already exist, and a part
+    that exists is a part the resume logic treats as done.
+
+    Returns a generator either way; close() it (or use contextlib.closing).
+    """
+    p = str(path)
+    if p.endswith(".parquet"):
+        import pyarrow as pa               # pip install pyarrow
+        import pyarrow.parquet as pq
+        pf = pq.ParquetFile(p)             # raises on a truncated/footerless file
+        names = pf.schema_arrow.names
+        if field not in names:
+            pf.close()
+            raise KeyError(
+                f"{p}: no {field!r} column (columns: {names}). Refusing to produce "
+                f"an empty part -- it would look 'done' to the resume logic and "
+                f"silently shorten the array. Check --text-field.")
+        t = pf.schema_arrow.field(field).type
+        if not (pa.types.is_string(t) or pa.types.is_large_string(t)):
+            pf.close()
+            raise TypeError(
+                f"{p}: column {field!r} has type {t}, expected string. A binary or "
+                f"struct column would reach the tokenizer as bytes or dict.")
+        return _parquet_texts(pf, field, batch_size)
+    return _jsonl_texts(p, field)
+
+
+def _parquet_texts(pf, field, batch_size):
+    try:
+        # iter_batches reads a row group at a time and projects to FIELD only,
+        # so the columns we do not want (fineweb ships 9) are never decompressed.
+        # Peak RSS is one row group's decompressed text column plus one batch of
+        # Python strs -- batch_size bounds the latter, not the former, which is
+        # why parquet corpora need a bigger --mem than JSONL ones.
+        for rb in pf.iter_batches(batch_size=batch_size, columns=[field]):
+            for text in rb.column(0).to_pylist():   # SQL null -> None
+                yield text
+    finally:
+        pf.close()
+
+
+def _jsonl_texts(path, field):
+    with open_text(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:                   # blank line
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:   # malformed line
+                continue
+            yield obj.get(field)           # falsy -> skipped by the caller
+
+
 # --- worker globals (loaded once per process via the Pool initializer) -------
 _TOK = None
 _TEXT_FIELD = "text"
@@ -75,11 +151,12 @@ def _init_worker(tokenizer_name, text_field):
 def tokenize_file(task):
     """Tokenize one input file -> its part file, via a .tmp + atomic rename."""
     import numpy as np
-    idx, in_path, out_path, batch_size = task
+    idx, in_path, out_path, batch_size, allow_empty = task
     tmp_path = out_path + ".tmp"
     n_ids = 0   # uint16 values written (tokens + separators)
     n_docs = 0
-    with open_text(in_path) as f, open(tmp_path, "wb") as out:
+    records = iter_records(in_path, _TEXT_FIELD, batch_size)   # eager schema check
+    with contextlib.closing(records) as recs, open(tmp_path, "wb") as out:
         batch = []
 
         def flush(texts):
@@ -89,28 +166,37 @@ def tokenize_file(task):
             encoded = _TOK(texts, add_special_tokens=False)["input_ids"]
             buf = []
             for ids in encoded:
-                buf.extend(ids)
+                # LEADING separator: 0xFFFF goes BEFORE each document, matching
+                # infini-gram. This composes across parts exactly as the trailing
+                # convention did -- every part begins with a separator and ends
+                # with a real token, so concatenating them in index order yields
+                # one well-formed array with no seam fixups.
                 buf.append(SEP)
+                buf.extend(ids)
                 n_ids += len(ids) + 1
                 n_docs += 1
             np.asarray(buf, dtype="<u2").tofile(out)
 
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            text = obj.get(_TEXT_FIELD)
-            if not text:
+        for text in recs:
+            if not text:                 # None / "" -- unchanged semantics
                 continue
             batch.append(text)
             if len(batch) >= batch_size:
                 flush(batch)
                 batch = []
         flush(batch)
+    # A zero-document part is the one failure this design cannot otherwise see:
+    # skip-if-exists counts it as done, do_concat accepts it, and the array comes
+    # out short by exactly one file's documents while every other check still
+    # passes. A wrong --text-field would do this to EVERY file. So refuse to
+    # promote it, and leave no part behind for a resume to trust.
+    if n_docs == 0 and not allow_empty:
+        os.unlink(tmp_path)
+        raise RuntimeError(
+            f"{in_path}: produced 0 documents. Refusing to write an empty part -- "
+            f"it would look 'done' to the resume logic and silently drop this file "
+            f"from the array. Check --text-field (currently {_TEXT_FIELD!r}) and the "
+            f"input file; pass --allow-empty-parts if an empty input is expected.")
     os.replace(tmp_path, out_path)   # atomic within the same directory/filesystem
     return idx, os.path.basename(in_path), n_ids, n_docs
 
@@ -183,13 +269,18 @@ def main():
     ap.add_argument("--batch-size", type=int, default=1000,
                     help="documents per tokenizer call")
     ap.add_argument("--glob", default="*.jsonl*",
-                    help="file pattern; also matches .json.gz, .jsonl.gz, .jsonl.zst")
+                    help="file pattern; also matches .json.gz, .jsonl.gz, .jsonl.zst, "
+                         "and .parquet (pass e.g. --glob 'train-*.parquet')")
     ap.add_argument("--shard", type=parse_shard, default=None, metavar="I/N",
                     help="Phase 1: tokenize only files with index%%N==I (stride)")
     ap.add_argument("--concat", action="store_true",
                     help="Phase 2: stitch existing parts into the final array")
     ap.add_argument("--keep-temp", action="store_true",
                     help="keep the parts dir after a successful concat")
+    ap.add_argument("--allow-empty-parts", action="store_true",
+                    help="permit a 0-document input file to produce an empty part "
+                         "(default: hard error, since an empty part looks 'done' to "
+                         "the resume logic and silently shortens the array)")
     args = ap.parse_args()
 
     if args.shard and args.concat:
@@ -216,7 +307,8 @@ def main():
         role = "all files"
 
     doneset = {i for i in my_idx if os.path.exists(part_path(parts_dir, i))}
-    todo = [(i, str(files[i]), part_path(parts_dir, i), args.batch_size)
+    todo = [(i, str(files[i]), part_path(parts_dir, i), args.batch_size,
+             args.allow_empty_parts)
             for i in my_idx if i not in doneset]
 
     print(f"{len(files)} files total; this run: {role} -> {len(my_idx)} assigned, "

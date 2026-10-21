@@ -7,6 +7,7 @@
 #include "types.hpp"
 #include "bit-layout.hpp"
 #include "Direct_File.hpp"
+#include "lane.hpp"
 #include "cross-compile.hpp"
 
 #include <algorithm>
@@ -27,12 +28,18 @@ static_assert(MSG_RANK_MASK == bit_layout::SECONDARY_MASK, "Message-rank and key
 
 }
 
-// Size of a message.
-constexpr inline std::size_t MESSAGE_BYTES = sizeof(idx_t) + sizeof(msg_rank_t);
+// Size of a message: its target-lane and its rank.
+constexpr inline std::size_t MESSAGE_BYTES = LANE_BYTES + sizeof(msg_rank_t);
 
 // Size-granularity at which a destination-partition's message-group starts;
-// required for `O_DIRECT` alignment purposes.
-constexpr inline std::size_t MSG_ALIGN = Direct_File::DISK_BLOCK / std::min<idx_t>(sizeof(idx_t), sizeof(msg_rank_t));
+// required for `O_DIRECT` alignment purposes: a disk-block aligned group in
+// each message field, the target-lanes and the ranks.
+constexpr inline std::size_t MSG_ALIGN = std::max<std::size_t>(lane::ALIGN, Direct_File::DISK_BLOCK / sizeof(msg_rank_t));
+
+// Count of RAM message-chunks tiling a staging-slab's inbox-range. Slab-
+// capacities are multiples of `MSG_CHUNKS_PER_SLAB * MSG_ALIGN`, so that every
+// message-chunk holds whole `MSG_ALIGN`-groups of messages.
+constexpr inline std::size_t MSG_CHUNKS_PER_SLAB = 8;
 
 
 // Returns `true` iff the message-rank `r` is a poison-pill.

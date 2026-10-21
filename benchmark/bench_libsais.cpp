@@ -1,273 +1,110 @@
 
-/*
+// libsais baseline driver. Both alphabet widths from one binary: the two upstream
+// entry points differ only in `T`'s type. Library facts: see baselines.md.
 
-Benchmark harness:
-
-    bench_libsais run    --input P --n N [--threads T] [--fs F] [--sa-out P]
-                          [--cache warm|cold|as-is] [--corpus NAME]
-                          [--results-dir D] [--run-id ID]
-
-    bench_libsais verify --input P --n N --sa P [--against P]
-                          [--results-dir D] [--run-id ID]
---*/
-
-#include "corpus.hpp"
-#include "record.hpp"
-#include "bench_common.hpp"
+#include "bench.hpp"
 
 #include "libsais16x64.h"
-#include "libsais.h"
+#include "libsais64.h"
 
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <string>
-#include <vector>
-
-
-#ifndef BENCH_REPO_COMMIT
-    #define BENCH_REPO_COMMIT "unknown"
-#endif
-
-#ifndef BENCH_BUILD_TYPE
-    #define BENCH_BUILD_TYPE "unknown"
-#endif
+#include <omp.h>
 
 
 namespace
 {
 
-using namespace gpu_saca::bench;
+using namespace bench;
 
 
-int run(const Args& arg)
+// The only difference between the widths. `freq` stays null: we never use the
+// histogram, and supplying one would change what is measured.
+inline int64_t sais_omp(const uint8_t* const T, int64_t* const SA, const int64_t n, const int64_t fs, const int64_t threads)
 {
-    const auto t_start = Clock::now();
+    return libsais64_omp(T, SA, n, fs, nullptr, threads);
+}
 
-    gpu_saca::bench::Run_Record rec;
-    rec.method              = "libsais16x64";
-    rec.method_version      = LIBSAIS_VERSION_STRING;
-    rec.commit              = BENCH_REPO_COMMIT;
-    rec.build_type          = BENCH_BUILD_TYPE;
-    rec.input_path          = arg.input;
-    rec.corpus              = arg.corpus;
-    rec.threads             = arg.threads;
-    rec.fs                  = arg.fs;
-    rec.cache_policy        = arg.cache;
-    rec.sa_element_bytes    = sizeof(int64_t);
+inline int64_t sais_omp(const uint16_t* const T, int64_t* const SA, const int64_t n, const int64_t fs, const int64_t threads)
+{
+    return libsais16x64_omp(T, SA, n, fs, nullptr, threads);
+}
 
-    // libsais16x64 takes u16 natively: no alphabet conversion happens.
-    rec.t_convert        = 0.0;
 
-    rec.run_id = arg.run_id.empty()
-                    ?   gpu_saca::bench::make_run_id("libsais16x64", rec.corpus, arg.n)
-                        : arg.run_id;
+template <typename T_sym_>
+Outcome core(Ctx<T_sym_>& c)
+{
+    // With dynamic threads on, libsais silently runs serial and a thread sweep
+    // comes back flat with no error anywhere (baselines.md). Refuse rather than
+    // record a plausible-looking wrong number.
+    if(omp_get_dynamic() != 0)
+        return {st::BAD_PARAM, 0,
+                "OMP_DYNAMIC is enabled; libsais would silently run serial. Set OMP_DYNAMIC=false."};
 
-    gpu_saca::bench::Buffer<uint16_t> T;
-    gpu_saca::bench::File_Prop id;
-    std::string err;
+    // The ambient OpenMP ceiling, not libsais's thread count: `threads` goes
+    // straight into the API below. Equal to what libsais uses only at --threads 0.
+    c.rec.threads_avail = omp_get_max_threads();
 
-    const auto emit = [&](const char* const status, const int64_t code, const std::string& detail)
-    {
-        rec.status   = status;
-        rec.code     = code;
-        rec.detail   = detail;
-        rec.t_e2e    = since(t_start);
-        rec.peak_rss = gpu_saca::bench::peak_rss_bytes();
-
-        if(!rec.write(arg.results_dir))
-        {
-            std::fprintf(stderr, "FATAL: could not write record to %s\n", arg.results_dir.c_str());
-            return 1;
-        }
-
-        std::fprintf(stderr, "%s\n", rec.to_json().c_str());
-
-        return 0;
-    };
-
+    Buffer<int64_t> SA;
+    if(!SA.allocate(c.n + c.arg.fs))
+        return {st::OOM_HOST, 0,
+                "SA allocation failed: " + std::to_string(c.n + c.arg.fs) + " x 8 B"};
 
     const auto t0 = Clock::now();
-
-    if(!gpu_saca::bench::load_prefix(arg.input, arg.n, T, id, err, arg.cache == "cold"))
-        return emit(gpu_saca::bench::st::BAD_INPUT, 0, err);
-
-    rec.t_load = since(t0);
-
-    rec.n_tokens = T.n;
-    rec.n_symbols = T.n;
-    rec.file_size = id.size;
-    rec.file_mtime = id.mtime;
-
-    if(arg.n > 0 && static_cast<int64_t>(T.n) < arg.n)
-        rec.notes = "short corpus: requested " + std::to_string(arg.n);
-
-
-    gpu_saca::bench::Buffer<int64_t> SA;
-
-    const auto t1 = Clock::now();
-    if(!SA.allocate(T.n + arg.fs))
-        return emit(gpu_saca::bench::st::OOM_HOST, 0,
-                    "SA allocation failed: " + std::to_string(T.n + arg.fs) + " entries");
-    rec.t_alloc = since(t1);
-
-
-    const auto t2 = Clock::now();
-
-    const int64_t r = libsais16x64_omp(T.p, SA.p, T.n, arg.fs, nullptr, arg.threads);
-    rec.t_core = since(t2);
+    const int64_t r = sais_omp(c.T, SA.p, c.n, c.arg.fs, c.arg.threads);
+    c.rec.t_core = since(t0);
 
     if(r != 0)
     {
-        // Confirmed from libsais 2.10.4 source: -2 is allocation failure, -1 is
-        // bad arguments.
-        const char* const s = (r == -2) ? gpu_saca::bench::st::OOM_HOST : gpu_saca::bench::st::LIB_ERROR;
-        return emit(s, r, "libsais16x64 returned " + std::to_string(r));
+        // -2 is an allocation failure, -1 is bad arguments -- which also covers
+        // threads < 0, so the arguments go in `detail` to make -1 diagnosable.
+        const char* const s = (r == -2) ? st::OOM_HOST : st::LIB_ERROR;
+
+        return {s, r, "libsais returned " + std::to_string(r)
+                    + " (n=" + std::to_string(c.n)
+                    + " fs=" + std::to_string(c.arg.fs)
+                    + " threads=" + std::to_string(c.arg.threads) + ")"};
     }
 
-
-    if(!arg.sa_out.empty())
+    if(!c.arg.sa_out.empty())
     {
-        const auto t3 = Clock::now();
-        if(!write_SA(arg.sa_out, reinterpret_cast<const uint64_t*>(SA.p), T.n, err))
-            return emit(gpu_saca::bench::st::LIB_ERROR, 0, err);
-        rec.t_write = since(t3);
+        std::string err;
+        const auto t1 = Clock::now();
+        const bool ok = write_SA(c.arg.sa_out, SA.p, c.n, err);
+        c.rec.t_write = since(t1);
+
+        if(!ok)     return {st::LIB_ERROR, 0, err};
     }
     else
-        rec.t_write = 0.0;
+        c.rec.t_write = 0.0;
 
-    return emit(gpu_saca::bench::st::OK, 0, "");
+    if(c.arg.verify)
+    {
+        std::string detail;
+        c.rec.verify = verify_SA(c.T, SA.p, c.n, detail);
+        if(c.rec.verify != std::string("pass"))
+            return {st::LIB_ERROR, 0, "verification " + c.rec.verify + ": " + detail};
+    }
+
+    return {st::OK, 0, ""};
+}
+
 }
 
 
-int verify(const Args& a)
+int main(int argc, char** argv)
 {
-    gpu_saca::bench::Verify_Record v;
-    v.sa_path = a.sa;
-    v.run_id = a.run_id.empty() ? gpu_saca::bench::make_run_id("verify", a.corpus, a.n) : a.run_id;
-
-    const auto emit = [&](const std::string& detail)
-    {
-        v.detail = detail;
-
-        if(!v.write(a.results_dir))
-        {
-            std::fprintf(stderr, "FATAL: could not write verify record\n");
-            return 1;
-        }
-
-        std::fprintf(stderr, "%s\n", v.to_json().c_str());
-
-        return 0;
-    };
-
-    gpu_saca::bench::Buffer<uint16_t> T;
-    gpu_saca::bench::File_Prop id;
+    bench::Args a;
     std::string err;
 
-    if(!gpu_saca::bench::load_prefix(a.input, a.n, T, id, err, false))
-        return emit(err);
-
-    gpu_saca::bench::Buffer<uint64_t> SA;
-    if(!read_SA(a.sa, SA, T.n, err))
-        return emit(err);
-
-    v.n = SA.n;
-    const int64_t n = SA.n;
-
-    // Tier 1 check: permutation.
+    if(!bench::parse(argc, argv, a, err))
     {
-        std::vector<bool> seen(static_cast<size_t>(n), false);
-
-        for(int64_t i = 0; i < n; ++i)
-        {
-            const int64_t s = SA.p[i];
-
-            if(s < 0 || s >= n || seen[static_cast<size_t>(s)])
-            {
-                v.permutation = "fail";
-                v.first_mismatch = i;
-                return emit("SA is not a permutation at index " + std::to_string(i));
-            }
-
-            seen[static_cast<size_t>(s)] = true;
-        }
-
-        v.permutation = "pass";
-    }
-
-    // Tier 2 check: order. Performed via the ISA.
-    {
-        gpu_saca::bench::Buffer<int64_t> ISA;
-        if(!ISA.allocate(n))
-            return emit("allocation failed for ISA");
-
-        for(int64_t i = 0; i < n; ++i)
-            ISA.p[SA.p[i]] = i;
-
-        const auto rank_next = [&](int64_t s) -> int64_t { return (s + 1 < n) ? ISA.p[s + 1] : int64_t(-1); };
-
-        for(int64_t i = 1; i < n; ++i)
-        {
-            const int64_t p = SA.p[i - 1];
-            const int64_t q = SA.p[i];
-
-            const uint16_t tp = T.p[p], tq = T.p[q];
-            const bool ok = (tp < tq) || (tp == tq && rank_next(p) < rank_next(q));
-            if(!ok)
-            {
-                v.order = "fail";
-                v.first_mismatch = i;
-                return emit("order violated at index " + std::to_string(i));
-            }
-        }
-
-        v.order = "pass";
-    }
-
-    // Tier 3 check: cross-reference against another method's SA.
-    if(!a.against.empty())
-    {
-        v.crossref_against = a.against;
-
-        gpu_saca::bench::Buffer<uint64_t> B;
-        if(!read_SA(a.against, B, n, err))
-        {
-            v.crossref = "fail";
-            return emit(err);
-        }
-
-        for(int64_t i = 0; i < n; ++i)
-            if(SA.p[i] != B.p[i])
-            {
-                v.crossref = "fail";
-                v.first_mismatch = i;
-                return emit("cross-reference mismatch at index " + std::to_string(i));
-            }
-
-        v.crossref = "pass";
-    }
-
-    return emit("");
-}
-
-}
-
-
-int main(int argc, char ** argv)
-{
-    Args        a;
-    std::string err;
-
-    if(!parse(argc, argv, a, err))
-    {
-        // No record: we do not know enough to identify the run. This is the
-        // one case where nonzero exit is correct.
-        std::fprintf(stderr, "%s\n", err.c_str());
+        // The one case where non-zero is right: without args we cannot even name
+        // a record to write.
+        std::fprintf(stderr, "%s\nUsage:\n%s", err.c_str(), bench::usage());
         return 2;
     }
 
-    return (a.mode == "run") ?
-                run(a) :
-                verify(a);
+    // One version macro per entry point; record the one matching the width used.
+    return (a.alphabet == bench::alpha::TOKEN16)
+            ? bench::bench_main<uint16_t>(a, "libsais16x64", LIBSAIS16X64_VERSION_STRING, core<uint16_t>)
+            : bench::bench_main<uint8_t >(a, "libsais64",    LIBSAIS64_VERSION_STRING,    core<uint8_t >);
 }

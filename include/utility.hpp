@@ -8,8 +8,10 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <type_traits>
 #include <limits>
-#include <random>
+#include <utility>
+#include <string>
 #include <vector>
 #include <filesystem>
 #include <fstream>
@@ -25,9 +27,8 @@
 namespace gpu_saca::timer
 {
     // Fields for profiling time.
-
-    typedef std::chrono::high_resolution_clock::time_point time_point_t;
-    const static auto now = std::chrono::high_resolution_clock::now;
+    typedef std::chrono::steady_clock::time_point time_point_t;
+    const static auto now = std::chrono::steady_clock::now;
     const static auto duration = [](const std::chrono::nanoseconds& d) { return std::chrono::duration_cast<std::chrono::duration<double>>(d).count(); };
 
     // Scope-timer, based on RAII mechanism.
@@ -79,6 +80,7 @@ namespace gpu_saca::util
 
 constexpr std::size_t L1_CACHE_LINE_SIZE = 64;
 constexpr std::size_t PAGE_SIZE = 4096;
+constexpr std::size_t HUGE_PAGE_SIZE = 2 * 1024 * 1024;
 
 
 // Wrapper class for a data-element of type `T_` to ensure that in a linear
@@ -117,6 +119,24 @@ namespace math
     {
         return x <= 1 ? 0 : 64 - __builtin_clzll(x - 1);
     }
+
+    // Returns `sz` rounded up to the closest multiple of `BLK`, which needs to
+    // be a power of 2.
+    template <uint64_t BLK>
+    inline uint64_t block_up(const uint64_t sz)
+    {
+        static_assert(BLK > 0 && (BLK & (BLK - 1)) == 0, "BLK must be a power of 2!");
+        return (sz + BLK - 1) & ~(BLK - 1);
+    }
+
+    // Returns `sz` rounded down to the closest multiple of `BLK`, which needs
+    // to be a power of 2.
+    template <uint64_t BLK>
+    inline uint64_t block_down(const uint64_t sz)
+    {
+        static_assert(BLK > 0 && (BLK & (BLK - 1)) == 0, "BLK must be a power of 2!");
+        return sz & ~(BLK - 1);
+    }
 }
 
 
@@ -128,6 +148,10 @@ template <typename T_sym_, uint64_t N = (8 / sizeof(T_sym_))>
 CUDA_SPECIFIER
 uint64_t pack_word(const T_sym_* const T)
 {
+    // A signed symbol would sign-extend across every higher symbol-slot of the word, so the word's numeric order would stop matching the text's
+    // lexicographic order.
+    static_assert(std::is_unsigned_v<T_sym_>, "the symbol type must be unsigned");
+
     if constexpr(N == 0)
         return 0;
     else
@@ -155,12 +179,13 @@ T_* aligned_allocate(const std::size_t size, const std::size_t alignment)
 }
 
 
-// Returns pointer to a memory-allocation for `size` elements of type `T_`;
-// aborts the execution if the allocation fails.
+// Returns pointer to a memory-allocation for `size` elements of type `T_`,
+// aligned to `alignment` if non-zero; aborts the execution if the allocation
+// fails.
 template<typename T_>
-T_* checked_allocate(const std::size_t sz)
+T_* checked_allocate(const std::size_t sz, const std::size_t alignment = 0)
 {
-    auto* const p = allocate<T_>(sz);
+    auto* const p = (alignment == 0 ? allocate<T_>(sz) : aligned_allocate<T_>(sz, alignment));
     if(p == nullptr)
     {
         std::cerr << "Failed to allocate " << sz << "-many bytes for: ";
@@ -198,6 +223,27 @@ void prepage(T_* const ptr, const std::size_t size)
 // Returns the host's currently available memory, in bytes.
 std::size_t available_memory();
 
+// Returns the process' resident set size, in bytes; `0` if not found.
+std::size_t resident_memory();
+
+// Returns a reservation of `bytes` bytes of address-space, `HUGE_PAGE_SIZE`-
+// aligned and backed by physical memory only when touched; `nullptr` for empty
+// reservations. The reservation opts into transparent huge pages iff the env
+// var `GPU_SACA_MADV_HUGEPAGE` is non-zero.
+void* reserve_memory(std::size_t bytes);
+
+// Releases the reservation `ptr` of `bytes` bytes, made with `reserve_memory`.
+void unreserve_memory(void* ptr, std::size_t bytes);
+
+// Returns the physical memory backing the range `[ptr, ptr + bytes)` of a
+// reservation made with `reserve_memory`; `ptr` must be page-aligned. The range
+// stays reserved, and reads back as zeros.
+void release_memory(void* ptr, std::size_t bytes);
+
+// Returns from `/proc/self/smaps` (pseudo-file with memory consumption metrics
+// for each memory mapping), for the memory mapping containing the address `p`,
+// `(RSS-bytes, THP-bytes)`. Both are `0` if not found.
+std::pair<std::size_t, std::size_t> thp_coverage(const void* p);
 
 // Returns the size of the file of elements of type `T_` at path `file_path`.
 template <typename T_>
@@ -291,6 +337,19 @@ struct Collection_Stats
     }
 };
 
+
+// Returns a string with the elements of the collection `C`, separated by single
+// spaces.
+template <typename T_>
+std::string join(const std::vector<T_>& C)
+{
+    std::string s;
+    for(std::size_t i = 0; i < C.size(); ++i)
+        s += (i > 0 ? " " : "") + std::to_string(C[i]);
+
+    return s;
+}
+
 }
 
 
@@ -304,6 +363,16 @@ void exit_on_io_failure(const char* op, const std::string& path);
 // `fd`, opened at path `path`. Additionally queues the bytes for writeback, so
 // that dirty pages do not pile up from a long output-stream.
 void write_and_flush(int fd, const std::string& path, const void* buf, std::size_t bytes, std::size_t off);
+
+// Reads the first `bytes`-many bytes of the file at path `path` into `dst`,
+// with `thread_c` threads reading disjoint blocks of it in parallel. The reads
+// bypass the page-cache, unless the filesystem does not support it. `dst` must
+// be `PAGE_SIZE`-aligned, and have room for `bytes` rounded up to a page.
+void read_parallel(const std::string& path, void* dst, std::size_t bytes, std::size_t thread_c);
+
+// Raises the soft limit on the process's open files to the hard limit, if the
+// soft limit falls below `required`. Aborts if the hard limit falls below it.
+void raise_open_files_limit(std::size_t required);
 
 }
 

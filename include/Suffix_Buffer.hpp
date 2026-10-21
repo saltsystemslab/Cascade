@@ -4,9 +4,9 @@
 
 
 
-#include "Packed_Prefix.hpp"
-#include "Direct_File.hpp"
 #include "types.hpp"
+#include "Direct_File.hpp"
+#include "lane.hpp"
 #include "utility.hpp"
 
 #include "omp.h"
@@ -19,44 +19,40 @@
 namespace gpu_saca
 {
 
-// A buffer of suffixes along with their associated prefix-keys, backed by
-// direct-files.
+class Partition_Backend;
+
+
+// A buffer of suffixes, backed by a partition's storage in the backend.
 class Suffix_Buffer
 {
 private:
 
-    static constexpr std::size_t w_buf_cap = 32 * 1024llu / sizeof(idx_t);  // Worker-local buffers overflow at reaching 32 KBs worth of suffixes.
+    // Worker-local buffers flush at reaching 32 KBs worth of suffix-lanes, rounded up to whole disk-block groups of lanes.
+    static constexpr std::size_t w_buf_cap = (32 * 1024llu / LANE_BYTES + lane::ALIGN - 1) / lane::ALIGN * lane::ALIGN;
 
-    static_assert((w_buf_cap * sizeof(idx_t)) % Direct_File::DISK_BLOCK == 0);
-    static_assert((w_buf_cap * sizeof(Prefix_Key)) % Direct_File::DISK_BLOCK == 0);
+    static_assert(lane::bytes(w_buf_cap) % Direct_File::DISK_BLOCK == 0);
 
-    idx_t* suf_mem_;    // Resident sink for the suffixes.
-    Prefix_Key* key_mem_;   // Resident sink for the prefix-keys.
-    Direct_File* suf_file_; // Spill-file sink for the suffixes.
-    Direct_File* key_file_; // Spill-file sink for the prefix-keys.
+    Partition_Backend* backend_;    // Backend sinking the suffixes.
+    p_id_t p_id_;   // ID of the partition the suffixes belong to.
 
-    idx_t* w_suf_base_;         // Flattened collection of worker-local suffix buffers.
-    Prefix_Key* w_key_base_;    // Flattened collection of worker-local prefix-key-buffers.
+    uint8_t* w_suf_base_;   // Flattened collection of worker-local suffix-lane buffers.
     std::vector<util::Padded<idx_t>> w_fill_;   // Fill count of the worker-local buffers.
 
     std::atomic<idx_t> flushed_;    // Number of suffixes reserved / written to the sink files.
     const idx_t worker_c_;  // Worker count.
 
 
-    auto w_suf(const idx_t w) { return w_suf_base_ + w * w_buf_cap; }   // Returns the `w`'th worker's suffix-buffer.
-    auto w_key(const idx_t w) { return w_key_base_ + w * w_buf_cap; }   // Returns the `w`'th worker's prefix-key-buffer.
+    auto w_suf(const idx_t w) { return w_suf_base_ + lane::bytes(w * w_buf_cap); }  // Returns the `w`'th worker's suffix-buffer.
 
-    // Sinks `sz`-many suffixes and their prefix-keys, from `suf` and `key`, at
-    // the partition-offset `off`.
-    void sink(idx_t off, idx_t sz, const idx_t* suf, const Prefix_Key* key);
+    // Sinks `sz`-many suffixes from the lanes `suf`, at the partition-offset
+    // `off`.
+    void sink(idx_t off, idx_t sz, const uint8_t* suf);
 
 public:
 
-    // Constructs a buffer that overflows suffixes and their prefix-keys to
-    // the partition's sinks: the resident allocations `suf_mem` and `key_mem`
-    // when these are non-null, and the spill-files `suf_file` and `key_file`
-    // otherwise.
-    Suffix_Buffer(idx_t* suf_mem, Prefix_Key* key_mem, Direct_File* suf_file, Direct_File* key_file);
+    // Constructs a buffer that overflows suffixes to the `p_id`'th partition's
+    // storage in the backend `backend`.
+    Suffix_Buffer(Partition_Backend& backend, p_id_t p_id);
 
     Suffix_Buffer(const Suffix_Buffer&) = delete;
     Suffix_Buffer& operator=(const Suffix_Buffer&) = delete;
@@ -69,8 +65,8 @@ public:
     // partitions and `worker_c`-many workers.
     static std::size_t scatter_buffer_memory(std::size_t worker_c, std::size_t p);
 
-    // Adds a suffix with index `suf` and prefix-key `p_key`.
-    void add(idx_t suf, const Prefix_Key& p_key);
+    // Adds a suffix with index `suf`.
+    void add(idx_t suf);
 
     // Flushes the buffer to the sinks. There must be no concurrent pending add
     // invocations.
@@ -81,18 +77,17 @@ public:
 };
 
 
-inline void Suffix_Buffer::add(const idx_t suf, const Prefix_Key& p_key)
+inline void Suffix_Buffer::add(const idx_t suf)
 {
     const auto w_id = omp_get_thread_num();
     auto& fill = w_fill_[w_id].unwrap();
     auto suf_buf = w_suf(w_id);
-    auto key_buf = w_key(w_id);
 
-    suf_buf[fill] = suf, key_buf[fill] = p_key;
+    lane::store(suf_buf, fill, suf);
     if(++fill == w_buf_cap)
     {
         const auto off = flushed_.fetch_add(w_buf_cap, std::memory_order_relaxed);
-        sink(off, w_buf_cap, suf_buf, key_buf);
+        sink(off, w_buf_cap, suf_buf);
         fill = 0;
     }
 }

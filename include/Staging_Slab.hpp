@@ -22,10 +22,11 @@ struct Staging_Slab
 private:
 
     Prefix_Key* key_;   // Keys; typed to the largest-width type used in sort (which is in initial-ranking).
-    idx_t* suf_;    // Suffixes.
+    uint8_t* suf_;  // Suffixes, in lanes.
     beta_t* beta_;  // Backward routing tags.
-    idx_t* msg_target_; // Target recipients of the rank-propagation messages, packed with the sender's forward tag.
+    uint8_t* msg_target_;   // Target recipients of the rank-propagation messages, in lanes.
     msg_rank_t* msg_rank_;  // Ranks carried within the rank-propagation messages.
+    void* alloc_[5];    // Pinned allocations holding the buffers above, in order, each disk-block aligned within its allocation.
     p_id_t p_id_;   // ID of the partition this slab's content belongs to.
     idx_t off_; // Offset of the content of this slab within the corresponding partition.
     p_sz_t inbox_off_;  // Offset of this slab's chunk into its partition's inbox.
@@ -33,6 +34,7 @@ private:
     p_sz_t outbox_off_; // Offset of this slab's chunk into its partition's outbox.
     p_sz_t outbox_sz_;  // Count of outbox messages in this slab's chunk.
     idx_t sz_;  // Number of elements in the slab.
+    bool processed_;    // Whether the slab holds its chunk's device-output.
 
 public:
 
@@ -49,10 +51,10 @@ public:
     // type used as keys.
     auto key() { return key_; }
 
-    // Returns the suffixes of the staged slab.
+    // Returns the suffix-lanes of the staged slab.
     auto suf() const { return suf_; }
 
-    // Returns the suffixes of the staged slab.
+    // Returns the suffix-lanes of the staged slab.
     auto suf() { return suf_; }
 
     // Returns the backward routing tags of the staged slab.
@@ -61,12 +63,10 @@ public:
     // Returns the backward routing tags of the staged slab.
     auto beta() { return beta_; }
 
-    // Returns target recipients of the staged slab's rank-propagation messages,
-    // packed with the sender's forward tag.
+    // Returns the target-lanes of the staged slab's rank-propagation messages.
     auto msg_target() const { return msg_target_; }
 
-    // Returns target recipients of the staged slab's rank-propagation messages,
-    // packed with the sender's forward tag.
+    // Returns the target-lanes of the staged slab's rank-propagation messages.
     auto msg_target() { return msg_target_; }
 
     // Returns ranks carried within the staged slab's rank-propagation messages.
@@ -97,6 +97,12 @@ public:
     // Returns the number of elements in the slab.
     auto size() const { return sz_; }
 
+    // Returns whether the slab holds its chunk's device-output.
+    bool processed() const { return processed_; }
+
+    // Marks the slab as holding its chunk's device-output, past its device-run.
+    void mark_processed() { processed_ = true; }
+
     // Sets the offset of this slab's chunk into its partition's outbox, and the
     // count of outbox messages in this slab's chunk to `outbox_sz`.
     void set_outbox_off_and_size(const idx_t off, const idx_t sz) { outbox_off_ = off, outbox_sz_ = sz; }
@@ -107,7 +113,8 @@ public:
 
     // Tags the slab with the partition-chunk it's carrying (from partition-ID
     // `p_id`, at range `[off, off + sz)`, and the message- chunk it's carrying
-    // (at range `[msg_off, msg_off + inbox_sz)`).
+    // (at range `[msg_off, msg_off + inbox_sz)`); the slab holds no device-
+    // output then.
     void assign(p_id_t p_id, idx_t off, idx_t sz, p_sz_t msg_off, p_sz_t inbox_sz);
 };
 

@@ -1,0 +1,926 @@
+
+// Shared harness for the baseline SACA drivers. `finalize` owns the single
+// record-emission path -- including our own driver, which has its own run flow
+// but have the same record structure.
+
+#ifndef BENCH_HPP
+#define BENCH_HPP
+
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdint>
+#include <cstddef>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <new>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#if defined(__linux__) || defined(__APPLE__)
+    #include <sys/resource.h>
+#endif
+#if defined(__linux__)
+    #include <sched.h>
+#endif
+
+extern "C" char** environ;
+
+#ifndef BENCH_COMMIT
+    #define BENCH_COMMIT "unknown"
+#endif
+#ifndef BENCH_BUILD_TYPE
+    #define BENCH_BUILD_TYPE "unknown"
+#endif
+
+#ifndef BENCH_BUILD_CONFIG
+    #define BENCH_BUILD_CONFIG "unknown"
+#endif
+
+// Corpora are little-endian on-disk arrays.
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+    static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+                  "Corpora are little-endian; a big-endian host would sort byte-swapped symbols.");
+#endif
+
+
+namespace bench
+{
+
+using Clock = std::chrono::steady_clock;
+
+inline double since(const Clock::time_point& t0)
+{
+    return std::chrono::duration<double>(Clock::now() - t0).count();
+}
+
+
+// RAII buffer.
+template <typename T_>
+struct Buffer
+{
+    T_* p = nullptr;
+    int64_t n = 0;
+
+    Buffer() = default;
+    Buffer(const Buffer&) = delete;
+    Buffer& operator=(const Buffer&) = delete;
+    ~Buffer() { std::free(p); }
+
+    bool allocate(const int64_t count)
+    {
+        std::free(p);
+        p = static_cast<T_*>(std::malloc(static_cast<std::size_t>(count) * sizeof(T_)));
+        n = (p ? count : 0);
+        return p != nullptr;
+    }
+};
+
+
+// JSON string escaping. Control bytes below 0x20 must be `\u`-escaped.
+inline std::string esc(const std::string& s)
+{
+    static const char* const hex = "0123456789abcdef";
+    std::string o;
+    o.reserve(s.size() + 8);
+
+    for(const char c : s)
+    {
+        const auto u = static_cast<unsigned char>(c);
+        switch(c)
+        {
+            case '"':   o += "\\\"";    break;
+            case '\\':  o += "\\\\";    break;
+            case '\n':  o += "\\n";     break;
+            case '\r':  o += "\\r";     break;
+            case '\t':  o += "\\t";     break;
+            default:
+                if(u < 0x20)    { o += "\\u00"; o += hex[(u >> 4) & 0xF]; o += hex[u & 0xF]; }
+                else            o += c;
+        }
+    }
+
+    return o;
+}
+
+
+inline std::string now_utc()
+{
+    const auto t = std::time(nullptr);
+    char b[32];
+    std::strftime(b, sizeof(b), "%Y-%m-%dT%H:%M:%SZ", std::gmtime(&t));
+    return std::string(b);
+}
+
+
+inline std::string host_name()
+{
+    char b[256] = {0};
+    return (::gethostname(b, sizeof(b) - 1) == 0) ? std::string(b) : "unknown";
+}
+
+
+// Returns the peak RSS, of this process or else of its reaped children. For a
+// child, it is the kernel's high-water mark at exit, which the OOM reaper may
+// have lowered by then, so an OOM-killed child's is a floor.
+inline int64_t peak_rss_bytes(const bool of_child = false)
+{
+#if defined(__linux__)
+    if(of_child)
+    {
+        struct rusage ru;
+        return (::getrusage(RUSAGE_CHILDREN, &ru) == 0) ? static_cast<int64_t>(ru.ru_maxrss) * 1024 : 0;
+    }
+
+    std::ifstream f("/proc/self/status");
+    for(std::string k; f >> k; )
+        if(k == "VmHWM:")
+        {
+            int64_t kb = 0;
+            f >> kb;
+            return kb * 1024;
+        }
+#elif defined(__APPLE__)    // The macOS `getrusage` fallback to support local compilation.
+    struct rusage ru;
+    if(::getrusage(of_child ? RUSAGE_CHILDREN : RUSAGE_SELF, &ru) == 0)
+        return static_cast<int64_t>(ru.ru_maxrss);
+#endif
+    return 0;
+}
+
+
+// Some kernel information: CPU time separates a thread-count change from a real
+// slowdown; the fault counts separate a page placement change; the context-
+// switch counts separate spinning from sleeping; and the rest say are concerned
+// about differentiating twin runs that did identical work but has significant
+// swings in wall-clock: huge pages refused, allocations stalling in reclaim, or
+// memory served far. The two halves have different scopes, the difference being
+// at the point of use. `getrusage` is per-process and cumulative from exec, so
+// its values are the run's own. The `/proc/vmstat` and numastat half is node-
+// wide and cumulative since boot; hence only a difference across the run is
+// informative (and even then only when the harness runs `--exclusive`, ie one
+// job to a node).
+struct Kernel_Counter
+{
+    // Per-process, absolute.
+    double cpu_user = -1;
+    double cpu_sys = -1;
+    int64_t minflt = -1;    // Minor page faults: page table miss.
+    int64_t majflt = -1;    // Major page faults: RAM miss.
+    int64_t nvcsw = -1;     // Voluntary context switches.
+    int64_t nivcsw = -1;    // Involuntary context switches.
+    // Logical I/O is what the process asked for, physical what reached the
+    // device; the gap between them is the page cache. Both matter here: input
+    // re-read from cache costs no device traffic, and the spill drives bound
+    // every large run.
+    int64_t io_rchar = -1, io_wchar = -1;               // Bytes through read()/write().
+    int64_t io_read_bytes = -1, io_write_bytes = -1;    // Bytes to/from the block device.
+
+    // Node-wide, cumulative since boot: differences to be tracked, not the absolute values.
+    int64_t thp_alloc = -1, thp_fallback = -1;  // Huge pages granted vs refused.
+    int64_t pgscan_direct = -1; // Direct reclaim: an allocation had to wait.
+    int64_t compact_stall = -1; // Compaction entered on an allocation path.
+    int64_t numa_local = -1, numa_other = -1;   // Pages served near vs far.
+    int64_t oom_kill = -1;  // Processes the OOM killer has ended.
+
+    // Node-wide instantaneous levels, NOT counters: what the allocator holds at
+    // the moment they are read. The value worth recording is therefore the one
+    // taken at the start of the run, never a difference across it.
+    int64_t buddy_free = -1;        // Free bytes across every node, zone, order.
+    int64_t buddy_free_huge = -1;   // Of those, what sits in 2 MiB-or-larger blocks.
+};
+
+
+// Returns what the kernel currently reports, from both sources. The per-process
+// half is of this process, or else of its reaped children.
+inline Kernel_Counter read_kernel_counters(const bool of_child = false)
+{
+    Kernel_Counter c;
+#if defined(__linux__) || defined(__APPLE__)
+    struct rusage r;
+    if(::getrusage(of_child ? RUSAGE_CHILDREN : RUSAGE_SELF, &r) == 0)  // Either sums all threads.
+    {
+        c.cpu_user = static_cast<double>(r.ru_utime.tv_sec) + r.ru_utime.tv_usec / 1e6;
+        c.cpu_sys  = static_cast<double>(r.ru_stime.tv_sec) + r.ru_stime.tv_usec / 1e6;
+        c.minflt   = r.ru_minflt;   c.majflt = r.ru_majflt;
+        c.nvcsw    = r.ru_nvcsw;    c.nivcsw = r.ru_nivcsw;
+    }
+#endif
+
+#if defined(__linux__)
+    {
+        std::ifstream f("/proc/vmstat");
+        std::string k;
+        int64_t v = 0;
+        while(f >> k >> v)
+            if     (k == "thp_fault_alloc")     c.thp_alloc     = v;
+            else if(k == "thp_fault_fallback")  c.thp_fallback  = v;
+            else if(k == "pgscan_direct")       c.pgscan_direct = v;
+            else if(k == "compact_stall")       c.compact_stall = v;
+            else if(k == "oom_kill")            c.oom_kill      = v;
+    }
+
+    {   // Per-process and cumulative from exec, like rusage above, so the value
+        // is the run's own and needs no differencing. `O_DIRECT` on the spill
+        // files keeps the physical counts ours; buffered writeback would be
+        // charged to a flusher thread instead. Reaping a child folds its counts
+        // into these, so they cover the child either way.
+        std::ifstream f("/proc/self/io");
+        std::string k;
+        int64_t v = 0;
+        while(f >> k >> v)
+            if     (k == "rchar:")       c.io_rchar       = v;
+            else if(k == "wchar:")       c.io_wchar       = v;
+            else if(k == "read_bytes:")  c.io_read_bytes  = v;
+            else if(k == "write_bytes:") c.io_write_bytes = v;
+    }
+
+    for(int n = 0; ; ++n)   // numastat is per-node; sum over the nodes.
+    {
+        std::ifstream f("/sys/devices/system/node/node" + std::to_string(n) + "/numastat");
+        if(!f)
+            break;
+
+        std::string k;
+        int64_t v = 0;
+        while(f >> k >> v)
+            if     (k == "local_node")  c.numa_local = std::max<int64_t>(c.numa_local, 0) + v;
+            else if(k == "other_node")  c.numa_other = std::max<int64_t>(c.numa_other, 0) + v;
+    }
+
+    {   // /proc/buddyinfo: free-block counts, per node, per zone, per order.
+        // Order 9 is 2 MiB where pages are 4 KiB, i.e. one transparent huge
+        // page, so blocks at order >= 9 are those a THP fault can still be
+        // served from. Small here while buddy_free is large means the node is
+        // fragmented rather than full, which is the state that costs: under
+        // defrag=madvise the kernel does not attempt compaction for an ordinary
+        // heap allocation, so the fault quietly drops to 4 KiB pages and the
+        // node stays that way for every run after it.
+        const int64_t page = ::sysconf(_SC_PAGESIZE);
+        int huge_order = 0;
+        while(page > 0 && (page << huge_order) < (int64_t(2) << 20))
+            ++huge_order;
+
+        std::ifstream f("/proc/buddyinfo");
+        std::string line;
+        while(page > 0 && std::getline(f, line))
+        {
+            // "Node 0, zone   Normal  12694  83681 ..." -- the node number
+            // carries a comma and the zone name varies, so seek past both.
+            const auto z = line.find("zone");
+            if(z == std::string::npos)
+                continue;
+
+            std::istringstream ss(line.substr(z + 4));
+            std::string zone;
+            if(!(ss >> zone))
+                continue;
+
+            int64_t blocks = 0;
+            for(int order = 0; ss >> blocks; ++order)
+            {
+                const int64_t bytes = blocks * (int64_t(1) << order) * page;
+                c.buddy_free = std::max<int64_t>(c.buddy_free, 0) + bytes;
+                if(order >= huge_order)
+                    c.buddy_free_huge = std::max<int64_t>(c.buddy_free_huge, 0) + bytes;
+            }
+        }
+    }
+#endif
+
+    return c;
+}
+
+
+// Kernel counters at the beginning of the run.
+inline const Kernel_Counter counters_at_start = read_kernel_counters();
+
+
+// Returns the size of the affinity mask, i.e. what `nproc` reports, not
+// necessarily the size of the machine: all-cores cannot be assumed.
+inline int64_t cpus_allowed_count()
+{
+#if defined(__linux__)
+    cpu_set_t set;
+    if(::sched_getaffinity(0, sizeof(set), &set) == 0)  return CPU_COUNT(&set);
+#endif
+    return -1;
+}
+
+
+// Returns the FNV-1a hash of the running executable.
+inline uint64_t executable_hash()
+{
+#if defined(__linux__)
+    std::ifstream f("/proc/self/exe", std::ios::binary);
+    if(!f)  return 0;
+
+    uint64_t h = 14695981039346656037ULL;   // Offset basis (20 digits) for FNV-1a.
+    char buf[1 << 16];
+    while(f.read(buf, sizeof(buf)) || f.gcount())
+        for(std::streamsize i = 0; i < f.gcount(); ++i)
+            h = (h ^ static_cast<unsigned char>(buf[i])) * 1099511628211ULL;
+
+    return h;
+#else
+    return 0;
+#endif
+}
+
+
+// Returns very OMP_* and GPU_SACA_* variable actually in the environment.
+inline std::string tuning_env()
+{
+    std::vector<std::string> v;
+    for(char** e = ::environ; e != nullptr && *e != nullptr; ++e)
+    {
+        const std::string kv(*e);
+        if(kv.rfind("OMP_", 0) == 0 || kv.rfind("GPU_SACA_", 0) == 0)
+            v.push_back(kv);
+    }
+
+    std::sort(v.begin(), v.end());
+    std::string r;
+    for(const auto& kv : v)
+        r += (r.empty() ? "" : ";") + kv;
+
+    return r;
+}
+
+
+// The return statuses.
+namespace st
+{
+    inline constexpr const char* OK         = "ok";
+    inline constexpr const char* OOM_HOST   = "oom_host";   // Allocation refused, the run OOM-killed, or its host-budget refused.
+    inline constexpr const char* OOM_DEVICE = "oom_device";
+    inline constexpr const char* BAD_INPUT  = "bad_input";
+    inline constexpr const char* BAD_PARAM  = "bad_param";
+    inline constexpr const char* LIB_ERROR  = "lib_error";
+}
+
+
+// How to interpret the input bytes. Recorded, not inferred.
+namespace alpha
+{
+    inline constexpr const char* TOKEN16  = "token16";
+    inline constexpr const char* BYTE     = "byte";
+    inline constexpr const char* BYTE_T16 = "byte_from_token16";
+
+    inline bool valid(const std::string& a) { return a == TOKEN16 || a == BYTE || a == BYTE_T16; }
+    inline int  symbol_bytes(const std::string& a) { return a == TOKEN16 ? 2 : 1; }
+}
+
+
+// Each run produces a record, in a file. Timing: -1 is "not measured", 0.0 is
+// "measured as zero". No `t_e2e` field: the summarizer sums the buckets.
+struct Record
+{
+    // Major and minor, as in semantic versioning. Minor rises when a field is
+    // added, an enum gains a value, or a range loosens -- records across one
+    // major mix freely, because nothing already present changed meaning. Major
+    // rises when a field is removed, renamed, retyped, or redefined, including
+    // a change to what a timing measures; records across majors do not mix.
+    // A record without `schema_minor` predates the scheme and reads as minor 0.
+    static constexpr int schema_version = 6;
+    static constexpr int schema_minor = 7;
+
+    std::string run_id, commit = BENCH_COMMIT, build_type = BENCH_BUILD_TYPE;
+    // Which build of that commit. The commit alone does not identify the
+    // binary: the same source at a different PREF_KEY_WORDS is a different method.
+    std::string build_config = BENCH_BUILD_CONFIG;
+    std::string host = host_name(), timestamp_utc = now_utc();
+    std::string method, method_version;
+    std::string input, corpus, tokenizer, alphabet;
+    int64_t     symbol_bytes = 0, n_symbols = 0, n_tokens = 0, threads = 0;
+    std::string status;
+    int64_t     code = 0;
+    std::string detail, verify = "off";     // off (not requested) | pass | fail | skip (wanted, infeasible)
+    double      t_load = -1, t_core = -1, t_write = -1;
+    int64_t     peak_rss = 0, peak_device = -1;     // peak_device: -1 where inapplicable
+
+    // What the run actually executed under, rather than what it was asked for.
+    // `threads` above is the request; `threads_avail` is what the OpenMP runtime
+    // resolves, and `cpus_allowed` what the kernel lets it use.
+    double      cpu_user = -1, cpu_sys = -1;
+    int64_t     minflt = -1, majflt = -1, nvcsw = -1, nivcsw = -1;
+    int64_t     io_rchar = -1, io_wchar = -1, io_read_bytes = -1, io_write_bytes = -1;
+    int64_t     threads_avail = -1, cpus_allowed = -1;
+    // How the run was placed, as the harness invoked it, e.g.
+    // "numactl --cpunodebind=0". Declared rather than observed: numactl execs
+    // us, so the wrapper is gone by the time we look. `cpus_allowed` is the
+    // observed cross-check -- a cpunodebind that took shows 64, not 128.
+    std::string placement;
+    uint64_t    exe_hash = 0;
+    std::string env_tuning;
+
+    // Differences over the run.
+    int64_t     thp_alloc = -1, thp_fallback = -1;
+    int64_t     pgscan_direct = -1, compact_stall = -1;
+    int64_t     numa_local = -1, numa_other = -1;
+
+    // Not differences: the allocator's state at the instant the run started.
+    int64_t     buddy_free = -1, buddy_free_huge = -1;
+
+    // Our method's phase breakdown. -1 for the baselines.
+    double      t_prepage_pid = -1, t_pivots = -1, t_partition = -1, t_device_setup = -1,
+                t_initial_rank = -1, t_reload_pid = -1, t_exponentiate = -1, t_concatenate = -1;
+    int64_t     n_partitions = -1, n_generations = -1;
+    int64_t     pid_spill = -1; // Whether the partition-ID map stayed on disk until the initial ranking completed.
+    int64_t     host_budget = -1, host_fixed = -1;  // Bytes of the host-memory budget, and of its fixed allocation.
+
+    std::string notes;
+
+    // Two macros so the JSON key and the C++ member are the same token, which
+    // rules out a key that misnames its member. Note what it does not rule out:
+    // a member with no line below compiles cleanly and is silently absent from
+    // the JSON, so adding a field means adding it in both places.
+    std::string to_json() const
+    {
+        std::ostringstream o;
+        o.setf(std::ios::fixed);
+        o.precision(6);
+        const char* sep = "\n    "; // One field per line for records to be human-readable.
+        o << "{";
+
+        // No space after the colons: verify.sbatch greps records with `sed 's/.*"status":"\(...\)".*/'`.
+        #define J_NUM(k) (o << sep << "\"" #k "\":"   << (k),             sep = ",\n    ")
+        #define J_STR(k) (o << sep << "\"" #k "\":\"" << esc(k) << '"',   sep = ",\n    ")
+
+        J_NUM(schema_version); J_NUM(schema_minor);
+        J_STR(run_id);       J_STR(commit);        J_STR(build_type);
+        J_STR(build_config);
+        J_STR(host);         J_STR(timestamp_utc);
+        J_STR(method);       J_STR(method_version);
+        J_STR(input);        J_STR(corpus);        J_STR(tokenizer);   J_STR(alphabet);
+        J_NUM(symbol_bytes); J_NUM(n_symbols);     J_NUM(n_tokens);   J_NUM(threads);
+        J_STR(status);       J_NUM(code);          J_STR(detail);     J_STR(verify);
+        J_NUM(t_load);       J_NUM(t_core);        J_NUM(t_write);
+        J_NUM(peak_rss);     J_NUM(peak_device);
+        J_NUM(cpu_user);     J_NUM(cpu_sys);
+        J_NUM(minflt);       J_NUM(majflt);        J_NUM(nvcsw);      J_NUM(nivcsw);
+        J_NUM(io_rchar);     J_NUM(io_wchar);
+        J_NUM(io_read_bytes);J_NUM(io_write_bytes);
+        J_NUM(threads_avail);J_NUM(cpus_allowed);  J_NUM(exe_hash);
+        J_STR(placement);   J_STR(env_tuning);
+        J_NUM(thp_alloc);    J_NUM(thp_fallback);  J_NUM(pgscan_direct);
+        J_NUM(compact_stall);J_NUM(numa_local);    J_NUM(numa_other);
+        J_NUM(buddy_free);   J_NUM(buddy_free_huge);
+        J_NUM(t_prepage_pid);  J_NUM(t_pivots);      J_NUM(t_partition);
+        J_NUM(t_device_setup); J_NUM(t_initial_rank);J_NUM(t_reload_pid);
+        J_NUM(t_exponentiate); J_NUM(t_concatenate); J_NUM(n_partitions);
+        J_NUM(n_generations);  J_NUM(pid_spill);
+        J_NUM(host_budget);    J_NUM(host_fixed);
+        J_STR(notes);
+
+        #undef J_NUM
+        #undef J_STR
+
+        o << "\n}";
+        return o.str();
+    }
+
+
+    // Returns a summary of the records, required for the job log.
+    std::string summary() const
+    {
+        std::ostringstream o;
+        o.setf(std::ios::fixed);
+        o.precision(2);
+
+        o << method << ' ' << corpus << '-' << tokenizer << "  " << status;
+        if(status == "ok")
+            o << "  t_load=" << t_load << "s  t_core=" << t_core << "s  peak_rss=" << (peak_rss / 1e9) << "GB";
+        else if(!detail.empty())
+            o << "  " << detail;
+
+        return o.str();
+    }
+
+    // Temporary plus `rename`, so "absent" reliably means the process died
+    // rather than that it was mid-write.
+    bool write(const std::string& dir) const
+    {
+        const std::string path = dir + "/" + run_id + ".json", tmp = path + ".tmp";
+        {
+            std::ofstream f(tmp);
+            if(!f)  return false;
+            f << to_json() << "\n";
+            if(!f)  return false;
+        }
+        return std::rename(tmp.c_str(), path.c_str()) == 0;
+    }
+};
+
+
+struct Args
+{
+    std::string input, corpus, run_id, alphabet, tokenizer;
+    std::string method_version;         // Overrides the library's own version string.
+    std::string placement;              // What the harness wrapped the run in, for the record.
+    std::string results_dir = ".";
+    std::string sa_out;                 // Writing the SA is opt-in: github's would be 298 GiB.
+
+    int64_t n = 0;                      // Symbols to read; <= 0 reads the whole file.
+    int64_t threads = 0;                // 0 defers to the library's default.
+    int64_t fs = 0;                     // libsais free-space parameter.
+
+    bool verify = false;
+};
+
+
+inline const char* usage()
+{
+    return
+    "  --input P --corpus NAME --run-id ID --alphabet token16|byte|byte_from_token16\n"
+    "  [--tokenizer NAME] [--method-version V]\n"
+    "  [--n N] [--threads T] [--fs F] [--results-dir D] [--sa-out P] [--verify]\n"
+    "  [--placement S]   what the caller wrapped this run in, recorded verbatim\n"
+    "\n"
+    "  --n counts SYMBOLS, not tokens. For byte_from_token16 that is bytes,\n"
+    "  i.e. twice the token count.\n";
+}
+
+
+inline bool parse(const int argc, char** const argv, Args& a, std::string& err)
+{
+    for(int i = 1; i < argc; ++i)
+    {
+        const std::string k(argv[i]);
+        const bool takes_val = (k != "--verify");
+
+        if(takes_val && i + 1 >= argc)   { err = "missing value for " + k; return false; }
+        const char* const v = takes_val ? argv[++i] : nullptr;
+
+        if     (k == "--verify")        a.verify      = true;
+        else if(k == "--input")         a.input       = v;
+        else if(k == "--corpus")        a.corpus      = v;
+        else if(k == "--tokenizer")     a.tokenizer   = v;
+        else if(k == "--method-version") a.method_version = v;
+        else if(k == "--run-id")        a.run_id      = v;
+        else if(k == "--alphabet")      a.alphabet    = v;
+        else if(k == "--results-dir")   a.results_dir = v;
+        else if(k == "--sa-out")        a.sa_out      = v;
+        else if(k == "--n")             a.n           = std::strtoll(v, nullptr, 10);
+        else if(k == "--threads")       a.threads     = std::strtoll(v, nullptr, 10);
+        else if(k == "--fs")            a.fs          = std::strtoll(v, nullptr, 10);
+        else if(k == "--placement")     a.placement   = v;
+        else                            { err = "unknown argument: " + k; return false; }
+    }
+
+    if(a.input.empty())     { err = "--input is required";  return false; }
+    if(a.corpus.empty())    { err = "--corpus is required"; return false; }
+    if(a.run_id.empty())    { err = "--run-id is required"; return false; }
+    if(!alpha::valid(a.alphabet))
+    {
+        err = "--alphabet must be token16|byte|byte_from_token16 (got \"" + a.alphabet + "\")";
+        return false;
+    }
+
+    return true;
+}
+
+
+// Reads up to `n_req` elements of `T_sym_`; `buf.n` is what was actually read.
+template <typename T_sym_>
+inline bool load_prefix(const std::string& path, const int64_t n_req, Buffer<T_sym_>& buf, std::string& err)
+{
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if(fd < 0)  { err = "open failed: " + path; return false; }
+
+    const auto fail = [&](const std::string& m) { err = m; ::close(fd); return false; };
+
+    struct stat sb;
+    if(::fstat(fd, &sb) != 0)   return fail("fstat failed: " + path);
+
+    const int64_t avail = static_cast<int64_t>(sb.st_size) / static_cast<int64_t>(sizeof(T_sym_));
+    const int64_t n     = (n_req <= 0) ? avail : std::min(n_req, avail);
+
+    if(n <= 0)          return fail("empty corpus: " + path);
+    if(!buf.allocate(n))return fail("allocation failed for " + std::to_string(n) + " symbols");
+
+    const std::size_t want = static_cast<std::size_t>(n) * sizeof(T_sym_);
+    std::size_t got = 0;
+    auto* const dst = reinterpret_cast<uint8_t*>(buf.p);
+
+    while(got < want)   // `pread` transfers at most ~2 GB per call.
+    {
+        const auto r = ::pread(fd, dst + got, want - got, static_cast<off_t>(got));
+        if(r < 0)       return fail("pread failed at offset " + std::to_string(got));
+        if(r == 0)      break;  // Shorter file than `fstat` implied.
+        got += static_cast<std::size_t>(r);
+    }
+
+    ::close(fd);
+    buf.n = static_cast<int64_t>(got / sizeof(T_sym_));
+    return buf.n > 0;
+}
+
+
+// Writes `n` 5-byte little-endian lanes, whatever width the library produced:
+// the width our method outputs at, and infini-gram's from 2^32 bytes of text,
+// so every method writes as many bytes, and two drivers' outputs cross-check
+// with a plain `cmp`. The write is durable on return: the `fsync` is part of its
+// cost, as it is in ours.
+template <typename T_sa_>
+inline bool write_SA(const std::string& path, const T_sa_* const SA, const int64_t n, std::string& err)
+{
+    constexpr int64_t LANE = 5;
+    if(n > (int64_t(1) << (8 * LANE)))
+    {
+        err = "suffix array of " + std::to_string(n) + " entries exceeds 5-byte lanes";
+        return false;
+    }
+
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if(fd < 0)  { err = "cannot open for write: " + path; return false; }
+
+    const auto fail = [&](const std::string& m) { err = m; ::close(fd); return false; };
+
+    // Chunked: keeps the packing buffer small and respects pwrite's ~2 GB cap.
+    // Packing is parallel so that the drive, not this loop, sets the pace.
+    constexpr int64_t CHUNK = int64_t(1) << 24;
+    std::vector<uint8_t> out(static_cast<std::size_t>(std::min(CHUNK, n) * LANE));
+
+    for(int64_t off = 0; off < n; )
+    {
+        const int64_t m = std::min(CHUNK, n - off);
+        #pragma omp parallel for schedule(static)
+        for(int64_t i = 0; i < m; ++i)
+        {
+            const auto v = static_cast<uint64_t>(SA[off + i]);
+            for(int64_t b = 0; b < LANE; ++b)
+                out[static_cast<std::size_t>(i * LANE + b)] = static_cast<uint8_t>(v >> (8 * b));
+        }
+
+        const char* src  = reinterpret_cast<const char*>(out.data());
+        std::size_t want = static_cast<std::size_t>(m * LANE);
+        off_t       at   = static_cast<off_t>(off * LANE);
+
+        while(want > 0)
+        {
+            const auto w = ::pwrite(fd, src, want, at);
+            if(w <= 0)  return fail("pwrite failed at offset " + std::to_string(at));
+            src += w;   want -= static_cast<std::size_t>(w);     at += w;
+        }
+
+        off += m;
+    }
+
+    if(::fsync(fd) != 0)
+        return fail("fsync failed: " + path);
+
+    if(::close(fd) != 0)    { err = "close failed: " + path; return false; }
+    return true;
+}
+
+
+// Range, then permutation, then adjacent order. The order check builds an ISA,
+// so this adds n/8 + 8n on top of the run's own peak (~18n for libsais) -- hence
+// opt-in, and dropped at the top of the ladder.
+template <typename T_sym_, typename T_sa_>
+inline const char* verify_SA(const T_sym_* const T, const T_sa_* const SA, const int64_t n,
+                             std::string& detail)
+{
+    std::vector<bool> seen(static_cast<std::size_t>(n), false);
+
+    for(int64_t i = 0; i < n; ++i)
+    {
+        const int64_t s = static_cast<int64_t>(SA[i]);
+
+        if(s < 0 || s >= n)
+        {
+            detail = "SA[" + std::to_string(i) + "] = " + std::to_string(s) + " out of range";
+            return "fail";
+        }
+
+        if(seen[static_cast<std::size_t>(s)])
+        {
+            detail = "not a permutation: " + std::to_string(s) + " repeats at index " + std::to_string(i);
+            return "fail";
+        }
+
+        seen[static_cast<std::size_t>(s)] = true;
+    }
+
+    Buffer<int64_t> ISA;
+    if(!ISA.allocate(n))    { detail = "ISA allocation failed; order check skipped"; return "skip"; }
+
+    for(int64_t i = 0; i < n; ++i)
+        ISA.p[static_cast<int64_t>(SA[i])] = i;
+
+    // -1 past the end makes the empty suffix smallest, matching both libraries'
+    // shorter-suffix-first, no-sentinel order (baselines.md).
+    const auto rank_next = [&](const int64_t s) { return (s + 1 < n) ? ISA.p[s + 1] : int64_t(-1); };
+
+    for(int64_t i = 1; i < n; ++i)
+    {
+        const int64_t p = static_cast<int64_t>(SA[i - 1]), q = static_cast<int64_t>(SA[i]);
+
+        if(!((T[p] < T[q]) || (T[p] == T[q] && rank_next(p) < rank_next(q))))
+        {
+            detail = "order violated at index " + std::to_string(i);
+            return "fail";
+        }
+    }
+
+    return "pass";
+}
+
+
+// The single record-finalization path: stamps the status, reads required kernel
+// information, writes the record atomically, and echoes it. Returns the process
+// exit code: 0 whenever a record was written, including for a failed run. Non-
+// zero means no record exists. `of_child` accounts the reaped child that ran
+// the measurement, rather than this process.
+inline int finalize(Record& rec, const std::string& results_dir,
+                    const char* const status, const int64_t code, const std::string& detail,
+                    const bool of_child = false)
+{
+    rec.status = status;
+    rec.code   = code;
+    rec.detail = detail;
+
+    rec.peak_rss = peak_rss_bytes(of_child);
+
+    const auto k = read_kernel_counters(of_child);
+
+    // Per-process and cumulative from exec: the value is the run's own.
+    rec.cpu_user   = k.cpu_user;    rec.cpu_sys = k.cpu_sys;
+    rec.minflt     = k.minflt;      rec.majflt  = k.majflt;
+    rec.nvcsw      = k.nvcsw;       rec.nivcsw  = k.nivcsw;
+    rec.io_rchar      = k.io_rchar;      rec.io_wchar       = k.io_wchar;
+    rec.io_read_bytes = k.io_read_bytes; rec.io_write_bytes = k.io_write_bytes;
+
+    // Node-wide and cumulative since boot: only the change across this run is
+    // ours, and only under --exclusive.
+    const auto since_start = [](const int64_t now, const int64_t base)
+                             { return (now < 0 || base < 0) ? -1 : now - base; };
+    rec.thp_alloc     = since_start(k.thp_alloc,     counters_at_start.thp_alloc);
+    rec.thp_fallback  = since_start(k.thp_fallback,  counters_at_start.thp_fallback);
+    rec.pgscan_direct = since_start(k.pgscan_direct, counters_at_start.pgscan_direct);
+    rec.compact_stall = since_start(k.compact_stall, counters_at_start.compact_stall);
+    rec.numa_local    = since_start(k.numa_local,    counters_at_start.numa_local);
+    rec.numa_other    = since_start(k.numa_other,    counters_at_start.numa_other);
+
+    // Levels, not counters: the state the run began in, which is what decided
+    // whether its huge-page faults could be served at all. Differencing these
+    // would instead measure how much of the node this run itself ate.
+    rec.buddy_free      = counters_at_start.buddy_free;
+    rec.buddy_free_huge = counters_at_start.buddy_free_huge;
+
+    rec.cpus_allowed = cpus_allowed_count();
+    rec.exe_hash     = executable_hash();
+    rec.env_tuning   = tuning_env();
+
+    if(!rec.write(results_dir))
+    {
+        std::fprintf(stderr, "FATAL: could not write record to %s/%s.json\n",
+                     results_dir.c_str(), rec.run_id.c_str());
+        return 1;
+    }
+
+    std::fprintf(stderr, "%s\n", rec.summary().c_str());
+    return 0;
+}
+
+
+// `code` is the library's own return value, verbatim, so a record can be matched
+// against upstream source.
+struct Outcome
+{
+    const char* status = st::OK;
+    int64_t     code   = 0;
+    std::string detail;
+};
+
+template <typename T_sym_>
+struct Ctx
+{
+    const Args&   arg;
+    Record&       rec;      // The driver fills its own t_core/t_write/peak_device/verify.
+    const T_sym_* T;
+    int64_t       n;        // Symbols actually loaded.
+};
+
+
+// What a run got through before it died, passed from the child that ran it to
+// the parent that reaps it.
+struct Progress
+{
+    double  t_load = -1;
+    int64_t n_symbols = 0, n_tokens = 0;
+};
+
+
+// Waits out the run in child `pid`. A child that exited has written its own
+// record, or reported why it could not; one that a signal ended has written
+// none, so the record is written here, accounted from the reaped child. The kill
+// was the OOM killer's if it was SIGKILL and the node's count of OOM kills rose
+// meanwhile -- node-wide, so ours only under `--exclusive`.
+inline int reap(const pid_t pid, Record& rec, const std::string& results_dir,
+                const Progress& prog, const Clock::time_point t0)
+{
+    int ws = 0;
+    while(::waitpid(pid, &ws, 0) < 0)
+        if(errno != EINTR)
+        {
+            std::fprintf(stderr, "FATAL: waitpid failed: %s\n", std::strerror(errno));
+            return 1;
+        }
+
+    if(WIFEXITED(ws))
+        return WEXITSTATUS(ws);
+
+    const int sig = WTERMSIG(ws);
+    const bool oom = (sig == SIGKILL && read_kernel_counters().oom_kill > counters_at_start.oom_kill);
+
+    rec.t_load    = prog.t_load;
+    rec.n_symbols = prog.n_symbols;
+    rec.n_tokens  = prog.n_tokens;
+    rec.notes     = "killed " + std::to_string(since(t0)) + "s into the run";
+
+    return finalize(rec, results_dir, oom ? st::OOM_HOST : st::LIB_ERROR, sig,
+                    oom ? std::string("killed by the kernel's OOM killer")
+                        : "killed by signal " + std::to_string(sig) + " (" + ::strsignal(sig) + ")",
+                    true);
+}
+
+
+// Owns the corpus load and the run/argument fields, then hands off to
+// `finalize`. Exit-code policy lives there.
+template <typename T_sym_, typename F_core_>
+int bench_main(const Args& arg, const char* const method, const char* const method_version,
+               F_core_&& core)
+{
+    Record rec;
+    rec.run_id       = arg.run_id;
+    rec.method       = method;
+    rec.method_version = method_version;
+    rec.input        = arg.input;
+    rec.corpus       = arg.corpus;
+    rec.tokenizer    = arg.tokenizer;
+    rec.alphabet     = arg.alphabet;
+    rec.symbol_bytes = alpha::symbol_bytes(arg.alphabet);
+    rec.placement    = arg.placement;
+    rec.threads      = arg.threads;
+
+    const auto emit = [&](const char* const status, const int64_t code, const std::string& detail)
+    { return finalize(rec, arg.results_dir, status, code, detail); };
+
+    // The run goes to a child, which this parent outlives. The OOM killer ends a
+    // run with SIGKILL, which nothing can catch, so a run it picks would write no
+    // record; this parent holds next to no memory, is never the one picked, and
+    // writes it instead.
+    void* const page = ::mmap(nullptr, sizeof(Progress), PROT_READ | PROT_WRITE,
+                              MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    auto* const prog = (page == MAP_FAILED) ? nullptr : new (page) Progress;
+    const auto t0 = Clock::now();
+    const pid_t pid = prog ? ::fork() : -1;
+    if(pid < 0)
+    {
+        const int e = errno;
+        return emit(st::LIB_ERROR, e, std::string("cannot supervise the run: ") + std::strerror(e));
+    }
+
+    if(pid > 0)
+        return reap(pid, rec, arg.results_dir, *prog, t0);
+
+    Buffer<T_sym_> T;
+    std::string    err;
+
+    if(!load_prefix(arg.input, arg.n, T, err))              return emit(st::BAD_INPUT, 0, err);
+    rec.t_load = since(t0);
+
+    rec.n_symbols = T.n;
+    // byte_from_token16 reads a uint16 corpus as bytes, so symbols = 2 x tokens.
+    // Throughput must be per token or its apparent work doubles.
+    rec.n_tokens  = (arg.alphabet == alpha::BYTE_T16) ? T.n / 2 : T.n;
+    *prog = {rec.t_load, rec.n_symbols, rec.n_tokens};
+
+    if(arg.n > 0 && T.n < arg.n)
+        rec.notes = "short corpus: requested " + std::to_string(arg.n)
+                  + " symbols, read " + std::to_string(T.n);
+
+    Ctx<T_sym_> ctx{arg, rec, T.p, T.n};
+    const Outcome out = core(ctx);
+
+    return emit(out.status, out.code, out.detail);
+}
+
+}
+
+
+
+#endif

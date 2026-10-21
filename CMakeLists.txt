@@ -3,11 +3,11 @@
 
 # Specify the minimum version of CMake to use.
 # CMake can have different behaviors (policies) based on its version used.
-cmake_minimum_required(VERSION 3.17)
+cmake_minimum_required(VERSION 3.22)
 
 
 # Name the project, its version, and languages used in it.
-set(PROJECT_NAME caps_sa_gpu)
+set(PROJECT_NAME cascade)
 project(${PROJECT_NAME}
         VERSION 0.0.1
         LANGUAGES CUDA CXX C
@@ -26,28 +26,11 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_EXTENSIONS OFF)
 
-# Fix minimum compiler versions.
-set(GCC_VERSION_MIN "9.1")
-set(CLANG_VERSION_MIN "9.0")
-
-if(CLANG)
-    set(CMAKE_C_COMPILER clang)
-    set(CMAKE_CXX_COMPILER clang++)
-    # set(CMAKE_LINKER_TYPE LLD)
-endif()
-
 
 # Bundle the warning flags that we want to pass on to the compiler.
 # Reference: https://gcc.gnu.org/onlinedocs/gcc/Warning-Options.html
 set(WARNING_FLAGS -Wall -Wextra) #-Wpedantic)
 set(SUPPRESS_WARNING_FLAGS -Wno-unused-function -Wno-unknown-pragmas)
-
-# Warning flags to be suppressed with clang.
-set(CLANG_SUPPRESS_WARNING_FLAGS "")
-
-if(CLANG)
-    list(APPEND SUPPRESS_WARNING_FLAGS ${CLANG_SUPPRESS_WARNING_FLAGS})
-endif()
 
 # Bundle debugging information flags that we want to conditionally
 # pass on to the compiler.
@@ -91,6 +74,10 @@ if(PIVOT_WORDS)
     add_compile_definitions(PIVOT_WORDS=${PIVOT_WORDS})
 endif()
 
+if(IDX_LANE_BYTES)
+    add_compile_definitions(IDX_LANE_BYTES=${IDX_LANE_BYTES})
+endif()
+
 if(TESTS)
     add_compile_definitions(TESTS)
 endif()
@@ -117,9 +104,6 @@ endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)   # Better `clangd` scan.
 
 
-# Set path for modules required to search for existing packages in the system.
-set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/cmake/Modules/")
-
 # Turn on position-independent code, if static libraries are used in the linked
 # dynamic libraries, then without PIC the build may fail.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -133,10 +117,6 @@ find_package(CUDAToolkit REQUIRED)
 
 # Search and load the `OpenMP` runtime libraries; required for testing purposes.
 find_package(OpenMP REQUIRED)
-
-# Search and load setting for the `zlib` library. The library is required to seamlessly adapt
-# the `kseq` library to gzip-compressed files.
-find_package(ZLIB REQUIRED)
 
 # Module required to download and install external projects.
 include(ExternalProject)
@@ -179,32 +159,85 @@ set(INCLUDE_DIR ${CMAKE_SOURCE_DIR}/include)
 set(TESTS_INCLUDE ${CMAKE_SOURCE_DIR}/test)
 
 
+# Target GPU architecture.
+if(NOT DEFINED CUDA_ARCH)
+    set(CUDA_ARCH "120-real")
+endif()
+
+
+# Benchmark provenance: every benchmark driver (the baselines in `benchmark/`
+# and our own in `src/`) needs to stamp the same commit into its records.
+# Tolerant of a missing .git.
+execute_process(COMMAND git rev-parse --short HEAD
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE BENCH_COMMIT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+execute_process(COMMAND git status --porcelain --untracked-files=no # Only tracked modifications make a build unreproducible.
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        OUTPUT_VARIABLE BENCH_DIRTY OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+
+if(NOT BENCH_COMMIT)
+    set(BENCH_COMMIT "unknown")
+elseif(BENCH_DIRTY)
+    set(BENCH_COMMIT "${BENCH_COMMIT}-dirty")
+endif()
+
+# The build options that change the binary's behaviour, stamped in so a record
+# says which configuration produced it. The commit alone does not: the same
+# commit built with a different PREF_KEY_WORDS is a different method. Omitted
+# options report the header's default, which is what the binary actually used.
+set(BENCH_BUILD_CONFIG "pref_key_words=${PREF_KEY_WORDS}")
+if(NOT PREF_KEY_WORDS)
+    set(BENCH_BUILD_CONFIG "pref_key_words=default")
+endif()
+if(PIVOT_WORDS)
+    string(APPEND BENCH_BUILD_CONFIG " pivot_words=${PIVOT_WORDS}")
+else()
+    string(APPEND BENCH_BUILD_CONFIG " pivot_words=default")
+endif()
+if(STATS)
+    string(APPEND BENCH_BUILD_CONFIG " stats=on")
+endif()
+
+set(BENCH_PROVENANCE
+        BENCH_COMMIT="${BENCH_COMMIT}"
+        BENCH_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+        BENCH_BUILD_CONFIG="${BENCH_BUILD_CONFIG}")
+
+
 # Add required subdirectories to the build.
 add_subdirectory(src)
 add_subdirectory(test)
+add_subdirectory(tools)
 
-add_subdirectory(benchmark)
+# The harness vendors its baselines and creates its targets at configure-time,
+# and needs to be excluded from core build.
+option(BENCHMARK "Build the baseline-benchmark harness (libsais, libcubwt)" OFF)
+if(BENCHMARK)
+    add_subdirectory(benchmark)
+endif()
 
 
 # Set some CUDA-specific properties.
 set_property(TARGET core            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET tests           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET libcubwt        PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET libcubwt_driver PROPERTY CUDA_SEPARABLE_COMPILATION ON)
-set_property(TARGET test            PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET bench_gpu_saca  PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET test_query      PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET query_core      PROPERTY CUDA_SEPARABLE_COMPILATION ON)
+set_property(TARGET query           PROPERTY CUDA_SEPARABLE_COMPILATION ON)
 
-set(CUDA_ARCH "120-real")
 set_property(TARGET core            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET tests           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 set_property(TARGET ${PROJECT_NAME} PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET libcubwt        PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET libcubwt_driver PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
-set_property(TARGET test            PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET bench_gpu_saca  PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET test_query      PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET query_core      PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
+set_property(TARGET query           PROPERTY CUDA_ARCHITECTURES ${CUDA_ARCH})
 
 
 # Define dependencies between the targets.
 add_dependencies(${PROJECT_NAME} core)
+add_dependencies(bench_gpu_saca core)
 add_dependencies(core prj_concurrentqueue)
 add_dependencies(tests prj_concurrentqueue) # TODO: fix this hack.
 
@@ -213,11 +246,18 @@ add_dependencies(tests prj_concurrentqueue) # TODO: fix this hack.
 
 target_compile_options(core PRIVATE ${COMPILE_FLAGS})
 target_compile_options(tests PRIVATE ${COMPILE_FLAGS})
-target_compile_options(libcubwt PRIVATE ${COMPILE_FLAGS})
 
 target_compile_options(${PROJECT_NAME} PRIVATE ${COMPILE_FLAGS})
-target_compile_options(libcubwt_driver PRIVATE ${COMPILE_FLAGS})
-target_compile_options(test PRIVATE ${COMPILE_FLAGS})
+target_compile_options(bench_gpu_saca PRIVATE ${COMPILE_FLAGS})
+target_compile_definitions(bench_gpu_saca PRIVATE ${BENCH_PROVENANCE})
+target_compile_options(bench_gpu_saca PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)   # `nvcc` does not recognize OpenMP directives.
+target_compile_options(sa_structure PRIVATE ${COMPILE_FLAGS})
+target_compile_options(sa_convert PRIVATE ${COMPILE_FLAGS})
+target_compile_options(test_query PRIVATE ${COMPILE_FLAGS})
+target_compile_options(test_query PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
+target_compile_options(query_core PRIVATE ${COMPILE_FLAGS})
+target_compile_options(query_core PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fopenmp>)
+target_compile_options(query PRIVATE ${COMPILE_FLAGS})
 
 # Pass OpenMP flag through the CUDA compiler down to the host compiler.
 # `nvcc` does not recognize OpenMP directives.
@@ -227,43 +267,43 @@ target_compile_options(tests PRIVATE $<$<COMPILE_LANGUAGE:CUDA>: -Xcompiler -fop
 
 # Link appropriate libraries and targets.
 
-# Link to `zlib`, required to support `gzip` files.
-target_link_libraries(core PRIVATE ZLIB::ZLIB)
-target_link_libraries(libcubwt_driver PRIVATE ZLIB::ZLIB)
-
 # Link to CUDA runtime.
 target_link_libraries(core PRIVATE CUDA::cudart)
 target_link_libraries(tests PRIVATE CUDA::cudart)
+target_link_libraries(query_core PRIVATE CUDA::cudart)
 
 # Link to OpenMP for host-side parallel tasks.
 target_link_libraries(core PRIVATE OpenMP::OpenMP_CXX)
 target_link_libraries(tests PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(query_core PRIVATE OpenMP::OpenMP_CXX)
 
 # Link to the tester.
 target_link_libraries(core PRIVATE tests)
 
 # Link the executables to the required libraries.
 target_link_libraries(${PROJECT_NAME} PRIVATE core)
-target_link_libraries(libcubwt_driver PRIVATE libcubwt)
-
-# Link the tester.
-target_link_libraries(test PRIVATE core)
+target_link_libraries(bench_gpu_saca PRIVATE core OpenMP::OpenMP_CXX)
+target_link_libraries(sa_structure PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(sa_convert PRIVATE OpenMP::OpenMP_CXX)
+target_link_libraries(test_query PRIVATE tests query_core OpenMP::OpenMP_CXX)
+target_link_libraries(query PRIVATE query_core)
 
 
 # Set the link flags for the targets.
 
 target_link_libraries(core PRIVATE ${LINK_FLAGS})
-target_link_libraries(libcubwt PRIVATE ${LINK_FLAGS})
 
 target_link_libraries(${PROJECT_NAME} PRIVATE ${LINK_FLAGS})
-target_link_libraries(libcubwt_driver PRIVATE ${LINK_FLAGS})
-target_link_libraries(test PRIVATE ${LINK_FLAGS})
+target_link_libraries(sa_convert PRIVATE ${LINK_FLAGS})
+target_link_libraries(test_query PRIVATE ${LINK_FLAGS})
+target_link_libraries(query_core PRIVATE ${LINK_FLAGS})
+target_link_libraries(query PRIVATE ${LINK_FLAGS})
 
 
 # Set the installation directory. The parent directory is `/usr/local/` by default, and the
 # user may set it to a different path by passing a value for `CMAKE_INSTALL_PREFIX`. The target
 # executable is installed inside a sub-directory named `bin` within the parent directory.
-install(TARGETS ${PROJECT_NAME} libcubwt_driver
+install(TARGETS ${PROJECT_NAME}
         DESTINATION bin
         )
 

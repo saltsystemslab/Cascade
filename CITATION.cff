@@ -1,0 +1,33 @@
+cff-version: 1.2.0
+message: "If you use Cascade, please cite the paper below."
+title: "Cascade"
+abstract: "GPU-accelerated out-of-core suffix array construction for LLM corpora."
+type: software
+authors:
+  - family-names: Khan
+    given-names: Jamshed
+    affiliation: Northeastern University
+  - family-names: Pandey
+    given-names: Prashant
+    affiliation: Northeastern University
+repository-code: "https://github.com/saltsystemslab/Cascade"
+license: Apache-2.0
+keywords:
+  - suffix array
+  - GPU
+  - out-of-core
+  - LLM corpora
+preferred-citation:
+  type: article
+  title: "Cascade: GPU-Accelerated Out-of-Core Suffix Array Construction for LLM Corpora"
+  authors:
+    - family-names: Khan
+      given-names: Jamshed
+      affiliation: Northeastern University
+    - family-names: Pandey
+      given-names: Prashant
+      affiliation: Northeastern University
+  journal: "arXiv preprint arXiv:2610.15254"
+  year: 2026
+  doi: "10.48550/arXiv.2610.15254"
+  url: "https://arxiv.org/abs/2610.15254"

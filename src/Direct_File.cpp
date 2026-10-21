@@ -86,6 +86,13 @@ void Direct_File::preallocate(const std::size_t bytes)
 }
 
 
+void Direct_File::truncate()
+{
+    if(fd_ >= 0 && ::ftruncate(fd_, 0) != 0)
+        util::file::exit_on_io_failure("ftruncate", path_);
+}
+
+
 void Direct_File::read_at(void* const buf, const std::size_t bytes, const std::size_t off) const
 {
     if(!is_block_aligned(buf) || !is_block_aligned(off))

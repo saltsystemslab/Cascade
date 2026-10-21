@@ -1,68 +1,108 @@
 
 #include "Residency_Plan.hpp"
+#include "lane.hpp"
 #include "env.hpp"
 
 #include <numeric>
+#include <string>
+#include <sstream>
 #include <iostream>
-#include <cstdlib>
 #include <algorithm>
 
 
 namespace gpu_saca
 {
 
-Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const std::size_t budget, const std::size_t fixed_bytes, const std::size_t prefix_elem_bytes):
-      data_(P_cap.size(), 0)
-    , prefix_(P_cap.size(), 0)
+namespace
+{
+
+// Returns the refusal's message for host-budget `budget` and fixed requirement
+// `fixed`, in bytes.
+std::string refusal_message(const std::size_t budget, const std::size_t fixed)
+{
+    constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
+
+    std::ostringstream os;
+    os << "The host memory-budget of " << GB(budget) << "GBs cannot fit the fixed requirement of " << GB(fixed) << "GBs.";
+    return os.str();
+}
+
+}
+
+
+Host_Budget_Refusal::Host_Budget_Refusal(const std::size_t budget, const std::size_t fixed):
+      std::runtime_error(refusal_message(budget, fixed))
+    , budget(budget)
+    , fixed(fixed)
+{}
+
+
+Residency_Plan::Residency_Plan(const std::vector<idx_t>& P_cap, const idx_t chunk_cap, const std::size_t budget, const std::size_t fixed_bytes):
+      chunk_c_(P_cap.size())
+    , suf_ram_(P_cap.size(), 0)
+    , key_ram_(P_cap.size(), 0)
+    , force_spill_(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) != 0)
+    , chunk_wise_(env::get_u64("GPU_SACA_CHUNK_PLAN").value_or(1) != 0)
+    , cap_(0)
+    , data_resident_(0)
 {
     constexpr auto GB = [](const std::size_t bytes){ return static_cast<double>(bytes) / (1024.0 * 1024.0 * 1024.0); };
 
     if(budget < fixed_bytes)
-    {
-        std::cerr << "The host memory-budget of " << GB(budget) << "GBs cannot fit the fixed requirement of " << GB(fixed_bytes) << "GBs. Aborting.\n";
-        std::exit(EXIT_FAILURE);
-    }
+        throw Host_Budget_Refusal(budget, fixed_bytes);
+
+    cap_ = (force_spill_ ? 0 : budget - fixed_bytes);
+
+    for(std::size_t p_id = 0; p_id < P_cap.size(); ++p_id)
+        chunk_c_[p_id] = (P_cap[p_id] + chunk_cap - 1) / chunk_cap;
+
+    constexpr auto data_elem_bytes = LANE_BYTES + sizeof(p_sz_t);   // Per-suffix cost of a partition's content: suffix-lane and local rank.
 
     auto available = budget - fixed_bytes;
-    std::vector<p_id_t> order(P_cap.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(), [&](const auto x, const auto y){ return P_cap[x] > P_cap[y]; });
-
-    // Admit as many partitions' units, each of size `elem_bytes`, as the budget
-    // fits, largest-first.
-    const auto admit = [&](std::vector<uint8_t>& resident, const std::size_t elem_bytes)
+    p_id_t whole_c = 0; // Count of partitions placed whole.
+    bool split = false; // Whether a partition is placed in part.
+    idx_t split_c = 0;  // Count of chunks placed of the partition split, if any.
+    if(!force_spill_)   // `GPU_SACA_FORCE_SPILL` spills all data regardless of the budget.
     {
-        std::size_t admitted = 0;
-        for(const auto p_id : order)
-        {
-            const auto sz = elem_bytes * P_cap[p_id];
-            if(sz <= available)
-                resident[p_id] = 1, available -= sz, admitted += sz;
-        }
+        std::vector<p_id_t> order(P_cap.size());    // Largest-first.
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](const auto x, const auto y){ return P_cap[x] > P_cap[y]; });
 
-        return admitted;
-    };
+        if(!chunk_wise_)    // Admit as many partitions' data as the budget allows.
+            for(const auto p_id : order)
+            {
+                const auto sz = data_elem_bytes * P_cap[p_id];
+                if(sz <= available)
+                    suf_ram_[p_id] = key_ram_[p_id] = chunk_c_[p_id], available -= sz, data_resident_ += sz, whole_c++;
+            }
+        else    // Admit the partitions' suffixes whole while the budget allows, and then as many chunks of the next as fit.
+            for(const auto p_id : order)
+            {
+                const auto sz = lane::bytes(P_cap[p_id]);
+                if(sz <= available)
+                {
+                    suf_ram_[p_id] = chunk_c_[p_id], available -= sz, data_resident_ += sz, whole_c++;
+                    continue;
+                }
 
-    constexpr auto data_elem_bytes = sizeof(idx_t) + sizeof(p_sz_t);    // Per-suffix cost of a partition's content: suffix index and local rank.
-    std::size_t data_resident = 0, prefix_resident = 0;
-    if(env::get_u64("GPU_SACA_FORCE_SPILL").value_or(0) == 0)   // `GPU_SACA_FORCE_SPILL` spills all data regardless of the budget.
-    {
-        data_resident = admit(data_, data_elem_bytes);
-        prefix_resident = admit(prefix_, prefix_elem_bytes);
+                split = true, split_c = suf_ram_[p_id] = available / lane::bytes(chunk_cap);    // Whole chunks, all of full capacity.
+                data_resident_ += lane::bytes(split_c * chunk_cap);
+                break;  // At most one partition splits.
+            }
     }
 
 #ifdef STATS
     const auto n = std::accumulate(P_cap.cbegin(), P_cap.cend(), idx_t(0));
-    const auto data_c = std::count(data_.cbegin(), data_.cend(), 1);
-    const auto prefix_c = std::count(prefix_.cbegin(), prefix_.cend(), 1);
-        std::cerr << "Residency plan (budget: " << GB(budget) << "GBs, fixed: " << GB(fixed_bytes) << "GBs):\n"
-              << "\tdata:   " << data_c << "/" << P_cap.size() << " partitions, "
-              << GB(data_resident) << "GBs resident, " << GB(n * data_elem_bytes - data_resident) << "GBs spilled.\n"
-              << "\tprefix: " << prefix_c << "/" << P_cap.size() << " partitions, "
-              << GB(prefix_resident) << "GBs resident, " << GB(prefix_elem_bytes * n - prefix_resident) << "GBs spilled.\n";
-#else
-    (void)data_resident, (void)prefix_resident;
+    std::cerr << "Residency plan (budget: " << GB(budget) << "GBs, fixed: " << GB(fixed_bytes) << "GBs" << (chunk_wise_ ? ", chunk-wise" : "") << "):\n";
+    if(!chunk_wise_)
+        std::cerr   << "\tdata:   " << whole_c << "/" << P_cap.size() << " partitions, "
+                    << GB(data_resident_) << "GBs resident, " << GB(n * data_elem_bytes - data_resident_) << "GBs spilled.\n";
+    else
+        std::cerr   << "\tsuffixes: " << whole_c << "/" << P_cap.size() << " partitions whole"
+                    << (split ? ", and " + std::to_string(split_c) + " chunks of the next" : "") << "; " << GB(data_resident_) << "GBs resident, " << GB(lane::bytes(n) - data_resident_) << "GBs spilled.\n"
+                    << "\tkeys:     " << GB(n * sizeof(p_sz_t)) << "GBs, all spilled.\n";
 #endif
+    (void)whole_c, (void)split, (void)split_c;
 }
 
 }

@@ -5,9 +5,8 @@
 
 
 #include "types.hpp"
-#include "Packed_Prefix.hpp"
-#include "Residency_Plan.hpp"
 
+#include <cstddef>
 #include <vector>
 
 
@@ -20,51 +19,54 @@ class RAM_Backend
 
 private:
 
-    std::vector<idx_t*> suf_;   // Suffixes of the partitions.
+    const std::vector<idx_t> P_cap_;    // Partition capacities.
+    std::vector<uint8_t*> suf_; // Suffixes of the partitions, in lanes.
     std::vector<p_sz_t*> key_;  // Keys of the partitions.
-    std::vector<Prefix_Key*> prefix_;   // Prefix-keys of the partitions.
+
+    // Returns the bytes reserved for `n` elements of `w` bytes each: whole disk-
+    // blocks, as disk-block rounded I/O can move them in and out.
+    static std::size_t reservation(idx_t n, std::size_t w);
 
 public:
 
-    // Allocates the RAM-resident storage for partitions with capacities
-    // `P_cap`, per the residency-plan `plan`.
-    RAM_Backend(const std::vector<idx_t>& P_cap, const Residency_Plan& plan);
+    // Reserves the RAM-storage for partitions with capacities `P_cap`: address-
+    // space for each partition's each field, backed by memory only where written.
+    RAM_Backend(const std::vector<idx_t>& P_cap);
 
     RAM_Backend(const RAM_Backend&) = delete;
     RAM_Backend& operator=(const RAM_Backend&) = delete;
 
     ~RAM_Backend();
 
-    // Returns the `p_id`'th partition's resident suffixes.
-    auto* suf(const p_id_t p_id) { return suf_[p_id]; }
+    // Returns the `p_id`'th partition's suffix-lanes.
+    uint8_t* suf(const p_id_t p_id) { return suf_[p_id]; }
 
-    // Returns the `p_id`'th partition's resident keys.
-    auto* key(const p_id_t p_id) { return key_[p_id]; }
-
-    // Returns the `p_id`'th partition's resident prefix-keys.
-    auto* prefix(const p_id_t p_id) { return prefix_[p_id]; }
-
-    // Reads `sz`-many initial prefixes of the `p_id`'th partition, from its
-    // offset `off`, into `dst`.
-    void read_prefix(p_id_t p_id, idx_t off, idx_t sz, Prefix_Key* dst) const;
+    // Returns the `p_id`'th partition's keys.
+    p_sz_t* key(const p_id_t p_id) { return key_[p_id]; }
 
     // Reads `sz`-many suffixes of the `p_id`'th partition, from its offset
-    // `off`, into `dst`.
-    void read_suf(p_id_t p_id, idx_t off, idx_t sz, idx_t* dst) const;
+    // `off`, into the lanes `dst`.
+    void read_suf(p_id_t p_id, idx_t off, idx_t sz, uint8_t* dst) const;
 
     // Reads `sz`-many keys of the `p_id`'th partition, from its offset `off`,
     // into `dst`.
     void read_key(p_id_t p_id, idx_t off, idx_t sz, p_sz_t* dst) const;
 
-    // Writes `sz`-many suffixes and keys of the `p_id`'th partition, at its
-    // offset `off`, from `suf` and `key`.
-    void write(p_id_t p_id, idx_t off, idx_t sz, const idx_t* suf, const p_sz_t* key);
+    // Writes `sz`-many suffixes of the `p_id`'th partition, at its offset
+    // `off`, from the lanes `src`.
+    void write_suf(p_id_t p_id, idx_t off, idx_t sz, const uint8_t* src);
 
-    // Releases the `p_id`'th partition's suffixes and keys.
-    void retire_data(p_id_t p_id);
+    // Writes `sz`-many keys of the `p_id`'th partition, at its offset `off`,
+    // from `src`.
+    void write_key(p_id_t p_id, idx_t off, idx_t sz, const p_sz_t* src);
 
-    // Drops the prefix-keys from the backend.
-    void drop_prefixes();
+    // Releases the memory of `sz`-many suffixes of the `p_id`'th partition, from
+    // its page-aligned offset `off`; the range reads back as zeros.
+    void release_suf(p_id_t p_id, idx_t off, idx_t sz);
+
+    // Releases the memory of `sz`-many keys of the `p_id`'th partition, from its
+    // page-aligned offset `off`; the range reads back as zeros.
+    void release_key(p_id_t p_id, idx_t off, idx_t sz);
 };
 
 }

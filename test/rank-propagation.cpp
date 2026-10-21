@@ -5,6 +5,7 @@
 #include "Staging_Slab.hpp"
 #include "bit-layout.hpp"
 #include "message.hpp"
+#include "lane.hpp"
 
 #include "omp.h"
 
@@ -14,18 +15,11 @@
 namespace gpu_saca::test
 {
 
-bool validate_previous_gen_fwd_tag(const idx_t suf, const idx_t n, const idx_t stride, const p_id_t* const P_id)
+bool validate_coherent_targets(const idx_t j_1, const idx_t r_1, const idx_t j_2, const idx_t r_2, const idx_t n, const idx_t stride, const idx_t ell, const Partition_ID_Map& P_id)
 {
-    const auto j = bit_layout::suffix_of(suf);  // Suffix.
-    const auto ctx_prev = stride;   // Last generation's context.
-    const p_id_t phi_prev = (j + ctx_prev < n ? P_id[j + ctx_prev] : 0);
-    return bit_layout::tag_of(suf) == phi_prev;
-}
-
-
-bool validate_coherent_tags(const idx_t j_1, const idx_t r_1, const idx_t j_2, const idx_t r_2)
-{
-    return r_1 != r_2 || bit_layout::tag_of(j_1) == bit_layout::tag_of(j_2);
+    const auto src_1 = bit_layout::suffix_of(j_1) + stride; // Secondary-source of `j_1`.
+    const auto src_2 = bit_layout::suffix_of(j_2) + stride; // Secondary-source of `j_2`.
+    return r_1 != r_2 || bit_layout::fwd_tag(P_id, src_1, n, ell) == bit_layout::fwd_tag(P_id, src_2, n, ell);
 }
 
 
@@ -39,7 +33,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
 
     const auto n = self->n_;
     const auto ctx = self->ctx_;
-    const auto* const P_id = self->P_id;
+    const auto& P_id = (self->P_id_check_.bytes() > 0 ? self->P_id_check_ : self->P_id);    // `Π`, or its copy while it is on disk.
     const auto p_id = s.p_id();
     const auto P_sz_max = *std::max_element(self->P_cap.cbegin(), self->P_cap.cend());
 
@@ -58,7 +52,7 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
             // In the following checks, for a poison-pill message, it is impossible
             // to detect whether the pill was a direct push or a forward.
 
-            const auto target = bit_layout::suffix_of(msg_target[i]);
+            const auto target = bit_layout::suffix_of(lane::load(msg_target, i));
 
             // Sender check: the sender of this message must belong to this partition.
             {
@@ -91,23 +85,6 @@ bool validate_messages(const Staging_Slab& s, const GPU_SACA<T_sym_>* const self
                 {
                     is_valid = false;
                     std::cerr << "Some messages did not get collated into their destination partition's group.\n";
-                    #pragma omp cancel for
-                }
-            }
-
-            // Forward tag check: the `phi`-tag carried in this message must be correct.
-            // A sender that retired this generation can carry a stale forward tag: if its query for the
-            // extension suffix has look-back depth `λ >= 2`, then the message it had received earlier had
-            // a stale forward tag; this is benign per tertiary-irrelevance. Stale tags are impossible when
-            // `λ < 2`, and this is guaranteed to hold for everyone up-to generation 1.
-            // Also, a forwarded pill carries tag 0 by construction.
-            {
-                const p_id_t phi = bit_layout::tag_of(msg_target[i]);
-                const p_id_t expected_phi = (target + 2 * ctx < n ? P_id[target + 2 * ctx] : p_id_t(0));
-                if(!is_poison_pill(msg_rank[i]) && ctx <= 2 * self->ell && phi != expected_phi)
-                {
-                    is_valid = false;
-                    std::cerr << "Some messages carry incorrect forward tag.\n";
                     #pragma omp cancel for
                 }
             }
@@ -150,6 +127,7 @@ bool validate_inbox_mass(const Partition_Backend& backend)
     for(p_id_t t = 0; t < p; ++t)
     {
         const auto msg_count = backend.msg_count(t);
+        const auto disk_count = backend.disk_count(t);
         const auto msg_written = backend.msg_written(t);
 
         if(inbox_sz[t] != msg_count)
@@ -158,9 +136,15 @@ bool validate_inbox_mass(const Partition_Backend& backend)
             return false;
         }
 
-        if(msg_written % MSG_ALIGN != 0 || msg_written - msg_count >= MSG_ALIGN)
+        if(msg_written % MSG_ALIGN != 0 || msg_written - disk_count >= MSG_ALIGN)
         {
             std::cerr << "For partition " << t << ", size of written inbox violates disk-block alignment constraints.";
+            return false;
+        }
+
+        if(disk_count > 0 && (msg_count - disk_count) % MSG_ALIGN != 0)   // The disk-part's reads need an aligned RAM-part before it.
+        {
+            std::cerr << "For partition " << t << ", size of its inbox's RAM-part is misaligned against its disk-part.";
             return false;
         }
     }
@@ -169,14 +153,31 @@ bool validate_inbox_mass(const Partition_Backend& backend)
 }
 
 
-bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* const P_id, const idx_t n)
+uint64_t message_checksum(const uint8_t* const tgt, const msg_rank_t* const rank, const idx_t n)
+{
+    const auto mix = [](uint64_t z) // SplitMix64's finalizer, as the per-message hash.
+    {
+        z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+        z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+        return z ^ (z >> 31);
+    };
+
+    uint64_t sum = 0;   // Wrapping sum of the messages' hashes: independent of their order.
+    for(idx_t i = 0; i < n; ++i)
+        sum += mix(mix(lane::load(tgt, i)) + rank[i]);
+
+    return sum;
+}
+
+
+bool validate_inbox_routing(const Staging_Slab& s, const Partition_ID_Map& P_id, const idx_t n)
 {
     bool is_valid = true;
 
     #pragma omp parallel for schedule(static) reduction(&& : is_valid)
     for(p_sz_t i = 0; i < s.inbox_sz(); ++i)
     {
-        const auto tgt = bit_layout::suffix_of(s.msg_target()[i]);
+        const auto tgt = bit_layout::suffix_of(lane::load(s.msg_target(), i));
         if(tgt >= n || P_id[tgt] != s.p_id())
             is_valid = false;
     }
@@ -188,7 +189,6 @@ bool validate_inbox_routing(const Staging_Slab& s, const p_id_t* const P_id, con
 
 // Template instantiations for the required instances.
 
-template bool validate_messages(const Staging_Slab&, const GPU_SACA<char>* self, const p_sz_t*);
 template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint8_t>* self, const p_sz_t*);
 template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint16_t>* self, const p_sz_t*);
 template bool validate_messages(const Staging_Slab&, const GPU_SACA<uint32_t>* self, const p_sz_t*);

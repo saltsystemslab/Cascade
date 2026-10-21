@@ -11,19 +11,28 @@
 # Optional env:
 #   SUBSET    RedPajama subset            (default arxiv; ignored by other datasets)
 #   DL_PROC   parallel download streams   (default 8; 16 for a fat uplink)
-#   INCLUDE   hf download glob            (c4/pile)
+#   INCLUDE   hf download glob            (c4/pile/fineweb)
+#   TOKENIZER HF tokenizer                (sets the tag in the OUT path
+#                                          the job prints as 'next:')
+#   LABEL_OVERRIDE  output dir name       (on-disk corpora are flat:
+#                                          arxiv, github, c4, ...)
 #   NFILES    cap on URL-list files       (redpajama/dolma)
 #   VER       dolma version               (default v1_7)
-#   MEM       job memory                  (default 16G; lower for wget subsets, raise for Xet/c4)
+#   MEM       job memory                  (default 16G; lower for wget subsets,
+#                                          raise to ~32G for Xet c4/pile/fineweb)
 #   TIME      walltime                    (default 08:00:00)
-#   PART      Slurm partition             (default short)
+#   PART      Slurm partition             (default: the site's)
+#   EXCLUDE   nodes to keep the job off   (default: none)
+#
+# PART and EXCLUDE can also be set in dataset/local.env (untracked; see
+# local.env.example).
 #
 # The download resumes on resubmit (wget -c / hf Xet), so if the job hits the
 # walltime just run this again -- completed files are skipped.
 set -euo pipefail
 
 if [ $# -lt 1 ]; then
-    echo "usage: ROOT=<dir> [SUBSET=..] ./submit-download.sh {c4|pile|redpajama|dolma}" >&2
+    echo "usage: ROOT=<dir> [SUBSET=..] ./submit-download.sh {c4|pile|fineweb|redpajama|dolma}" >&2
     exit 1
 fi
 DATASET="$1"
@@ -32,24 +41,41 @@ SUBSET="${SUBSET:-arxiv}"
 DL_PROC="${DL_PROC:-8}"
 MEM="${MEM:-16G}"
 TIME="${TIME:-08:00:00}"
-PART="${PART:-short}"
 
 # Display/job label: redpajama is split by subset, others are not.
 LABEL="$DATASET"
 if [ "$DATASET" = redpajama ]; then LABEL="$DATASET-$SUBSET"; fi
+LABEL="${LABEL_OVERRIDE:-$LABEL}"   # keep the job name in step with the output dir
 
 # This launcher is not spooled, so it knows the real dataset/ dir; pass it to the
 # batch job as DL_DIR (sbatch runs a spooled copy that can't self-locate).
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SB="$SCRIPT_DIR/download.sbatch"
+if [ -r "$SCRIPT_DIR/local.env" ]; then . "$SCRIPT_DIR/local.env"; fi
 
 EXPORTS="DL_DIR=$SCRIPT_DIR,DATASET=$DATASET,ROOT=$ROOT,SUBSET=$SUBSET,DL_PROC=$DL_PROC"
 if [ -n "${INCLUDE:-}" ]; then EXPORTS="$EXPORTS,INCLUDE=$INCLUDE"; fi
 if [ -n "${NFILES:-}"  ]; then EXPORTS="$EXPORTS,NFILES=$NFILES";  fi
 if [ -n "${VER:-}"     ]; then EXPORTS="$EXPORTS,VER=$VER";        fi
+# TOKENIZER must travel: the fetch job prints the exact `next:` tokenize command,
+# and the tokenizer tag in that command's OUT path comes from it. Without this,
+# the job always computed TAG=olmo and printed an -olmo path -- wrong for every
+# corpus under the Llama-2 policy, and pasting it mislabels the array.
+if [ -n "${TOKENIZER:-}" ]; then EXPORTS="$EXPORTS,TOKENIZER=$TOKENIZER"; fi
+# Pin the HF CLI exactly as the interpreter is pinned, and for the same reason:
+# a batch node's PATH does not carry it, and the venv's own `hf` cannot find
+# libpython without the hfrun wrapper. Point HF_CLI at <venv>/bin/hfrun.
+HF_CLI="${HF_CLI:-$(command -v hf || true)}"
+if [ -n "$HF_CLI" ]; then EXPORTS="$EXPORTS,HF_CLI=$HF_CLI"; fi
+if [ -n "${LABEL_OVERRIDE:-}" ]; then EXPORTS="$EXPORTS,LABEL_OVERRIDE=$LABEL_OVERRIDE"; fi
+for v in PRESPLIT SPLITS DROP_MONOLITH REFRESH_URLS CHECK_URLS; do
+    eval "val=\${$v:-}"
+    if [ -n "$val" ]; then EXPORTS="$EXPORTS,$v=$val"; fi
+done
 
 job=$(sbatch --parsable \
-    --partition="$PART" --job-name="dl-$LABEL" \
+    ${PART:+--partition="$PART"} --job-name="dl-$LABEL" \
+    ${EXCLUDE:+--exclude="$EXCLUDE"} \
     --cpus-per-task=1 --mem="$MEM" --time="$TIME" \
     --export="ALL,$EXPORTS" "$SB")
 
