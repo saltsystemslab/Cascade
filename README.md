@@ -22,21 +22,20 @@ Cascade builds the suffix array of a tokenized corpus on a single GPU server, fo
 - **Fast.** Cascade builds the suffix array 3.0–8.2× faster end to end than [infini-gram](https://infini-gram.io/)'s indexing pipeline on seven corpora of 8–238 billion tokens, and its construction is 6.3–11.4× faster than [libsais](https://github.com/IlyaGrebnov/libsais)'s.
 - **Not bound by GPU memory.** Cascade sorts its partitions on the GPU independently and never merges them.
   Thus GPU memory limits only the partition size and not the corpus size.
-  With just 5 GB of GPU memory (a sixteenth of the peak usage), suffix array builds over the arXiv (30B) and the github (64B) corpora take only 1.3× and 1.5× of the builds that use the full GPU memory.
-- **Light on host memory.** Cascade streams the ranks of suffixes between partitions as messages, instead of storing them in a corpus-wide rank table (aka the _ISA_), while the intermediate data gracefully spills across GPU memory, host memory, and SSD.
-  Host memory only needs to hold the text: on our server with 1 TB of host DRAM, Cascade indexes the 198B-token c4 and the 238B-token pile corpora in 23 and 37 minutes, where libsais runs
-  out of memory.
+  With just 5 GB of GPU memory (a sixteenth of the peak usage), suffix array builds over the arxiv (30B) and the github (64B) corpora take only 1.3× and 1.5× as long as the builds that use the full GPU memory.
+- **Light on host memory.** Cascade streams the ranks of suffixes between partitions as messages, instead of storing them in a corpus-wide rank table (the inverse suffix array, ISA).
+  Its intermediate data gracefully spills across GPU memory, host memory, and SSD.
+  Host memory only needs to hold the text: on our server with 1 TB of host DRAM, Cascade indexes the 198B-token c4 and the 238B-token pile corpora in 23 and 37 minutes, where libsais runs out of memory.
 - **Exact.** Cascade never truncates suffix comparisons, and thus the suffix arrays are exact.
-- **Fast queries.** Cascade's batched query engine reproduces infini-gram's counts at median speedups of 10.8–32.6×, with
-  the index in GPU memory, host memory, or on SSD.
+- **Fast queries.** Cascade's batched query engine reproduces infini-gram's counts at median speedups of 10.8–32.6×, with the index in GPU memory, host memory, or on SSD.
 
 ## How it works
 
 Cascade samples K-grams of the text to choose splitters that give each partition a fixed, contiguous range of the final suffix array.
 The GPU then sorts each partition, iteratively in generations, by prefix doubling.
 Between generations, every rank is sent directly to the one partition that needs it, as a message.
-An invariant keeps every rank comparison localized into the same partition, so partition-local ranks suffice.
-These messages and the ranks of the suffixes are elastic: they fill the room left in GPU and host memory, and spill to SSD beyond it.
+An invariant keeps every rank comparison within the same partition, so partition-local ranks suffice.
+These messages and the suffixes' records are elastic: they fill the room left in host memory and spill to SSD beyond it.
 Each finished partition is written directly to its range of the output.
 The [paper](https://arxiv.org/abs/2610.15254) has the details and the proofs.
 
@@ -48,9 +47,9 @@ The [paper](https://arxiv.org/abs/2610.15254) has the details and the proofs.
   Set `CUDA_ARCH` for other GPUs (see below).
 - CUDA 12.8, which bundles CCCL 2.7, and GCC 11: the versions we build with.
 - CMake 3.22 or newer and OpenMP.
-- Host memory for the text: 2 bytes per token.
+- Host memory for the text (2 bytes per token) plus working buffers.
 - Node-local NVMe drives for the spills, on a filesystem supporting `O_DIRECT` and `fallocate`, such as XFS or ext4.
-  Room required for the output  is 5 bytes per token.
+  The output takes 5 bytes per token.
   Our three largest corpora (github, c4, and pile) spill 6–20 bytes per token.
 
 ## Building
@@ -66,7 +65,7 @@ cmake --build build -j
 The build produces `build/src/cascade` (the builder), `build/src/query` (the query engine), and `build/tools/sa_convert`.
 
 `./build.sh` only compile-checks the same build in a CUDA 12.8 Docker image, without a GPU, writing to `./build`.
-Its binaries are linked against that image's Ubuntu 22.04 libraries, so build Cascade natively on the machine that runs its drivers.
+Its binaries are linked against that image's Ubuntu 22.04 libraries, so build Cascade natively on the machine that runs its binaries.
 
 ## Preparing a corpus
 
@@ -94,13 +93,12 @@ GPU_SACA_SCRATCH=/nvme0/scratch:/nvme1/scratch build/src/cascade corpus.tokenize
   It doesn't observe cgroup limits yet, so set it inside containers and Slurm jobs that limit memory.
 - `OMP_NUM_THREADS`: number of CPU threads to use.
 
-The output holds one 5-byte little-endian entry per token: the starting positions of the suffixes, in lexicographic
-order of the token IDs.
+The output holds one 5-byte little-endian entry per token: the starting positions of the suffixes, in lexicographic order of the token IDs.
 
 ## Querying
 
-Cascade's query engine counts the occurrences of batches of token sequences. Wrap the suffix array into an index, generate
-a batch of queries, and run it:
+Cascade's query engine counts the occurrences of batches of token sequences.
+Wrap the suffix array into an index, generate a batch of queries, and run it:
 
 ```bash
 build/tools/sa_convert --meta-only --sa corpus.sa --text corpus.tokenized.bin --sym-bytes 2 --index-dir corpus.idx
@@ -112,7 +110,7 @@ build/src/query find --index corpus.idx --queries q.qry --text-res auto --sa-res
 `q.cnt` holds one little-endian `uint64` count per query.
 The engine places the index in GPU memory, host memory, or on SSD, whichever fits.
 `corpus.idx/index.meta` records where the text and the suffix array are, so leave them in place.
-`build/src/query` prints the full usage, and `include/query-file.hpp` describes the `.qry`, `.itv`, and `.cnt` formats.
+Running `build/src/query` without arguments prints the full usage, and `include/query-file.hpp` describes the `.qry`, `.itv`, and `.cnt` formats.
 
 ## Citation
 
