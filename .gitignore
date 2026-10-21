@@ -56,3 +56,12 @@ build/
 
 # cache
 .cache/
+__pycache__/
+
+# job logs
+*.err
+
+# agent and editor state
+.claude/
+CLAUDE.md
+.DS_Store
