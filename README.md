@@ -8,6 +8,9 @@
 Suffix arrays power deduplication, contamination testing, n-gram statistics, and training-data attribution over the corpora used to train large language models, and every new corpus or tokenizer needs a new one.
 Cascade builds the suffix array of a tokenized corpus on a single GPU server, for corpora many times larger than the GPU's memory, and searches it with a batched query engine.
 
+While LLM corpora motivate its design, nothing in it depends on them.
+Cascade can index any sequence of symbols, such as genome collections or plain bytes.
+
 <p align="center">
   <img src="assets/build-throughput.png" width="720"
        alt="Build throughput per corpus, Cascade against infini-gram and libsais">
@@ -67,10 +70,18 @@ The build produces `build/src/cascade` (the builder), `build/src/query` (the que
 `./build.sh` only compile-checks the same build in a CUDA 12.8 Docker image, without a GPU, writing to `./build`.
 Its binaries are linked against that image's Ubuntu 22.04 libraries, so build Cascade natively on the machine that runs its binaries.
 
-## Preparing a corpus
+## Preparing the input
 
-The builder reads a raw array of little-endian 16-bit token IDs.
-Our evaluation corpora use infini-gram's `tokenized.N` layout, with the separator `0xFFFF` before each document.
+The builder reads a raw array of little-endian 16-bit symbols.
+Neither the construction nor the suffix array assumes anything about the symbols beyond their order.
+Cascade works with any sequence, such as the token IDs of an LLM corpus or the bytes of a text or a genome.
+8- and 32-bit inputs are in the roadmap; until then, widening a byte text to 16 bits leaves its suffix array unchanged, at twice the text's memory:
+
+```bash
+python3 -c "import numpy as np; np.fromfile('genome.seq', np.uint8).astype('<u2').tofile('genome.u16')"
+```
+
+For LLM corpora, our evaluation uses infini-gram's `tokenized.N` layout, with the separator `0xFFFF` before each document.
 `dataset/tokenize-corpus.py` writes one from JSONL or Parquet files with any Hugging Face tokenizer of at most 65,535 tokens:
 
 ```bash
