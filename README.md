@@ -12,7 +12,7 @@ While LLM corpora motivate its design, nothing in it depends on them.
 Cascade can index any sequence of symbols, such as genome collections or plain bytes.
 
 <p align="center">
-  <img src="assets/build-throughput.png" width="720"
+  <img src="docs/assets/build-throughput.png" width="720"
        alt="Build throughput per corpus, Cascade against infini-gram and libsais">
 </p>
 

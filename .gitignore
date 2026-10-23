@@ -45,7 +45,7 @@ external/
 
 # local content
 scripts/local/
-docs/
+notes/
 benchmark/local.env
 dataset/local.env
 benchmark/local-node.md
@@ -53,6 +53,9 @@ logs/
 
 # docker-build
 build/
+
+# website build (mkdocs)
+site/
 
 # cache
 .cache/
