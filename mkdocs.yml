@@ -1,0 +1,45 @@
+site_name: Cascade
+site_description: GPU-accelerated out-of-core suffix array construction
+site_url: https://saltsystemslab.github.io/Cascade/
+site_author: Jamshed Khan and Prashant Pandey
+repo_url: https://github.com/saltsystemslab/Cascade
+repo_name: saltsystemslab/Cascade
+copyright: Copyright &copy; 2026 Jamshed Khan and Prashant Pandey. Licensed under the Apache License 2.0.
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: black
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+  icon:
+    repo: fontawesome/brands/github
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+
+exclude_docs: |
+  requirements.txt
