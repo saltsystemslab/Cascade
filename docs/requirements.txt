@@ -1,0 +1,4 @@
+# The website's toolchain: `pip install -r docs/requirements.txt`, then
+# `mkdocs serve` to preview, or `mkdocs build --strict` as the deploy does.
+mkdocs==1.6.1
+mkdocs-material==9.7.7
